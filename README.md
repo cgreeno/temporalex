@@ -49,29 +49,64 @@ Then follow the [Installation Guide](guides/introduction/installation.md).
 
 ## Quick Start
 
-### 1. Define an activity
+Build a checkout flow: charge the card, send a receipt, wait for shipping confirmation.
+
+### 1. Define activities
+
+Activities are where side effects live — API calls, database writes, emails.
 
 ```elixir
-defmodule MyApp.Activities.Greet do
+defmodule MyApp.Activities.Payments do
+  use Temporalex.Activity, start_to_close_timeout: 10_000
+
+  @impl true
+  def perform(%{order_id: order_id, amount: amount}) do
+    case PaymentService.charge(order_id, amount) do
+      {:ok, charge_id} -> {:ok, charge_id}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+end
+
+defmodule MyApp.Activities.Notifications do
   use Temporalex.Activity, start_to_close_timeout: 5_000
 
   @impl true
-  def perform(%{name: name}) do
-    {:ok, "Hello, #{name}!"}
+  def perform(%{email: email, charge_id: charge_id}) do
+    Mailer.send_receipt(email, charge_id)
+    {:ok, "sent"}
   end
 end
 ```
 
 ### 2. Define a workflow
 
+Workflows orchestrate activities. They're durable — if the server crashes after charging the card, it picks up at the receipt step, not the beginning.
+
 ```elixir
-defmodule MyApp.Workflows.GreetUser do
+defmodule MyApp.Workflows.Checkout do
   use Temporalex.Workflow
 
-  def run(%{"name" => name}) do
-    {:ok, greeting} = execute_activity(MyApp.Activities.Greet, %{name: name})
-    {:ok, greeting}
+  def run(%{"order_id" => order_id, "amount" => amount, "email" => email}) do
+    # Charge the card (retries automatically on transient failures)
+    {:ok, charge_id} = execute_activity(MyApp.Activities.Payments, %{
+      order_id: order_id, amount: amount
+    })
+
+    # Send receipt
+    {:ok, _} = execute_activity(MyApp.Activities.Notifications, %{
+      email: email, charge_id: charge_id
+    })
+
+    # Wait for warehouse to confirm shipping (could be hours or days)
+    set_state(%{status: "awaiting_shipment", charge_id: charge_id})
+    {:ok, tracking} = wait_for_signal("shipment_confirmed")
+
+    {:ok, %{charge_id: charge_id, tracking: tracking}}
   end
+
+  @impl Temporalex.Workflow
+  def handle_query("status", _args, state), do: {:reply, state}
 end
 ```
 
@@ -81,20 +116,36 @@ end
 children = [
   {Temporalex,
     name: MyApp.Temporal,
-    task_queue: "greetings",
-    workflows: [MyApp.Workflows.GreetUser],
-    activities: [MyApp.Activities.Greet]}
+    task_queue: "checkout",
+    workflows: [MyApp.Workflows.Checkout],
+    activities: [MyApp.Activities.Payments, MyApp.Activities.Notifications]}
 ]
 
 Supervisor.start_link(children, strategy: :one_for_one)
 ```
 
-### 4. Run a workflow
+### 4. Run it
 
 ```elixir
 conn = Temporalex.connection_name(MyApp.Temporal)
-{:ok, handle} = Temporalex.Client.start_workflow(conn, MyApp.Workflows.GreetUser, %{name: "Alice"})
-{:ok, "Hello, Alice!"} = Temporalex.Client.get_result(handle)
+
+# Start the checkout
+{:ok, handle} = Temporalex.Client.start_workflow(conn,
+  MyApp.Workflows.Checkout,
+  %{order_id: "ORD-42", amount: 99_00, email: "alice@example.com"},
+  id: "checkout-ORD-42", task_queue: "checkout"
+)
+
+# Check status while it's waiting for shipping
+{:ok, status} = Temporalex.Client.query_workflow(conn, "checkout-ORD-42", "status")
+# => %{status: "awaiting_shipment", charge_id: "ch_abc123"}
+
+# Warehouse confirms shipping (could be from another service, webhook, admin panel)
+Temporalex.Client.signal_workflow(conn, "checkout-ORD-42", "shipment_confirmed", "TRACK-789")
+
+# Get the final result
+{:ok, result} = Temporalex.Client.get_result(handle)
+# => %{charge_id: "ch_abc123", tracking: "TRACK-789"}
 ```
 
 ## Guides
