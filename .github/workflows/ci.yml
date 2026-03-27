@@ -26,6 +26,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install protoc
+        run: sudo apt-get install -y protobuf-compiler
+
       - name: Cache deps
         uses: actions/cache@v4
         with:
@@ -63,6 +66,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install protoc
+        run: sudo apt-get install -y protobuf-compiler
+
       - name: Cache deps
         uses: actions/cache@v4
         with:
@@ -98,6 +104,9 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get install -y protobuf-compiler
 
       - name: Cache deps
         uses: actions/cache@v4
