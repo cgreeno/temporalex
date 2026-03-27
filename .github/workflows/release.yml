@@ -54,7 +54,7 @@ jobs:
 
       - name: Publish to Hex (dry run)
         if: ${{ inputs.dry_run }}
-        run: mix hex.publish --dry-run
+        run: mix hex.publish --yes --dry-run
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
 
