@@ -1,0 +1,21 @@
+[package]
+name = "temporalex_native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "temporalex_native"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.37"
+temporalio-sdk-core = { git = "https://github.com/temporalio/sdk-core", rev = "5f79ef28684578c391b58bcc71afddb7c964d604", default-features = false }
+temporalio-client = { git = "https://github.com/temporalio/sdk-core", rev = "5f79ef28684578c391b58bcc71afddb7c964d604", features = ["core-based-sdk"] }
+temporalio-common = { git = "https://github.com/temporalio/sdk-core", rev = "5f79ef28684578c391b58bcc71afddb7c964d604" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+prost = "0.14"
+url = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+hex = "0.4"
