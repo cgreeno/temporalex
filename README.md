@@ -1,5 +1,10 @@
 # Temporalex
 
+[![CI](https://github.com/cgreeno/temporalex/actions/workflows/ci.yml/badge.svg)](https://github.com/cgreeno/temporalex/actions/workflows/ci.yml)
+[![Hex.pm](https://img.shields.io/hexpm/v/temporalex.svg)](https://hex.pm/packages/temporalex)
+[![Hex Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/temporalex)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Durable workflow orchestration for Elixir, built on the [Temporal](https://temporal.io) Rust Core SDK.
 
 Retries, timers, signals, queries, versioning, and child workflows — all backed by Temporal's battle-tested infrastructure, all feeling like native Elixir.
