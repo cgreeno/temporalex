@@ -298,17 +298,12 @@ defmodule Temporalex.Server do
               reason: inspect(reason)
             )
 
-            result = %ActivityExecutionResult{
-              status:
-                {:failed,
-                 %Coresdk.ActivityResult.Failure{
-                   failure: %Temporal.Api.Failure.V1.Failure{
-                     message: "Activity crashed: #{inspect(reason)}"
-                   }
-                 }}
-            }
+            send_activity_completion(
+              state,
+              task_token,
+              activity_failure("Activity crashed: #{inspect(reason)}")
+            )
 
-            send_activity_completion(state, task_token, result)
             {:noreply, %{state | activity_tasks: Map.delete(state.activity_tasks, task_ref)}}
 
           nil ->
@@ -461,15 +456,7 @@ defmodule Temporalex.Server do
       Logger.info("Cancelling in-flight activity", activity_type: activity_type)
       Process.demonitor(ref, [:flush])
 
-      cancelled_result = %Coresdk.ActivityResult.ActivityExecutionResult{
-        status:
-          {:failed,
-           %Coresdk.ActivityResult.Failure{
-             failure: %Temporal.Api.Failure.V1.Failure{message: "Server shutting down"}
-           }}
-      }
-
-      send_activity_completion(state, task_token, cancelled_result)
+      send_activity_completion(state, task_token, activity_failure("Server shutting down"))
     end
 
     # Stop the activity supervisor (kills remaining task processes)
@@ -1025,33 +1012,20 @@ defmodule Temporalex.Server do
         )
 
         msg = "Unknown activity type: #{activity_type}. Registered types: [#{registered}]"
-
-        result = %ActivityExecutionResult{
-          status:
-            {:failed,
-             %Coresdk.ActivityResult.Failure{
-               failure: %Temporal.Api.Failure.V1.Failure{message: msg}
-             }}
-        }
-
-        send_activity_completion(state, task_token, result)
+        send_activity_completion(state, task_token, activity_failure(msg))
         state
 
       {module, impl_fn} ->
         case decode_arguments(start.input) do
           {:error, reason} ->
-            result = %ActivityExecutionResult{
-              status:
-                {:failed,
-                 %Coresdk.ActivityResult.Failure{
-                   failure: %Temporal.Api.Failure.V1.Failure{
-                     message:
-                       "Failed to decode arguments for activity #{activity_type}: #{inspect(reason)}"
-                   }
-                 }}
-            }
+            send_activity_completion(
+              state,
+              task_token,
+              activity_failure(
+                "Failed to decode arguments for activity #{activity_type}: #{inspect(reason)}"
+              )
+            )
 
-            send_activity_completion(state, task_token, result)
             state
 
           args ->
@@ -1115,38 +1089,45 @@ defmodule Temporalex.Server do
             status: {:completed, %Coresdk.ActivityResult.Success{result: payload}}
           }
 
+        {:error, %{__exception__: true} = exception} ->
+          activity_failure(Temporalex.FailureConverter.to_failure(exception))
+
         {:error, reason} ->
-          %ActivityExecutionResult{
-            status:
-              {:failed,
-               %Coresdk.ActivityResult.Failure{
-                 failure: %Temporal.Api.Failure.V1.Failure{message: to_string(reason)}
-               }}
-          }
+          activity_failure(to_string(reason))
 
         other ->
-          %ActivityExecutionResult{
-            status:
-              {:failed,
-               %Coresdk.ActivityResult.Failure{
-                 failure: %Temporal.Api.Failure.V1.Failure{
-                   message: "Unexpected return: #{inspect(other)}"
-                 }
-               }}
-          }
+          activity_failure("Unexpected return: #{inspect(other)}")
       end
     rescue
       e ->
-        %ActivityExecutionResult{
-          status:
-            {:failed,
-             %Coresdk.ActivityResult.Failure{
-               failure: %Temporal.Api.Failure.V1.Failure{
-                 message: "Activity crashed: #{Exception.message(e)}"
-               }
-             }}
-        }
+        activity_failure("Activity crashed: #{Exception.message(e)}")
     end
+  end
+
+  # Build a properly-formatted activity failure with ApplicationFailureInfo.
+  # Temporal's server rejects failures without failure_info set.
+  defp activity_failure(%Temporal.Api.Failure.V1.Failure{} = failure) do
+    %ActivityExecutionResult{
+      status: {:failed, %Coresdk.ActivityResult.Failure{failure: failure}}
+    }
+  end
+
+  defp activity_failure(message) when is_binary(message) do
+    %ActivityExecutionResult{
+      status:
+        {:failed,
+         %Coresdk.ActivityResult.Failure{
+           failure: %Temporal.Api.Failure.V1.Failure{
+             message: message,
+             failure_info:
+               {:application_failure_info,
+                %Temporal.Api.Failure.V1.ApplicationFailureInfo{
+                  type: "ActivityError",
+                  non_retryable: false
+                }}
+           }
+         }}
+    }
   end
 
   defp send_activity_completion(state, task_token, result) do
