@@ -24,35 +24,35 @@ Everything that needs to happen after v0.1.0.
 
 ## v0.2 — Test Coverage
 
-### Unit tests (gaps)
+### Unit tests
 
-| # | Item | File |
-|---|------|------|
-| T1 | RetryPolicy — zero coverage (defaults, new/1, to_proto, ms_to_duration) | retry_policy.ex |
-| T2 | Activity perform/1 vs perform/2 compile-time enforcement | activity.ex |
-| T3 | Connection lifecycle (missing :name raises, defaults, get/1, terminate) | connection.ex |
-| T4 | Client internals (generate_workflow_id, encode_args, resolve_connection, decode_query_result) | client.ex |
-| T5 | Activity cancel race — server-level test (R4 from review) | server.ex |
-| T6 | Concurrent completion attribution test (R5 from review) | server.ex |
+| # | Item | Status |
+|---|------|--------|
+| T1 | RetryPolicy (defaults, new/1, to_proto, ms_to_duration) | DONE — 12 tests |
+| T2 | Activity perform/1 vs perform/2 compile-time enforcement | DONE — 6 tests |
+| T3 | Connection lifecycle (validation, defaults, get/1) | DONE — 7 tests |
+| T4 | Client internals (resolve_connection, argument validation) | DONE — 7 tests |
+| T5 | Activity cancel race — server-level test | DONE — 2 tests |
+| T6 | Concurrent completion attribution test | DONE — 3 tests |
 
-### E2E tests (gaps)
+### E2E tests
 
-| # | Item | Notes |
-|---|------|-------|
-| T7 | Workflow ID reuse — AlreadyStarted error | Every SDK tests this |
-| T8 | Parallel activities — fan-out 5 activities, collect results | Common pattern |
-| T9 | Child workflow lifecycle — start, result, failure, cancel | Currently untested E2E |
-| T10 | Saga pattern — activity fails, compensations run | #1 Temporal use case |
-| T11 | Activity retry exhausted — max_attempts reached, returns final error | |
-| T12 | Activity non-retryable error — stops immediately | |
-| T13 | Signal ordering — send A, B, C; receive A, B, C | FIFO guarantee |
-| T14 | Query after workflow completes | Should still work |
+| # | Item | Status |
+|---|------|--------|
+| T7 | Workflow ID reuse — AlreadyStarted error | DONE |
+| T8 | Parallel activities — fan-out 5 activities, collect results | TODO |
+| T9 | Child workflow lifecycle — start, result, failure, cancel | TODO |
+| T10 | Saga pattern — activity fails, compensations run | TODO |
+| T11 | Activity retry exhausted — max_attempts reached | DONE |
+| T12 | Activity non-retryable error — stops immediately | TODO |
+| T13 | Signal ordering — send A, B, C; receive A, B, C | DONE |
+| T14 | Query after workflow completes | DONE |
 
 ### Conformance tests
 
-| # | Item | Notes |
-|---|------|-------|
-| T15 | Start conformance suite against `temporalio/features` repo | 33 scenarios, 0 done |
+| # | Item | Status |
+|---|------|--------|
+| T15 | Start conformance suite against `temporalio/features` repo | TODO |
 
 ## Done (v0.1.0)
 
