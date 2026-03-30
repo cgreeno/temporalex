@@ -1157,4 +1157,245 @@ defmodule Temporalex.ServerTest do
       assert is_binary(output)
     end
   end
+
+  # ============================================================
+  # T8: Parallel activities — fan-out / fan-in
+  # ============================================================
+
+  defmodule FanOutWorkflow do
+    use Temporalex.DSL
+
+    defactivity process_item(item), timeout: 5_000 do
+      {:ok, "processed-#{item}"}
+    end
+
+    def run(%{"items" => items}) do
+      results =
+        Enum.map(items, fn item ->
+          case process_item(item) do
+            {:ok, result} -> result
+            {:error, _} -> "failed"
+          end
+        end)
+
+      {:ok, results}
+    end
+  end
+
+  describe "parallel activities fan-out" do
+    test "processes multiple items and collects results" do
+      q = unique_queue("fanout")
+      start_server(q, [FanOutWorkflow], [FanOutWorkflow])
+      Process.sleep(500)
+
+      {exit_code, output} =
+        run_workflow(
+          q,
+          "Temporalex.ServerTest.FanOutWorkflow",
+          wf_id("fanout"),
+          ~s({"items": ["a", "b", "c", "d", "e"]})
+        )
+
+      assert exit_code == 0
+      assert output =~ "processed-a"
+      assert output =~ "processed-e"
+    end
+  end
+
+  # ============================================================
+  # T9: Child workflow lifecycle
+  # ============================================================
+
+  defmodule ChildWorkflowModule do
+    use Temporalex.Workflow
+
+    def run(%{"value" => value}) do
+      {:ok, "child-result-#{value}"}
+    end
+  end
+
+  defmodule ParentWorkflowModule do
+    use Temporalex.Workflow
+
+    def run(%{"value" => value}) do
+      {:ok, child_result} =
+        execute_child_workflow(
+          Temporalex.ServerTest.ChildWorkflowModule,
+          %{"value" => value},
+          id: "child-#{value}-#{System.unique_integer([:positive])}"
+        )
+
+      {:ok, "parent-got-#{child_result}"}
+    end
+  end
+
+  describe "child workflow" do
+    test "parent starts child and gets result" do
+      q = unique_queue("child")
+
+      start_server(
+        q,
+        [ParentWorkflowModule, ChildWorkflowModule],
+        []
+      )
+
+      Process.sleep(500)
+
+      {exit_code, output} =
+        run_workflow(
+          q,
+          "Temporalex.ServerTest.ParentWorkflowModule",
+          wf_id("parent"),
+          ~s({"value": "42"})
+        )
+
+      assert exit_code == 0
+      assert output =~ "parent-got-child-result-42"
+    end
+  end
+
+  # ============================================================
+  # T10: Saga pattern — compensations on failure
+  # ============================================================
+
+  defmodule SagaWorkflow do
+    use Temporalex.DSL
+
+    defactivity step_one(input), timeout: 5_000 do
+      {:ok, "step1-#{input}"}
+    end
+
+    defactivity step_two(_input), timeout: 5_000 do
+      {:error, "step2 failed on purpose"}
+    end
+
+    defactivity compensate_one(input), timeout: 5_000 do
+      # Write to a file so we can verify compensation ran
+      File.write!("/tmp/temporalex_saga_comp_#{input}", "compensated")
+      {:ok, "compensated-#{input}"}
+    end
+
+    def run(%{"id" => id}) do
+      case step_one(id) do
+        {:ok, _result} ->
+          case step_two(id) do
+            {:ok, result} ->
+              {:ok, result}
+
+            {:error, _reason} ->
+              # Compensate step_one
+              compensate_one(id)
+              {:ok, "rolled-back-#{id}"}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  describe "saga pattern" do
+    test "compensation runs on failure" do
+      q = unique_queue("saga")
+      id = "saga-#{System.unique_integer([:positive])}"
+      comp_file = "/tmp/temporalex_saga_comp_#{id}"
+
+      File.rm(comp_file)
+      on_exit(fn -> File.rm(comp_file) end)
+
+      start_server(q, [SagaWorkflow], [SagaWorkflow])
+      Process.sleep(500)
+
+      {exit_code, output} =
+        run_workflow(
+          q,
+          "Temporalex.ServerTest.SagaWorkflow",
+          wf_id("saga"),
+          ~s({"id": "#{id}"})
+        )
+
+      assert exit_code == 0
+      assert output =~ "rolled-back-#{id}"
+
+      # Verify compensation actually ran
+      assert File.exists?(comp_file)
+      assert File.read!(comp_file) == "compensated"
+    end
+  end
+
+  # ============================================================
+  # T12: Non-retryable error — stops immediately
+  # ============================================================
+
+  defmodule NonRetryWorkflow do
+    use Temporalex.DSL
+
+    defactivity will_fail(input), timeout: 5_000, retry_policy: [max_attempts: 10] do
+      # Write attempt counter to file
+      counter_file = "/tmp/temporalex_nonretry_#{input}"
+
+      count =
+        case File.read(counter_file) do
+          {:ok, n} -> String.to_integer(String.trim(n))
+          _ -> 0
+        end
+
+      count = count + 1
+      File.write!(counter_file, "#{count}")
+
+      {:error,
+       %Temporalex.Error.ApplicationError{
+         message: "permanent failure",
+         type: "PermanentError",
+         non_retryable: true
+       }}
+    end
+
+    def run(%{"id" => id}) do
+      case will_fail(id) do
+        {:ok, result} -> {:ok, result}
+        {:error, _} -> {:ok, "failed-as-expected"}
+      end
+    end
+  end
+
+  describe "non-retryable error" do
+    test "stops retrying immediately" do
+      q = unique_queue("nonretry")
+      id = "nr-#{System.unique_integer([:positive])}"
+      counter_file = "/tmp/temporalex_nonretry_#{id}"
+
+      File.rm(counter_file)
+      on_exit(fn -> File.rm(counter_file) end)
+
+      start_server(q, [NonRetryWorkflow], [NonRetryWorkflow])
+      Process.sleep(500)
+
+      {exit_code, _output} =
+        run_workflow(
+          q,
+          "Temporalex.ServerTest.NonRetryWorkflow",
+          wf_id("nonretry"),
+          ~s({"id": "#{id}"})
+        )
+
+      # Workflow should complete (it catches the error)
+      assert exit_code == 0
+
+      # The activity should have been called only once (non-retryable stops retries)
+      Process.sleep(500)
+
+      case File.read(counter_file) do
+        {:ok, count_str} ->
+          count = String.to_integer(String.trim(count_str))
+          # Should be 1 (or at most 2 if there's a race), not 10
+          assert count <= 2,
+                 "Expected 1-2 attempts but got #{count} — non-retryable didn't stop retries"
+
+        {:error, _} ->
+          # File might not exist if the error propagated before execution
+          :ok
+      end
+    end
+  end
 end

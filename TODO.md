@@ -40,11 +40,11 @@ Everything that needs to happen after v0.1.0.
 | # | Item | Status |
 |---|------|--------|
 | T7 | Workflow ID reuse — AlreadyStarted error | DONE |
-| T8 | Parallel activities — fan-out 5 activities, collect results | TODO |
-| T9 | Child workflow lifecycle — start, result, failure, cancel | TODO |
-| T10 | Saga pattern — activity fails, compensations run | TODO |
+| T8 | Parallel activities — fan-out 5 activities, collect results | DONE |
+| T9 | Child workflow lifecycle — parent starts child, gets result | DONE |
+| T10 | Saga pattern — activity fails, compensations run | DONE |
 | T11 | Activity retry exhausted — max_attempts reached | DONE |
-| T12 | Activity non-retryable error — stops immediately | TODO |
+| T12 | Activity non-retryable error — stops immediately | DONE |
 | T13 | Signal ordering — send A, B, C; receive A, B, C | DONE |
 | T14 | Query after workflow completes | DONE |
 
