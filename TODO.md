@@ -41,7 +41,7 @@ Everything that needs to happen after v0.1.0.
 |---|------|--------|
 | T7 | Workflow ID reuse — AlreadyStarted error | DONE |
 | T8 | Parallel activities — fan-out 5 activities, collect results | DONE |
-| T9 | Child workflow lifecycle — parent starts child, gets result | DONE |
+| T9 | Child workflow lifecycle — parent starts child, gets result | SKIPPED — dispatch timing issue, needs investigation |
 | T10 | Saga pattern — activity fails, compensations run | DONE |
 | T11 | Activity retry exhausted — max_attempts reached | DONE |
 | T12 | Activity non-retryable error — stops immediately | DONE |
@@ -58,7 +58,7 @@ Everything that needs to happen after v0.1.0.
 
 All completed during architecture review sessions:
 
-### Bugs (10)
+### Bugs (11)
 - [x] BUG-1: NIF send_and_clear silent failures (12 sites)
 - [x] BUG-3: ChildWorkflowFailure missing from FailureConverter
 - [x] BUG-4: NIF resource lifetime not enforced
@@ -69,6 +69,7 @@ All completed during architecture review sessions:
 - [x] FIX-3: completing_run_id global attribution
 - [x] FIX-4: Telemetry duration always zero
 - [x] FIX-5: connect_client DirtyCpu -> DirtyIo
+- [x] FIX-6: Activity failures missing ApplicationFailureInfo (Temporal server rejects bare Failure protos)
 
 ### Reliability (5)
 - [x] Poll failure exponential backoff with jitter
