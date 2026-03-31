@@ -91,4 +91,4 @@ For Temporal Cloud instead of local dev:
 
 ## What's Next
 
-You're connected. Now let's [write your first workflow](workflows.md).
+You're connected. Now let's [write your first workflow](../learning/workflows.md).

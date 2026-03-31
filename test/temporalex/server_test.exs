@@ -1070,7 +1070,7 @@ defmodule Temporalex.ServerTest do
       end
 
       # Get result
-      {output, _} =
+      {_query_output, _} =
         temporal_cli([
           "workflow",
           "query",
@@ -1141,7 +1141,7 @@ defmodule Temporalex.ServerTest do
       Process.sleep(1_000)
 
       # Query after completion — should still return state
-      {output, exit_code} =
+      {output, _exit_code} =
         temporal_cli([
           "workflow",
           "query",
@@ -1231,9 +1231,8 @@ defmodule Temporalex.ServerTest do
   end
 
   describe "child workflow" do
-    @tag :skip
     @tag timeout: 180_000
-    test "parent starts child and gets result (requires investigation — child workflow dispatch timing)" do
+    test "parent starts child and gets result" do
       q = unique_queue("child")
 
       start_server(

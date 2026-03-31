@@ -41,7 +41,7 @@ Everything that needs to happen after v0.1.0.
 |---|------|--------|
 | T7 | Workflow ID reuse — AlreadyStarted error | DONE |
 | T8 | Parallel activities — fan-out 5 activities, collect results | DONE |
-| T9 | Child workflow lifecycle — parent starts child, gets result | SKIPPED — dispatch timing issue, needs investigation |
+| T9 | Child workflow lifecycle — parent starts child, gets result | DONE |
 | T10 | Saga pattern — activity fails, compensations run | DONE |
 | T11 | Activity retry exhausted — max_attempts reached | DONE |
 | T12 | Activity non-retryable error — stops immediately | DONE |

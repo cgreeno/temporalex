@@ -557,14 +557,29 @@ defmodule Temporalex.Server do
 
     # Init — spawn executor with replay results from same activation
     {init_dispatched?, init_cmds, state} =
-      dispatch_init(jobs.inits, activation, jobs.resolves, jobs.timers, jobs.patches, state)
+      dispatch_init(
+        jobs.inits,
+        activation,
+        jobs.resolves,
+        jobs.child_resolves,
+        jobs.timers,
+        jobs.patches,
+        state
+      )
 
     # Resolutions for continuing workflows (not consumed by init)
     {res_dispatched?, resolution_cmds, state} =
       if init_dispatched? do
         {false, [], state}
       else
-        dispatch_resolutions(jobs.resolves, jobs.timers, jobs.signals, activation, state)
+        dispatch_resolutions(
+          jobs.resolves,
+          jobs.child_resolves,
+          jobs.timers,
+          jobs.signals,
+          activation,
+          state
+        )
       end
 
     # Queries (inline, no executor interaction)
@@ -595,6 +610,8 @@ defmodule Temporalex.Server do
       %{
         inits: [],
         resolves: [],
+        child_starts: [],
+        child_resolves: [],
         timers: [],
         signals: [],
         queries: [],
@@ -604,14 +621,35 @@ defmodule Temporalex.Server do
       },
       fn job, acc ->
         case job.variant do
-          {:initialize_workflow, j} -> %{acc | inits: [j | acc.inits]}
-          {:resolve_activity, j} -> %{acc | resolves: [j | acc.resolves]}
-          {:fire_timer, j} -> %{acc | timers: [j | acc.timers]}
-          {:signal_workflow, j} -> %{acc | signals: [j | acc.signals]}
-          {:query_workflow, j} -> %{acc | queries: [j | acc.queries]}
-          {:notify_has_patch, j} -> %{acc | patches: [j | acc.patches]}
-          {:do_update, j} -> %{acc | updates: [j | acc.updates]}
-          _ -> %{acc | others: [job | acc.others]}
+          {:initialize_workflow, j} ->
+            %{acc | inits: [j | acc.inits]}
+
+          {:resolve_activity, j} ->
+            %{acc | resolves: [j | acc.resolves]}
+
+          {:resolve_child_workflow_execution_start, j} ->
+            %{acc | child_starts: [j | acc.child_starts]}
+
+          {:resolve_child_workflow_execution, j} ->
+            %{acc | child_resolves: [j | acc.child_resolves]}
+
+          {:fire_timer, j} ->
+            %{acc | timers: [j | acc.timers]}
+
+          {:signal_workflow, j} ->
+            %{acc | signals: [j | acc.signals]}
+
+          {:query_workflow, j} ->
+            %{acc | queries: [j | acc.queries]}
+
+          {:notify_has_patch, j} ->
+            %{acc | patches: [j | acc.patches]}
+
+          {:do_update, j} ->
+            %{acc | updates: [j | acc.updates]}
+
+          _ ->
+            %{acc | others: [job | acc.others]}
         end
       end
     )
@@ -621,10 +659,18 @@ defmodule Temporalex.Server do
   # Initialize workflow — spawn executor
   # ============================================================
 
-  defp dispatch_init([], _activation, _resolves, _timers, _patches, state),
+  defp dispatch_init([], _activation, _resolves, _child_resolves, _timers, _patches, state),
     do: {false, [], state}
 
-  defp dispatch_init([init | _], activation, resolve_jobs, timer_jobs, patches, state) do
+  defp dispatch_init(
+         [init | _],
+         activation,
+         resolve_jobs,
+         child_resolve_jobs,
+         timer_jobs,
+         patches,
+         state
+       ) do
     workflow_type = init.workflow_type
 
     case Map.get(state.workflow_map, workflow_type) do
@@ -654,7 +700,7 @@ defmodule Temporalex.Server do
              ], state}
 
           args ->
-            replay_results = extract_replay_results(resolve_jobs, timer_jobs)
+            replay_results = extract_replay_results(resolve_jobs, child_resolve_jobs, timer_jobs)
             patch_ids = MapSet.new(patches, fn p -> p.patch_id end)
 
             workflow_info = %{
@@ -710,8 +756,8 @@ defmodule Temporalex.Server do
   # Resolutions — deliver to executor, collect output
   # ============================================================
 
-  defp dispatch_resolutions(resolves, timers, signals, activation, state) do
-    if resolves == [] and timers == [] and signals == [] do
+  defp dispatch_resolutions(resolves, child_resolves, timers, signals, activation, state) do
+    if resolves == [] and child_resolves == [] and timers == [] and signals == [] do
       {false, [], state}
     else
       case Map.get(state.executors, activation.run_id) do
@@ -737,6 +783,12 @@ defmodule Temporalex.Server do
           # Deliver activity results
           for resolve <- resolves do
             result = extract_activity_result(resolve)
+            send(pid, {:resolve_activity, resolve.seq, result})
+          end
+
+          # Deliver child workflow results (same message format as activities)
+          for resolve <- child_resolves do
+            result = extract_child_workflow_result(resolve)
             send(pid, {:resolve_activity, resolve.seq, result})
           end
 
@@ -1210,10 +1262,46 @@ defmodule Temporalex.Server do
     end
   end
 
-  defp extract_replay_results(resolve_jobs, timer_jobs) do
+  defp extract_child_workflow_result(resolve) do
+    case resolve.result do
+      %{status: {:completed, %{result: payload}}} when not is_nil(payload) ->
+        case Temporalex.Converter.from_payload(payload) do
+          {:ok, value} -> {:ok, value}
+          {:error, reason} -> {:error, reason}
+        end
+
+      %{status: {:completed, _}} ->
+        {:ok, nil}
+
+      %{status: {:failed, failure}} ->
+        if failure.failure do
+          {:error, Temporalex.FailureConverter.from_failure(failure.failure)}
+        else
+          {:error, %Temporalex.Error.ChildWorkflowFailure{message: "unknown failure"}}
+        end
+
+      %{status: {:cancelled, cancellation}} ->
+        if cancellation.failure do
+          {:error, Temporalex.FailureConverter.from_failure(cancellation.failure)}
+        else
+          {:error, %Temporalex.Error.CancelledError{message: "child workflow cancelled"}}
+        end
+
+      other ->
+        {:error, %Temporalex.Error.ApplicationError{message: "unexpected: #{inspect(other)}"}}
+    end
+  end
+
+  defp extract_replay_results(resolve_jobs, child_resolve_jobs, timer_jobs) do
     resolves = Map.new(resolve_jobs, fn r -> {r.seq, {:activity, extract_activity_result(r)}} end)
+
+    child_resolves =
+      Map.new(child_resolve_jobs, fn r ->
+        {r.seq, {:activity, extract_child_workflow_result(r)}}
+      end)
+
     timers = Map.new(timer_jobs, fn t -> {t.seq, {:timer, :ok}} end)
-    Map.merge(resolves, timers)
+    resolves |> Map.merge(child_resolves) |> Map.merge(timers)
   end
 
   defp build_workflow_map(workflows) do
