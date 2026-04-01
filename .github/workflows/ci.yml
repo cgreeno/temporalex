@@ -89,6 +89,7 @@ jobs:
           restore-keys: ${{ runner.os }}-rust-
 
       - run: mix deps.get
+      - run: mix compile
       - run: mix test --exclude e2e
 
   e2e:

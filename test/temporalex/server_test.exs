@@ -121,6 +121,7 @@ defmodule Temporalex.ServerTest do
         max_attempts: 3,
         backoff_coefficient: 1.0
       ] do
+      _ = input
       # Track attempts via a file to count retries across activity invocations
       path = "/tmp/temporalex_retry_count_#{System.get_env("RETRY_TEST_ID", "default")}"
 
@@ -978,6 +979,8 @@ defmodule Temporalex.ServerTest do
     use Temporalex.DSL
 
     defactivity always_fail(input), timeout: 5_000, retry_policy: [max_attempts: 5] do
+      _ = input
+
       {:error,
        %Temporalex.Error.ApplicationError{
          message: "permanent failure",
@@ -1267,7 +1270,8 @@ defmodule Temporalex.ServerTest do
       {:ok, "step1-#{input}"}
     end
 
-    defactivity step_two(_input), timeout: 5_000 do
+    defactivity step_two(input), timeout: 5_000 do
+      _ = input
       {:error, "step2 failed on purpose"}
     end
 

@@ -33,7 +33,7 @@ defmodule Temporalex.BugfixReviewTest do
       send(executor, {:start, nil, []})
 
       # Executor should stay alive and workflow should complete (with error result)
-      assert_receive {:executor_commands, "fix1-run", [command], nil, :done}, 2_000
+      assert_receive {:executor_commands, "fix1-run", [_command], nil, :done}, 2_000
 
       # The executor process should still be alive
       assert Process.alive?(executor)
