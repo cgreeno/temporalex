@@ -1,0 +1,19 @@
+/_build/
+/deps/
+/doc/
+*.ez
+*.beam
+temporalex-*.tar
+
+# Rust
+/native/temporalex_native/target/
+
+# Compiled NIF
+/priv/native/
+
+# IDE
+.elixir_ls/
+.vscode/
+
+# OS
+.DS_Store
