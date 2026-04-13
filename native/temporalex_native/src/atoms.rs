@@ -62,6 +62,16 @@ rustler::atoms! {
     cancelled,
     backoff,
     successful,
+    succeeded,
+
+    // Proto bridge: commands
+    schedule_activity,
+    start_timer,
+    complete_workflow_execution,
+    fail_workflow_execution,
+    continue_as_new,
+    respond_to_query,
+    set_patch_marker,
 
     // Proto bridge: removal reasons
     cache_full,

@@ -42,6 +42,7 @@ defmodule Temporalex.Worker do
   def init(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
     activity_sup = Module.concat(name, ActivitySupervisor)
+    executor_sup = Module.concat(name, ExecutorSupervisor)
 
     config = %{
       url: Keyword.fetch!(opts, :url),
@@ -52,11 +53,13 @@ defmodule Temporalex.Worker do
       api_key: Keyword.get(opts, :api_key),
       headers: Keyword.get(opts, :headers, %{}),
       max_cached_workflows: Keyword.get(opts, :max_cached_workflows, 1000),
-      activity_supervisor: activity_sup
+      activity_supervisor: activity_sup,
+      executor_supervisor: executor_sup
     }
 
     children = [
       {Task.Supervisor, name: activity_sup},
+      {DynamicSupervisor, name: executor_sup, strategy: :one_for_one},
       {Temporalex.Worker.Server, config}
     ]
 

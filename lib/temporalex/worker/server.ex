@@ -137,8 +137,9 @@ defmodule Temporalex.Worker.Server do
     end
   end
 
-  # Task crash / exit
-  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+  # Task crash / exit / executor crash
+  def handle_info({:DOWN, ref, :process, pid, reason}, state) do
+    # Check if it's an activity task
     case Map.pop(state.activity_tasks, ref) do
       {%{task_token: token}, remaining} ->
         message = Exception.format(:exit, reason)
@@ -146,7 +147,15 @@ defmodule Temporalex.Worker.Server do
         {:noreply, %{state | activity_tasks: remaining}}
 
       {nil, _} ->
-        {:noreply, state}
+        # Check if it's an executor
+        case Enum.find(state.executors, fn {_run_id, exec_pid} -> exec_pid == pid end) do
+          {run_id, _} ->
+            Logger.warning("Executor for #{run_id} exited: #{inspect(reason)}")
+            {:noreply, %{state | executors: Map.delete(state.executors, run_id)}}
+
+          nil ->
+            {:noreply, state}
+        end
     end
   end
 
@@ -198,18 +207,63 @@ defmodule Temporalex.Worker.Server do
       end)
 
     if eviction_only? do
+      # Handle eviction: stop executor if exists, send empty completion
+      case Map.get(state.executors, activation.run_id) do
+        nil -> :ok
+        pid -> DynamicSupervisor.terminate_child(state.config.executor_supervisor, pid)
+      end
+
       send_workflow_completion(activation.run_id, {:successful, []}, state)
       executors = Map.delete(state.executors, activation.run_id)
       {:noreply, %{state | executors: executors}}
     else
-      # Production executor not yet implemented — log and send empty completion
-      Logger.warning(
-        "Workflow activation received but executor not yet implemented (run_id: #{activation.run_id})"
-      )
+      # Find or create executor for this run_id
+      {executor_pid, state} = get_or_create_executor(activation, state)
 
-      send_workflow_completion(activation.run_id, {:successful, []}, state)
+      # Forward the full activation to the executor
+      send(executor_pid, {:activation, activation})
+
       {:noreply, state}
     end
+  end
+
+  defp get_or_create_executor(activation, state) do
+    case Map.get(state.executors, activation.run_id) do
+      nil ->
+        # Find workflow module from initialize_workflow job
+        workflow_module = find_workflow_module(activation.jobs, state)
+
+        opts = %{
+          server_pid: self(),
+          worker: state.worker,
+          run_id: activation.run_id,
+          task_queue: state.config.task_queue,
+          workflow_module: workflow_module
+        }
+
+        {:ok, pid} =
+          DynamicSupervisor.start_child(
+            state.config.executor_supervisor,
+            {Temporalex.Worker.Executor, opts}
+          )
+
+        Process.monitor(pid)
+        executors = Map.put(state.executors, activation.run_id, pid)
+        {pid, %{state | executors: executors}}
+
+      pid ->
+        {pid, state}
+    end
+  end
+
+  defp find_workflow_module(jobs, state) do
+    Enum.find_value(jobs, fn
+      {:initialize_workflow, %{workflow_type: wf_type}} ->
+        Map.get(state.workflow_registry, wf_type)
+
+      _ ->
+        nil
+    end)
   end
 
   # --- Private: activity handling ---

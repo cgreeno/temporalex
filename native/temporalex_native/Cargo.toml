@@ -15,6 +15,7 @@ temporalio-client = { git = "https://github.com/temporalio/sdk-core", rev = "5f7
 temporalio-common = { git = "https://github.com/temporalio/sdk-core", rev = "5f79ef28684578c391b58bcc71afddb7c964d604" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 prost = "0.14"
+prost-wkt-types = "0.7"
 url = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

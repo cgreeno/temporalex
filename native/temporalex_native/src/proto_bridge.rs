@@ -269,14 +269,13 @@ fn encode_workflow_completion<'a>(
     let (tag, value): (rustler::Atom, Term<'a>) = status.decode()?;
 
     let completion_status = if tag == atoms::successful() {
-        let commands: Vec<Term<'a>> = value.decode()?;
-        if !commands.is_empty() {
-            return Err(rustler::Error::Term(Box::new(
-                "command encoding not yet implemented",
-            )));
-        }
+        let command_terms: Vec<Term<'a>> = value.decode()?;
+        let commands: Vec<temporalio_common::protos::coresdk::workflow_commands::WorkflowCommand> = command_terms
+            .iter()
+            .filter_map(|cmd| decode_workflow_command(env, *cmd).ok())
+            .collect();
         workflow_activation_completion::Status::Successful(workflow_completion::Success {
-            commands: vec![],
+            commands,
             ..Default::default()
         })
     } else if tag == atoms::failed() {
@@ -307,6 +306,140 @@ fn encode_workflow_completion<'a>(
     let bytes = Message::encode_to_vec(&completion);
     let bin = helpers::make_binary(env, &bytes);
     Ok(enc(&(atoms::ok(), bin), env))
+}
+
+fn decode_workflow_command<'a>(
+    env: Env<'a>,
+    cmd: Term<'a>,
+) -> NifResult<temporalio_common::protos::coresdk::workflow_commands::WorkflowCommand> {
+    use temporalio_common::protos::coresdk::workflow_commands::{self, *};
+    use temporalio_common::protos::coresdk::workflow_commands::workflow_command;
+
+    let (tag, info): (rustler::Atom, Term<'a>) = cmd.decode()?;
+
+    let variant = if tag == atoms::schedule_activity() {
+        let seq: u32 = get_map_val(env, info, atoms::seq())?;
+        let activity_type: String = get_map_val(env, info, atoms::activity_type())?;
+        let task_queue: String = get_map_val_or(env, info, atoms::task_queue(), String::new());
+        let input_terms: Vec<Term> = get_map_val_or(env, info, atoms::input(), vec![]);
+        let timeout: u64 = get_map_val_or(env, info, atoms::schedule_to_close_timeout_ms(), 30000);
+
+        let input: Vec<_> = input_terms
+            .into_iter()
+            .filter_map(|t| encode_payload_from_term(env, t).ok())
+            .collect();
+
+        workflow_command::Variant::ScheduleActivity(ScheduleActivity {
+            seq,
+            activity_type,
+            task_queue,
+            arguments: input,
+            schedule_to_close_timeout: Some(ms_to_duration(timeout)),
+            ..Default::default()
+        })
+    } else if tag == atoms::start_timer() {
+        let seq: u32 = get_map_val(env, info, atoms::seq())?;
+        let ms: u64 = get_map_val(env, info, atoms::start_to_fire_timeout_ms())?;
+
+        workflow_command::Variant::StartTimer(StartTimer {
+            seq,
+            start_to_fire_timeout: Some(ms_to_duration(ms)),
+        })
+    } else if tag == atoms::complete_workflow_execution() {
+        let result_term = info.map_get(enc(&atoms::result(), env)).ok();
+        let result = result_term.and_then(|t| encode_payload_from_term(env, t).ok());
+
+        workflow_command::Variant::CompleteWorkflowExecution(CompleteWorkflowExecution {
+            result,
+        })
+    } else if tag == atoms::fail_workflow_execution() {
+        let msg: String = get_map_val_or(env, info, atoms::message(), "unknown".into());
+
+        workflow_command::Variant::FailWorkflowExecution(FailWorkflowExecution {
+            failure: Some(temporalio_common::protos::temporal::api::failure::v1::Failure {
+                message: msg,
+                ..Default::default()
+            }),
+        })
+    } else if tag == atoms::continue_as_new() {
+        let wf_type: String = get_map_val_or(env, info, atoms::workflow_type(), String::new());
+        let arg_terms: Vec<Term> = get_map_val_or(env, info, atoms::arguments(), vec![]);
+        let args: Vec<_> = arg_terms
+            .into_iter()
+            .filter_map(|t| encode_payload_from_term(env, t).ok())
+            .collect();
+
+        workflow_command::Variant::ContinueAsNewWorkflowExecution(ContinueAsNewWorkflowExecution {
+            workflow_type: wf_type,
+            arguments: args,
+            ..Default::default()
+        })
+    } else if tag == atoms::respond_to_query() {
+        let query_id: String = get_map_val(env, info, atoms::query_id())?;
+
+        // Try to get succeeded.response
+        let succeeded = info.map_get(enc(&atoms::succeeded(), env)).ok();
+        let response = succeeded
+            .and_then(|s| s.map_get(enc(&atoms::result(), env)).ok())
+            .and_then(|t| encode_payload_from_term(env, t).ok());
+
+        workflow_command::Variant::RespondToQuery(QueryResult {
+            query_id,
+            variant: Some(query_result::Variant::Succeeded(QuerySuccess {
+                response,
+            })),
+        })
+    } else if tag == atoms::set_patch_marker() {
+        let patch_id: String = get_map_val(env, info, atoms::patch_id())?;
+        let deprecated: bool = get_map_val_or(env, info, atoms::deprecated(), false);
+
+        workflow_command::Variant::SetPatchMarker(SetPatchMarker {
+            patch_id,
+            deprecated,
+            ..Default::default()
+        })
+    } else {
+        return Err(rustler::Error::Term(Box::new(format!(
+            "unknown command type"
+        ))));
+    };
+
+    Ok(WorkflowCommand {
+        variant: Some(variant),
+        ..Default::default()
+    })
+}
+
+/// Convert milliseconds to Duration
+fn ms_to_duration(ms: u64) -> prost_wkt_types::Duration {
+    prost_wkt_types::Duration {
+        seconds: (ms / 1000) as i64,
+        nanos: ((ms % 1000) * 1_000_000) as i32,
+    }
+}
+
+/// Get a required map field by atom key
+fn get_map_val<'a, T: rustler::Decoder<'a>>(
+    env: Env<'a>,
+    map: Term<'a>,
+    key: rustler::Atom,
+) -> NifResult<T> {
+    map.map_get(enc(&key, env))
+        .map_err(|_| rustler::Error::Term(Box::new(format!("missing key"))))?
+        .decode()
+}
+
+/// Get an optional map field with a default
+fn get_map_val_or<'a, T: rustler::Decoder<'a>>(
+    env: Env<'a>,
+    map: Term<'a>,
+    key: rustler::Atom,
+    default: T,
+) -> T {
+    map.map_get(enc(&key, env))
+        .ok()
+        .and_then(|t| t.decode().ok())
+        .unwrap_or(default)
 }
 
 // ---------------------------------------------------------------------------

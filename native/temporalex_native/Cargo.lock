@@ -2187,6 +2187,7 @@ name = "temporalex_native"
 version = "0.2.0"
 dependencies = [
  "prost",
+ "prost-wkt-types",
  "rustler",
  "temporalio-client",
  "temporalio-common",
