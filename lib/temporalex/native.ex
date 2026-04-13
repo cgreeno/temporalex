@@ -33,7 +33,17 @@ defmodule Temporalex.Native do
   # Sends {:shutdown_complete, :ok}
   def shutdown_worker(_worker, _pid), do: :erlang.nif_error(:nif_not_loaded)
 
-  # --- Client operations ---
-  # Deferred to Phase 3 (start_workflow, signal_workflow, query_workflow, etc.)
-  # These use the higher-level Client API, not the Worker-level SDK.
+  # --- Proto bridge (sync, DirtyCpu) ---
+
+  # Decodes WorkflowActivation protobuf → {:ok, %{run_id, is_replaying, jobs}}
+  def decode_workflow_activation(_bytes), do: :erlang.nif_error(:nif_not_loaded)
+
+  # Decodes ActivityTask protobuf → {:ok, %{task_token, variant}}
+  def decode_activity_task(_bytes), do: :erlang.nif_error(:nif_not_loaded)
+
+  # Encodes workflow completion → {:ok, protobuf_bytes}
+  def encode_workflow_completion(_run_id, _status), do: :erlang.nif_error(:nif_not_loaded)
+
+  # Encodes activity result → {:ok, protobuf_bytes}
+  def encode_activity_result(_task_token, _result), do: :erlang.nif_error(:nif_not_loaded)
 end
