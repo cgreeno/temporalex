@@ -166,7 +166,7 @@ defmodule Temporalex.Worker.Executor do
             pending_calls: Map.put(state.pending_calls, seq, from)
         }
 
-        {:noreply, state}
+        flush_commands(state)
     end
   end
 
@@ -186,7 +186,7 @@ defmodule Temporalex.Worker.Executor do
             pending_calls: Map.put(state.pending_calls, seq, from)
         }
 
-        {:noreply, state}
+        flush_commands(state)
     end
   end
 
@@ -777,26 +777,27 @@ defmodule Temporalex.Worker.Executor do
 
   # --- Private: command flushing ---
 
+  # Flush immediately — called when the runner yields (blocks on a call)
+  defp flush_commands(%{commands: []} = state), do: {:noreply, state}
+
+  defp flush_commands(state) do
+    commands = Enum.reverse(state.commands)
+
+    case Temporalex.Native.encode_workflow_completion(state.run_id, {:successful, commands}) do
+      {:ok, bytes} ->
+        Temporalex.Native.complete_workflow_activation(state.worker, bytes, self())
+
+      {:error, reason} ->
+        Logger.error("Failed to encode completion: #{inspect(reason)}")
+    end
+
+    {:noreply, %{state | commands: []}}
+  end
+
+  # Flush at end of activation processing — only if there are commands ready
   defp maybe_flush_commands(state) do
-    # Flush when: runner is blocked (no pending runner calls and runner exists),
-    # runner is done, or we have commands to send and no in-flight work
-    should_flush =
-      state.status == :done or
-        (state.commands != [] and map_size(state.pending_calls) == 0 and
-           state.sync_handler_pid == nil)
-
-    if should_flush and state.commands != [] do
-      commands = Enum.reverse(state.commands)
-
-      case Temporalex.Native.encode_workflow_completion(state.run_id, {:successful, commands}) do
-        {:ok, bytes} ->
-          Temporalex.Native.complete_workflow_activation(state.worker, bytes, self())
-
-        {:error, reason} ->
-          Logger.error("Failed to encode completion: #{inspect(reason)}")
-      end
-
-      {:noreply, %{state | commands: []}}
+    if state.commands != [] do
+      flush_commands(state)
     else
       {:noreply, state}
     end

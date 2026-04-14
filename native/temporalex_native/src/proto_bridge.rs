@@ -331,6 +331,7 @@ fn decode_workflow_command<'a>(
 
         workflow_command::Variant::ScheduleActivity(ScheduleActivity {
             seq,
+            activity_id: seq.to_string(),
             activity_type,
             task_queue,
             arguments: input,

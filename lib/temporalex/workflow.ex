@@ -31,7 +31,9 @@ defmodule Temporalex.Workflow do
       @before_compile Temporalex.Workflow
 
       @doc false
-      def __temporal_workflow_type__, do: to_string(__MODULE__)
+      def __temporal_workflow_type__ do
+        __MODULE__ |> to_string() |> String.trim_leading("Elixir.")
+      end
 
       @doc false
       def handle_query(_name, _args, _state), do: {:reply, nil}
