@@ -46,4 +46,18 @@ defmodule Temporalex.Native do
 
   # Encodes activity result → {:ok, protobuf_bytes}
   def encode_activity_result(_task_token, _result), do: :erlang.nif_error(:nif_not_loaded)
+
+  # --- Client operations (async, send result to pid) ---
+
+  def start_workflow(_client, _ns, _wf_id, _wf_type, _tq, _input, _req_id, _pid),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def signal_workflow(_client, _ns, _wf_id, _run_id, _signal, _input, _req_id, _pid),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def query_workflow(_client, _ns, _wf_id, _run_id, _query_type, _args, _pid),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def cancel_workflow(_client, _ns, _wf_id, _run_id, _reason, _req_id, _pid),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

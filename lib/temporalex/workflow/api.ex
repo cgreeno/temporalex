@@ -94,6 +94,16 @@ defmodule Temporalex.Workflow.API do
   end
 
   @doc """
+  Start a child workflow. Blocks until the child completes or fails.
+
+  Options: `:workflow_id`, `:task_queue`, `:cancellation_type`, `:parent_close_policy`.
+  """
+  def start_child_workflow(module, args, opts \\ []) do
+    workflow_type = module.__temporal_workflow_type__()
+    GenServer.call(executor(), {:start_child_workflow, workflow_type, args, opts}, :infinity)
+  end
+
+  @doc """
   Execute functions concurrently. Blocks until all complete.
   Returns results in the same order as input functions.
   """

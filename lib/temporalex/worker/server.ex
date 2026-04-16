@@ -284,6 +284,8 @@ defmodule Temporalex.Worker.Server do
       {module, function} ->
         args = Temporalex.Converter.decode_args(info.input)
 
+        cancel_ref = Temporalex.Activity.Context.new_cancel_ref()
+
         ctx = %Temporalex.Activity.Context{
           task_token: task_token,
           activity_id: info.activity_id,
@@ -293,7 +295,8 @@ defmodule Temporalex.Worker.Server do
           workflow_id: info.workflow_id,
           workflow_namespace: info.workflow_namespace,
           worker: state.worker,
-          server_pid: self()
+          server_pid: self(),
+          cancel_ref: cancel_ref
         }
 
         task =
@@ -305,15 +308,30 @@ defmodule Temporalex.Worker.Server do
             end
           )
 
-        activity_tasks = Map.put(state.activity_tasks, task.ref, %{task_token: task_token})
+        activity_tasks =
+          Map.put(state.activity_tasks, task.ref, %{
+            task_token: task_token,
+            cancel_ref: cancel_ref,
+            pid: task.pid
+          })
+
         {:noreply, %{state | activity_tasks: activity_tasks}}
     end
   end
 
-  defp handle_activity_cancel(_token, _info, state) do
-    # TODO: set atomics flag or kill activity process
-    Logger.warning("Activity cancel not yet implemented")
-    {:noreply, state}
+  defp handle_activity_cancel(token, _info, state) do
+    # Find the activity task by token and set its cancel flag
+    case Enum.find(state.activity_tasks, fn {_ref, info} -> info.task_token == token end) do
+      {_ref, %{cancel_ref: cancel_ref, pid: pid}} ->
+        Temporalex.Activity.Context.set_cancelled(cancel_ref)
+        # For activities that don't heartbeat, kill the process
+        Process.exit(pid, :shutdown)
+        {:noreply, state}
+
+      nil ->
+        Logger.warning("Cancel for unknown activity task")
+        {:noreply, state}
+    end
   end
 
   # --- Private: completions ---

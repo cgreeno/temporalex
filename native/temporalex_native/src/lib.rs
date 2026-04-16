@@ -1,5 +1,6 @@
 mod atoms;
 mod client;
+mod client_ops;
 mod completions;
 mod helpers;
 mod proto_bridge;

@@ -70,4 +70,86 @@ defmodule Temporalex.Testing do
 
   @doc "Set the workflow's cancelled flag."
   def cancel(exec), do: GenServer.call(exec, :cancel, 5000)
+
+  @doc """
+  Run a workflow with a pre-loaded operation log. Convenience wrapper
+  that feeds results automatically and returns the final workflow result.
+
+  ## Example
+
+      {:ok, result} = Temporalex.Testing.run_workflow(MyWorkflow, %{"id" => "123"},
+        log: [
+          {:activity, "MyApp.Activities.Payment.charge", {:ok, "charge_123"}},
+          {:activity, "MyApp.Activities.Email.send_receipt", {:ok, :sent}}
+        ]
+      )
+  """
+  def run_workflow(module, args, opts \\ []) do
+    log = Keyword.get(opts, :log, [])
+    {:ok, exec} = start_workflow(module, args)
+    run_with_log(exec, log)
+  end
+
+  defp run_with_log(exec, []) do
+    next(exec)
+  end
+
+  defp run_with_log(exec, [{:activity, expected_type, result} | rest]) do
+    case next(exec) do
+      {:activity, %{type: type}} ->
+        if expected_type != :any and type != expected_type do
+          {:error, {:unexpected_activity, expected: expected_type, got: type}}
+        else
+          resolve(exec, result)
+          run_with_log(exec, rest)
+        end
+
+      {:ok, _} = done ->
+        done
+
+      {:error, _} = err ->
+        err
+
+      other ->
+        {:error, {:expected_activity, got: other}}
+    end
+  end
+
+  defp run_with_log(exec, [{:child_workflow, expected_type, result} | rest]) do
+    case next(exec) do
+      {:child_workflow, %{workflow_type: type}} ->
+        if expected_type != :any and type != expected_type do
+          {:error, {:unexpected_child_workflow, expected: expected_type, got: type}}
+        else
+          resolve(exec, result)
+          run_with_log(exec, rest)
+        end
+
+      other ->
+        {:error, {:expected_child_workflow, got: other}}
+    end
+  end
+
+  defp run_with_log(exec, [{:sleep, result} | rest]) do
+    case next(exec) do
+      {:sleep, _} ->
+        resolve(exec, result)
+        run_with_log(exec, rest)
+
+      other ->
+        {:error, {:expected_sleep, got: other}}
+    end
+  end
+
+  @doc """
+  Run an activity function directly for testing.
+
+  ## Example
+
+      {:ok, result} = Temporalex.Testing.run_activity(MyActivities, :charge, [100])
+  """
+  def run_activity(module, function, args \\ []) do
+    impl_fn = :"__#{function}__"
+    apply(module, impl_fn, args)
+  end
 end

@@ -170,6 +170,38 @@ defmodule Temporalex.Worker.Executor do
     end
   end
 
+  def handle_call({:start_child_workflow, workflow_type, args, opts}, from, state) do
+    {seq, state} = next_seq(state)
+
+    case check_replay(state, :child_workflow, seq) do
+      {:replay, result, state} ->
+        {:reply, result, state}
+
+      {:new, state} ->
+        payloads = Temporalex.Converter.encode_args([args])
+        workflow_id = Keyword.get(opts, :workflow_id, "#{state.run_id}-child-#{seq}")
+        task_queue = Keyword.get(opts, :task_queue, state.task_queue)
+
+        cmd =
+          {:start_child_workflow_execution,
+           %{
+             seq: seq,
+             workflow_type: workflow_type,
+             workflow_id: workflow_id,
+             task_queue: task_queue,
+             input: payloads
+           }}
+
+        state = %{
+          state
+          | commands: [cmd | state.commands],
+            pending_calls: Map.put(state.pending_calls, seq, from)
+        }
+
+        flush_commands(state)
+    end
+  end
+
   def handle_call({:sleep, duration_ms}, from, state) do
     {seq, state} = next_seq(state)
 
@@ -567,6 +599,7 @@ defmodule Temporalex.Worker.Executor do
     |> Enum.filter(fn
       {:resolve_activity, _} -> true
       {:fire_timer, _} -> true
+      {:resolve_child_workflow_execution, _} -> true
       _ -> false
     end)
     |> Enum.map(fn
@@ -578,6 +611,12 @@ defmodule Temporalex.Worker.Executor do
 
       {:fire_timer, %{seq: seq}} ->
         {:timer, seq, :ok}
+
+      {:resolve_child_workflow_execution, %{seq: seq, result: {:completed, payload}}} ->
+        {:child_workflow, seq, Temporalex.Converter.decode(payload)}
+
+      {:resolve_child_workflow_execution, %{seq: seq, result: {:failed, failure}}} ->
+        {:child_workflow, seq, {:error, failure}}
     end)
     |> Enum.sort_by(fn {_, seq, _} -> seq end)
   end
@@ -596,6 +635,9 @@ defmodule Temporalex.Worker.Executor do
           {init, [j | resolve], signal, update, query, patch, other}
 
         {:fire_timer, _} = j ->
+          {init, [j | resolve], signal, update, query, patch, other}
+
+        {:resolve_child_workflow_execution, _} = j ->
           {init, [j | resolve], signal, update, query, patch, other}
 
         {:signal_workflow, _} = j ->
@@ -638,6 +680,13 @@ defmodule Temporalex.Worker.Executor do
 
       {:fire_timer, %{seq: seq}}, state ->
         unblock_pending(state, seq, :ok)
+
+      {:resolve_child_workflow_execution, %{seq: seq, result: {:completed, payload}}}, state ->
+        result = Temporalex.Converter.decode(payload)
+        unblock_pending(state, seq, result)
+
+      {:resolve_child_workflow_execution, %{seq: seq, result: {:failed, failure}}}, state ->
+        unblock_pending(state, seq, {:error, failure})
 
       _, state ->
         state

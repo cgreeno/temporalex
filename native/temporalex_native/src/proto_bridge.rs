@@ -150,7 +150,66 @@ fn decode_job<'a>(
             .unwrap();
             enc(&(atoms::update_random_seed(), info), env)
         }
+        Some(Variant::ResolveChildWorkflowExecution(rcw)) => {
+            let result_term = decode_child_workflow_resolution(env, rcw);
+            let info = make_map(
+                env,
+                &[
+                    (atoms::seq(), enc(&(rcw.seq as u64), env)),
+                    (atoms::result(), result_term),
+                ],
+            )
+            .unwrap();
+            enc(&(atoms::resolve_child_workflow_execution(), info), env)
+        }
+        Some(Variant::ResolveChildWorkflowExecutionStart(rcws)) => {
+            let info = make_map(
+                env,
+                &[
+                    (atoms::seq(), enc(&(rcws.seq as u64), env)),
+                ],
+            )
+            .unwrap();
+            enc(&(atoms::resolve_child_workflow_execution_start(), info), env)
+        }
         _ => enc(&(atoms::unsupported(), "unknown_job_variant"), env),
+    }
+}
+
+fn decode_child_workflow_resolution<'a>(
+    env: Env<'a>,
+    rcw: &temporalio_common::protos::coresdk::workflow_activation::ResolveChildWorkflowExecution,
+) -> Term<'a> {
+    use temporalio_common::protos::coresdk::child_workflow::child_workflow_result;
+
+    let status = rcw.result.as_ref().and_then(|r| r.status.as_ref());
+
+    match status {
+        Some(child_workflow_result::Status::Completed(c)) => {
+            let p = c
+                .result
+                .as_ref()
+                .map(|p| decode_payload(env, p))
+                .unwrap_or_else(|| enc(&rustler::types::atom::nil(), env));
+            enc(&(atoms::completed(), p), env)
+        }
+        Some(child_workflow_result::Status::Failed(f)) => {
+            let ft = f
+                .failure
+                .as_ref()
+                .map(|fail| decode_failure(env, fail))
+                .unwrap_or_else(|| enc(&rustler::types::atom::nil(), env));
+            enc(&(atoms::failed(), ft), env)
+        }
+        Some(child_workflow_result::Status::Cancelled(c)) => {
+            let ft = c
+                .failure
+                .as_ref()
+                .map(|fail| decode_failure(env, fail))
+                .unwrap_or_else(|| enc(&rustler::types::atom::nil(), env));
+            enc(&(atoms::cancelled(), ft), env)
+        }
+        None => enc(&atoms::error(), env),
     }
 }
 
@@ -397,6 +456,25 @@ fn decode_workflow_command<'a>(
         workflow_command::Variant::SetPatchMarker(SetPatchMarker {
             patch_id,
             deprecated,
+            ..Default::default()
+        })
+    } else if tag == atoms::start_child_workflow_execution() {
+        let seq: u32 = get_map_val(env, info, atoms::seq())?;
+        let wf_type: String = get_map_val(env, info, atoms::workflow_type())?;
+        let wf_id: String = get_map_val(env, info, atoms::workflow_id())?;
+        let task_queue: String = get_map_val_or(env, info, atoms::task_queue(), String::new());
+        let input_terms: Vec<Term> = get_map_val_or(env, info, atoms::input(), vec![]);
+        let input: Vec<_> = input_terms
+            .into_iter()
+            .filter_map(|t| encode_payload_from_term(env, t).ok())
+            .collect();
+
+        workflow_command::Variant::StartChildWorkflowExecution(StartChildWorkflowExecution {
+            seq,
+            workflow_id: wf_id,
+            workflow_type: wf_type,
+            task_queue,
+            input,
             ..Default::default()
         })
     } else {

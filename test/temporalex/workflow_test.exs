@@ -207,6 +207,43 @@ defmodule Temporalex.WorkflowTest do
     end
   end
 
+  # --- Child workflow test modules ---
+
+  defmodule ChildWorkflow do
+    use Temporalex.Workflow
+
+    def run(args) do
+      {:ok, args["value"] * 2}
+    end
+  end
+
+  defmodule ParentWorkflow do
+    use Temporalex.Workflow
+
+    def run(args) do
+      {:ok, doubled} = API.start_child_workflow(ChildWorkflow, %{"value" => args["x"]})
+      {:ok, charge} = Activities.Payment.charge(doubled)
+      {:ok, %{doubled: doubled, charge: charge}}
+    end
+  end
+
+  describe "child workflow" do
+    test "start_child_workflow blocks and returns result" do
+      {:ok, exec} = Testing.start_workflow(ParentWorkflow, %{"x" => 5})
+
+      assert {:child_workflow, call} = Testing.next(exec)
+      assert call.workflow_type =~ "ChildWorkflow"
+      assert call.args == %{"value" => 5}
+
+      # Resolve child workflow — parent continues to activity
+      assert {:activity, activity} = Testing.resolve(exec, {:ok, 10})
+      assert activity.input == [10]
+
+      assert {:ok, result} = Testing.resolve(exec, {:ok, "charge_10"})
+      assert result == %{doubled: 10, charge: "charge_10"}
+    end
+  end
+
   describe "cancellation" do
     test "cancelled? returns false by default, true after cancel" do
       {:ok, exec} = Testing.start_workflow(CancelCheckWorkflow, %{})

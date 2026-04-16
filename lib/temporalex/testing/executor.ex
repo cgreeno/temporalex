@@ -143,6 +143,15 @@ defmodule Temporalex.Testing.Executor do
     {:noreply, enqueue_pending(state, {:activity, %{type: type, input: input, opts: opts}}, from)}
   end
 
+  def handle_call({:start_child_workflow, workflow_type, args, opts}, from, state) do
+    {:noreply,
+     enqueue_pending(
+       state,
+       {:child_workflow, %{workflow_type: workflow_type, args: args, opts: opts}},
+       from
+     )}
+  end
+
   def handle_call({:sleep, duration_ms}, from, state) do
     {:noreply, enqueue_pending(state, {:sleep, duration_ms}, from)}
   end
