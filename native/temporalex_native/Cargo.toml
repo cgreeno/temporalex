@@ -10,9 +10,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = "0.37"
-temporalio-sdk-core = { git = "https://github.com/temporalio/sdk-core", rev = "5f79ef28684578c391b58bcc71afddb7c964d604", default-features = false }
-temporalio-client = { git = "https://github.com/temporalio/sdk-core", rev = "5f79ef28684578c391b58bcc71afddb7c964d604", features = ["core-based-sdk"] }
-temporalio-common = { git = "https://github.com/temporalio/sdk-core", rev = "5f79ef28684578c391b58bcc71afddb7c964d604" }
+temporalio-sdk-core = { git = "https://github.com/temporalio/sdk-core", rev = "1e67b2347d4ccee66c805067cdc8d418b1a224a7", default-features = false }
+temporalio-client = { git = "https://github.com/temporalio/sdk-core", rev = "1e67b2347d4ccee66c805067cdc8d418b1a224a7", features = ["core-based-sdk"] }
+temporalio-common = { git = "https://github.com/temporalio/sdk-core", rev = "1e67b2347d4ccee66c805067cdc8d418b1a224a7" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 prost = "0.14"
 url = "2"
