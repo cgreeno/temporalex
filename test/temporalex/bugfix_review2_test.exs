@@ -5,8 +5,8 @@ defmodule Temporalex.BugfixReview2Test do
   """
   use ExUnit.Case, async: true
 
+  alias Temporalex.Error.{ApplicationError, ChildWorkflowFailure}
   alias Temporalex.FailureConverter
-  alias Temporalex.Error.{ChildWorkflowFailure, ApplicationError}
 
   # ============================================================
   # BUG-3: ChildWorkflowFailure in FailureConverter

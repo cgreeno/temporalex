@@ -41,13 +41,13 @@ defmodule Temporalex.Activity.Context do
   @spec from_start(map(), keyword()) :: t()
   def from_start(start, opts \\ []) do
     ctx = %__MODULE__{
-      activity_id: start.activity_id || "",
-      activity_type: start.activity_type || "",
+      activity_id: value_or_empty(start.activity_id),
+      activity_type: value_or_empty(start.activity_type),
       task_token: Keyword.get(opts, :task_token, <<>>),
-      workflow_namespace: start.workflow_namespace || "",
-      workflow_type: start.workflow_type || "",
-      workflow_id: (start.workflow_execution && start.workflow_execution.workflow_id) || "",
-      run_id: (start.workflow_execution && start.workflow_execution.run_id) || "",
+      workflow_namespace: value_or_empty(start.workflow_namespace),
+      workflow_type: value_or_empty(start.workflow_type),
+      workflow_id: workflow_execution_value(start, :workflow_id),
+      run_id: workflow_execution_value(start, :run_id),
       attempt: start.attempt || 1,
       heartbeat_timeout: parse_duration_ms(start.heartbeat_timeout),
       is_local: start.is_local || false,
@@ -109,6 +109,19 @@ defmodule Temporalex.Activity.Context do
   end
 
   # Convert google.protobuf.Duration to milliseconds
+  defp value_or_empty(nil), do: ""
+  defp value_or_empty(value), do: value
+
+  defp workflow_execution_value(%{workflow_execution: workflow_execution}, _field)
+       when is_nil(workflow_execution),
+       do: ""
+
+  defp workflow_execution_value(%{workflow_execution: workflow_execution}, field) do
+    workflow_execution |> Map.get(field) |> value_or_empty()
+  end
+
+  defp workflow_execution_value(_start, _field), do: ""
+
   defp parse_duration_ms(nil), do: nil
 
   defp parse_duration_ms(%{seconds: seconds, nanos: nanos}) do

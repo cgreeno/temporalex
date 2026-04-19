@@ -4,6 +4,8 @@ defmodule Temporalex.ClientTest do
   """
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Temporalex.Client
 
   describe "start_workflow argument validation" do
@@ -19,13 +21,23 @@ defmodule Temporalex.ClientTest do
       dead_pid = spawn(fn -> :ok end)
       Process.sleep(10)
 
-      assert {:error, {:connection_error, :not_alive}} =
-               Client.signal_workflow(dead_pid, "wf-1", "sig")
+      log =
+        capture_log(fn ->
+          assert {:error, {:connection_error, :not_alive}} =
+                   Client.signal_workflow(dead_pid, "wf-1", "sig")
+        end)
+
+      assert log =~ "Client: connection process unavailable"
     end
 
     test "returns error tuple for unregistered atom name" do
-      assert {:error, {:connection_error, :not_alive}} =
-               Client.signal_workflow(:totally_nonexistent_process, "wf-1", "sig")
+      log =
+        capture_log(fn ->
+          assert {:error, {:connection_error, :not_alive}} =
+                   Client.signal_workflow(:totally_nonexistent_process, "wf-1", "sig")
+        end)
+
+      assert log =~ "Client: connection process unavailable"
     end
   end
 end

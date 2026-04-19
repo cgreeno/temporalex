@@ -39,10 +39,11 @@ defmodule Temporalex.Server do
   use GenServer
   require Logger
 
+  alias Coresdk.ActivityResult.ActivityExecutionResult
+  alias Coresdk.ActivityTask.ActivityTask
   alias Coresdk.WorkflowActivation.WorkflowActivation
   alias Coresdk.WorkflowCompletion.WorkflowActivationCompletion
-  alias Coresdk.ActivityTask.ActivityTask
-  alias Coresdk.ActivityResult.ActivityExecutionResult
+  alias Temporalex.Activity.Context, as: ActivityContext
   alias Temporalex.WorkflowTaskExecutor
 
   defstruct [
@@ -605,55 +606,52 @@ defmodule Temporalex.Server do
   # ============================================================
 
   defp categorize_jobs(jobs) do
-    Enum.reduce(
-      jobs,
-      %{
-        inits: [],
-        resolves: [],
-        child_starts: [],
-        child_resolves: [],
-        timers: [],
-        signals: [],
-        queries: [],
-        patches: [],
-        updates: [],
-        others: []
-      },
-      fn job, acc ->
-        case job.variant do
-          {:initialize_workflow, j} ->
-            %{acc | inits: [j | acc.inits]}
-
-          {:resolve_activity, j} ->
-            %{acc | resolves: [j | acc.resolves]}
-
-          {:resolve_child_workflow_execution_start, j} ->
-            %{acc | child_starts: [j | acc.child_starts]}
-
-          {:resolve_child_workflow_execution, j} ->
-            %{acc | child_resolves: [j | acc.child_resolves]}
-
-          {:fire_timer, j} ->
-            %{acc | timers: [j | acc.timers]}
-
-          {:signal_workflow, j} ->
-            %{acc | signals: [j | acc.signals]}
-
-          {:query_workflow, j} ->
-            %{acc | queries: [j | acc.queries]}
-
-          {:notify_has_patch, j} ->
-            %{acc | patches: [j | acc.patches]}
-
-          {:do_update, j} ->
-            %{acc | updates: [j | acc.updates]}
-
-          _ ->
-            %{acc | others: [job | acc.others]}
-        end
-      end
-    )
+    Enum.reduce(jobs, empty_job_categories(), &categorize_job/2)
   end
+
+  defp empty_job_categories do
+    %{
+      inits: [],
+      resolves: [],
+      child_starts: [],
+      child_resolves: [],
+      timers: [],
+      signals: [],
+      queries: [],
+      patches: [],
+      updates: [],
+      others: []
+    }
+  end
+
+  defp categorize_job(%{variant: {:initialize_workflow, job}}, acc),
+    do: %{acc | inits: [job | acc.inits]}
+
+  defp categorize_job(%{variant: {:resolve_activity, job}}, acc),
+    do: %{acc | resolves: [job | acc.resolves]}
+
+  defp categorize_job(%{variant: {:resolve_child_workflow_execution_start, job}}, acc),
+    do: %{acc | child_starts: [job | acc.child_starts]}
+
+  defp categorize_job(%{variant: {:resolve_child_workflow_execution, job}}, acc),
+    do: %{acc | child_resolves: [job | acc.child_resolves]}
+
+  defp categorize_job(%{variant: {:fire_timer, job}}, acc),
+    do: %{acc | timers: [job | acc.timers]}
+
+  defp categorize_job(%{variant: {:signal_workflow, job}}, acc),
+    do: %{acc | signals: [job | acc.signals]}
+
+  defp categorize_job(%{variant: {:query_workflow, job}}, acc),
+    do: %{acc | queries: [job | acc.queries]}
+
+  defp categorize_job(%{variant: {:notify_has_patch, job}}, acc),
+    do: %{acc | patches: [job | acc.patches]}
+
+  defp categorize_job(%{variant: {:do_update, job}}, acc),
+    do: %{acc | updates: [job | acc.updates]}
+
+  defp categorize_job(job, acc), do: %{acc | others: [job | acc.others]}
 
   # ============================================================
   # Initialize workflow — spawn executor
@@ -756,51 +754,56 @@ defmodule Temporalex.Server do
   # Resolutions — deliver to executor, collect output
   # ============================================================
 
+  defp dispatch_resolutions([], [], [], [], _activation, state), do: {false, [], state}
+
   defp dispatch_resolutions(resolves, child_resolves, timers, signals, activation, state) do
-    if resolves == [] and child_resolves == [] and timers == [] and signals == [] do
-      {false, [], state}
-    else
-      case Map.get(state.executors, activation.run_id) do
-        nil ->
-          Logger.warning("Resolution for unknown workflow", run_id: activation.run_id)
-          {false, [], state}
+    case Map.get(state.executors, activation.run_id) do
+      nil ->
+        Logger.warning("Resolution for unknown workflow", run_id: activation.run_id)
+        {false, [], state}
 
-        %{pid: pid} ->
-          # Deliver signals
-          for signal <- signals do
-            case decode_arguments(signal.input) do
-              {:error, reason} ->
-                Logger.warning("Failed to decode signal",
-                  signal: signal.signal_name,
-                  reason: inspect(reason)
-                )
+      %{pid: pid} ->
+        deliver_signals(signals, pid)
+        deliver_activity_resolutions(resolves, pid)
+        deliver_child_workflow_resolutions(child_resolves, pid)
+        deliver_timer_fires(timers, pid)
 
-              payload ->
-                send(pid, {:signal, signal.signal_name, payload})
-            end
-          end
-
-          # Deliver activity results
-          for resolve <- resolves do
-            result = extract_activity_result(resolve)
-            send(pid, {:resolve_activity, resolve.seq, result})
-          end
-
-          # Deliver child workflow results (same message format as activities)
-          for resolve <- child_resolves do
-            result = extract_child_workflow_result(resolve)
-            send(pid, {:resolve_activity, resolve.seq, result})
-          end
-
-          # Deliver timer fires
-          for fire <- timers do
-            send(pid, {:fire_timer, fire.seq})
-          end
-
-          # Executor will send {:executor_commands, ...} when ready
-          {true, [], state}
-      end
+        # Executor will send {:executor_commands, ...} when ready.
+        {true, [], state}
     end
+  end
+
+  defp deliver_signals(signals, pid), do: Enum.each(signals, &deliver_signal(&1, pid))
+
+  defp deliver_signal(signal, pid) do
+    case decode_arguments(signal.input) do
+      {:error, reason} ->
+        Logger.warning("Failed to decode signal",
+          signal: signal.signal_name,
+          reason: inspect(reason)
+        )
+
+      payload ->
+        send(pid, {:signal, signal.signal_name, payload})
+    end
+  end
+
+  defp deliver_activity_resolutions(resolves, pid) do
+    Enum.each(resolves, fn resolve ->
+      send(pid, {:resolve_activity, resolve.seq, extract_activity_result(resolve)})
+    end)
+  end
+
+  defp deliver_child_workflow_resolutions(resolves, pid) do
+    Enum.each(resolves, fn resolve ->
+      send(pid, {:resolve_activity, resolve.seq, extract_child_workflow_result(resolve)})
+    end)
+  end
+
+  defp deliver_timer_fires(timers, pid) do
+    Enum.each(timers, fn fire ->
+      send(pid, {:fire_timer, fire.seq})
+    end)
   end
 
   # ============================================================
@@ -828,21 +831,24 @@ defmodule Temporalex.Server do
   defp handle_queries([], _activation, _state), do: []
 
   defp handle_queries(queries, activation, state) do
-    Enum.flat_map(queries, fn query ->
-      case Map.get(state.executors, activation.run_id) do
-        nil ->
-          [query_fail_command(query.query_id, "Workflow not found")]
+    Enum.flat_map(queries, &handle_query(&1, activation, state))
+  end
 
-        info ->
-          case decode_arguments(query.arguments) do
-            {:error, reason} ->
-              [query_fail_command(query.query_id, "Bad query args: #{inspect(reason)}")]
+  defp handle_query(query, activation, state) do
+    case Map.get(state.executors, activation.run_id) do
+      nil -> [query_fail_command(query.query_id, "Workflow not found")]
+      info -> decode_and_dispatch_query(query, info)
+    end
+  end
 
-            args ->
-              dispatch_query(query, args, info)
-          end
-      end
-    end)
+  defp decode_and_dispatch_query(query, info) do
+    case decode_arguments(query.arguments) do
+      {:error, reason} ->
+        [query_fail_command(query.query_id, "Bad query args: #{inspect(reason)}")]
+
+      args ->
+        dispatch_query(query, args, info)
+    end
   end
 
   defp dispatch_query(query, args, info) do
@@ -912,29 +918,32 @@ defmodule Temporalex.Server do
   end
 
   defp handle_misc(jobs, activation, state) do
-    Enum.reduce(jobs, {[], state}, fn job, {cmds, st} ->
-      case job.variant do
-        {:cancel_workflow, _} ->
-          case Map.get(st.executors, activation.run_id) do
-            %{pid: pid} -> send(pid, {:cancel_workflow})
-            _ -> :ok
-          end
+    Enum.reduce(jobs, {[], state}, &handle_misc_job(&1, &2, activation))
+  end
 
-          st = stop_executor(st, activation.run_id)
-          {cmds ++ [cancel_command()], st}
+  defp handle_misc_job(%{variant: {:cancel_workflow, _}}, {cmds, state}, activation) do
+    send_cancel_to_executor(state, activation.run_id)
+    state = stop_executor(state, activation.run_id)
+    {cmds ++ [cancel_command()], state}
+  end
 
-        {:remove_from_cache, _} ->
-          # Already handled in handle_evictions
-          {cmds, st}
+  defp handle_misc_job(%{variant: {:remove_from_cache, _}}, acc, _activation) do
+    # Already handled in handle_evictions.
+    acc
+  end
 
-        {type, _} ->
-          Logger.debug("Unhandled job type", type: type)
-          {cmds, st}
+  defp handle_misc_job(%{variant: {type, _}}, acc, _activation) do
+    Logger.debug("Unhandled job type", type: type)
+    acc
+  end
 
-        _ ->
-          {cmds, st}
-      end
-    end)
+  defp handle_misc_job(_job, acc, _activation), do: acc
+
+  defp send_cancel_to_executor(state, run_id) do
+    case Map.get(state.executors, run_id) do
+      %{pid: pid} -> send(pid, {:cancel_workflow})
+      _ -> :ok
+    end
   end
 
   # ============================================================
@@ -1054,6 +1063,17 @@ defmodule Temporalex.Server do
   defp spawn_activity(start, task_token, state) do
     activity_type = start.activity_type
 
+    with {:ok, {module, impl_fn}} <- fetch_activity(state, activity_type),
+         {:ok, args} <- decode_activity_arguments(start, activity_type) do
+      start_activity_task(state, start, task_token, module, impl_fn, args)
+    else
+      {:error, message} ->
+        send_activity_completion(state, task_token, activity_failure(message))
+        state
+    end
+  end
+
+  defp fetch_activity(state, activity_type) do
     case Map.get(state.activity_map, activity_type) do
       nil ->
         registered = Map.keys(state.activity_map) |> Enum.join(", ")
@@ -1063,65 +1083,62 @@ defmodule Temporalex.Server do
           registered_types: registered
         )
 
-        msg = "Unknown activity type: #{activity_type}. Registered types: [#{registered}]"
-        send_activity_completion(state, task_token, activity_failure(msg))
-        state
+        {:error, "Unknown activity type: #{activity_type}. Registered types: [#{registered}]"}
 
-      {module, impl_fn} ->
-        case decode_arguments(start.input) do
-          {:error, reason} ->
-            send_activity_completion(
-              state,
-              task_token,
-              activity_failure(
-                "Failed to decode arguments for activity #{activity_type}: #{inspect(reason)}"
-              )
-            )
-
-            state
-
-          args ->
-            activity_ctx =
-              Temporalex.Activity.Context.from_start(start,
-                task_token: task_token,
-                task_queue: state.task_queue,
-                worker_pid: self()
-              )
-
-            task =
-              Task.Supervisor.async_nolink(state.activity_supervisor, fn ->
-                start_time =
-                  Temporalex.Telemetry.activity_start(%{
-                    activity_type: activity_type,
-                    activity_id: start.activity_id,
-                    task_queue: state.task_queue
-                  })
-
-                result = execute_activity(module, impl_fn, args, activity_ctx)
-
-                activity_result =
-                  case result do
-                    %{status: {:completed, _}} -> :ok
-                    _ -> :error
-                  end
-
-                Temporalex.Telemetry.activity_stop(start_time, %{
-                  activity_type: activity_type,
-                  activity_id: start.activity_id,
-                  result: activity_result
-                })
-
-                {task_token, result}
-              end)
-
-            %{
-              state
-              | activity_tasks:
-                  Map.put(state.activity_tasks, task.ref, {task_token, activity_type, task.pid})
-            }
-        end
+      activity ->
+        {:ok, activity}
     end
   end
+
+  defp decode_activity_arguments(start, activity_type) do
+    case decode_arguments(start.input) do
+      {:error, reason} ->
+        {:error, "Failed to decode arguments for activity #{activity_type}: #{inspect(reason)}"}
+
+      args ->
+        {:ok, args}
+    end
+  end
+
+  defp start_activity_task(state, start, task_token, module, impl_fn, args) do
+    activity_type = start.activity_type
+
+    activity_ctx =
+      ActivityContext.from_start(start,
+        task_token: task_token,
+        task_queue: state.task_queue,
+        worker_pid: self()
+      )
+
+    task =
+      Task.Supervisor.async_nolink(state.activity_supervisor, fn ->
+        start_time =
+          Temporalex.Telemetry.activity_start(%{
+            activity_type: activity_type,
+            activity_id: start.activity_id,
+            task_queue: state.task_queue
+          })
+
+        result = execute_activity(module, impl_fn, args, activity_ctx)
+
+        Temporalex.Telemetry.activity_stop(start_time, %{
+          activity_type: activity_type,
+          activity_id: start.activity_id,
+          result: activity_result_status(result)
+        })
+
+        {task_token, result}
+      end)
+
+    %{
+      state
+      | activity_tasks:
+          Map.put(state.activity_tasks, task.ref, {task_token, activity_type, task.pid})
+    }
+  end
+
+  defp activity_result_status(%{status: {:completed, _}}), do: :ok
+  defp activity_result_status(_result), do: :error
 
   defp execute_activity(module, :__server_legacy_activity__, args, ctx) do
     execute_activity_result(fn -> module.perform(ctx, args) end)
@@ -1132,28 +1149,26 @@ defmodule Temporalex.Server do
   end
 
   defp execute_activity_result(fun) do
-    try do
-      case fun.() do
-        {:ok, value} ->
-          payload = Temporalex.Converter.to_payload(value)
+    case fun.() do
+      {:ok, value} ->
+        payload = Temporalex.Converter.to_payload(value)
 
-          %ActivityExecutionResult{
-            status: {:completed, %Coresdk.ActivityResult.Success{result: payload}}
-          }
+        %ActivityExecutionResult{
+          status: {:completed, %Coresdk.ActivityResult.Success{result: payload}}
+        }
 
-        {:error, %{__exception__: true} = exception} ->
-          activity_failure(Temporalex.FailureConverter.to_failure(exception))
+      {:error, %{__exception__: true} = exception} ->
+        activity_failure(Temporalex.FailureConverter.to_failure(exception))
 
-        {:error, reason} ->
-          activity_failure(to_string(reason))
+      {:error, reason} ->
+        activity_failure(to_string(reason))
 
-        other ->
-          activity_failure("Unexpected return: #{inspect(other)}")
-      end
-    rescue
-      e ->
-        activity_failure("Activity crashed: #{Exception.message(e)}")
+      other ->
+        activity_failure("Unexpected return: #{inspect(other)}")
     end
+  rescue
+    e ->
+      activity_failure("Activity crashed: #{Exception.message(e)}")
   end
 
   # Build a properly-formatted activity failure with ApplicationFailureInfo.
@@ -1236,60 +1251,61 @@ defmodule Temporalex.Server do
   # Helpers
   # ============================================================
 
-  defp extract_activity_result(resolve) do
-    case resolve.result do
-      %{status: {:completed, %{result: payload}}} when not is_nil(payload) ->
-        case Temporalex.Converter.from_payload(payload) do
-          {:ok, value} -> {:ok, value}
-          {:error, reason} -> {:error, reason}
-        end
+  defp extract_activity_result(%{result: %{status: {:completed, %{result: payload}}}})
+       when not is_nil(payload) do
+    decode_result_payload(payload)
+  end
 
-      %{status: {:completed, _}} ->
-        {:ok, nil}
+  defp extract_activity_result(%{result: %{status: {:completed, _}}}), do: {:ok, nil}
 
-      %{status: {:failed, failure}} ->
-        if failure.failure do
-          {:error, Temporalex.FailureConverter.from_failure(failure.failure)}
-        else
-          {:error, %Temporalex.Error.ActivityFailure{message: "unknown failure"}}
-        end
+  defp extract_activity_result(%{result: %{status: {:failed, failure}}}) do
+    failure_result(failure.failure, %Temporalex.Error.ActivityFailure{message: "unknown failure"})
+  end
 
-      %{status: {:cancelled, _}} ->
-        {:error, %Temporalex.Error.CancelledError{message: "activity cancelled"}}
+  defp extract_activity_result(%{result: %{status: {:cancelled, _}}}) do
+    {:error, %Temporalex.Error.CancelledError{message: "activity cancelled"}}
+  end
 
-      other ->
-        {:error, %Temporalex.Error.ApplicationError{message: "unexpected: #{inspect(other)}"}}
+  defp extract_activity_result(%{result: result}), do: unexpected_result(result)
+
+  defp extract_child_workflow_result(%{result: %{status: {:completed, %{result: payload}}}})
+       when not is_nil(payload) do
+    decode_result_payload(payload)
+  end
+
+  defp extract_child_workflow_result(%{result: %{status: {:completed, _}}}), do: {:ok, nil}
+
+  defp extract_child_workflow_result(%{result: %{status: {:failed, failure}}}) do
+    failure_result(
+      failure.failure,
+      %Temporalex.Error.ChildWorkflowFailure{message: "unknown failure"}
+    )
+  end
+
+  defp extract_child_workflow_result(%{result: %{status: {:cancelled, cancellation}}}) do
+    failure_result(
+      cancellation.failure,
+      %Temporalex.Error.CancelledError{message: "child workflow cancelled"}
+    )
+  end
+
+  defp extract_child_workflow_result(%{result: result}), do: unexpected_result(result)
+
+  defp decode_result_payload(payload) do
+    case Temporalex.Converter.from_payload(payload) do
+      {:ok, value} -> {:ok, value}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp extract_child_workflow_result(resolve) do
-    case resolve.result do
-      %{status: {:completed, %{result: payload}}} when not is_nil(payload) ->
-        case Temporalex.Converter.from_payload(payload) do
-          {:ok, value} -> {:ok, value}
-          {:error, reason} -> {:error, reason}
-        end
+  defp failure_result(nil, fallback), do: {:error, fallback}
 
-      %{status: {:completed, _}} ->
-        {:ok, nil}
+  defp failure_result(failure, _fallback) do
+    {:error, Temporalex.FailureConverter.from_failure(failure)}
+  end
 
-      %{status: {:failed, failure}} ->
-        if failure.failure do
-          {:error, Temporalex.FailureConverter.from_failure(failure.failure)}
-        else
-          {:error, %Temporalex.Error.ChildWorkflowFailure{message: "unknown failure"}}
-        end
-
-      %{status: {:cancelled, cancellation}} ->
-        if cancellation.failure do
-          {:error, Temporalex.FailureConverter.from_failure(cancellation.failure)}
-        else
-          {:error, %Temporalex.Error.CancelledError{message: "child workflow cancelled"}}
-        end
-
-      other ->
-        {:error, %Temporalex.Error.ApplicationError{message: "unexpected: #{inspect(other)}"}}
-    end
+  defp unexpected_result(result) do
+    {:error, %Temporalex.Error.ApplicationError{message: "unexpected: #{inspect(result)}"}}
   end
 
   defp extract_replay_results(resolve_jobs, child_resolve_jobs, timer_jobs) do
@@ -1335,38 +1351,50 @@ defmodule Temporalex.Server do
 
   defp build_activity_map(modules) do
     modules
-    |> Enum.flat_map(fn mod ->
-      unless Code.ensure_loaded?(mod) do
-        raise ArgumentError,
-              "Activity module #{inspect(mod)} could not be loaded. " <>
-                "Check that the module exists and is compiled."
-      end
-
-      if function_exported?(mod, :__temporal_activities__, 0) do
-        for {name, _opts} <- mod.__temporal_activities__() do
-          type = Temporalex.DSL.activity_type_string(mod, name)
-          impl_fn = :"__temporal_perform_#{name}__"
-
-          unless function_exported?(mod, impl_fn, 1) do
-            raise ArgumentError,
-                  "Activity #{inspect(mod)}.#{name} is registered but #{impl_fn}/1 is not defined. " <>
-                    "This is a bug in the module's defactivity macro."
-          end
-
-          {type, {mod, impl_fn}}
-        end
-      else
-        unless function_exported?(mod, :__activity_type__, 0) do
-          raise ArgumentError,
-                "Activity module #{inspect(mod)} is not a valid activity. " <>
-                  "Add `use Temporalex.Activity` or `use Temporalex.DSL`."
-        end
-
-        type = mod.__activity_type__()
-        [{type, {mod, :__server_legacy_activity__}}]
-      end
-    end)
+    |> Enum.flat_map(&activity_entries/1)
     |> Map.new()
+  end
+
+  defp activity_entries(mod) do
+    ensure_activity_module_loaded!(mod)
+
+    cond do
+      function_exported?(mod, :__temporal_activities__, 0) ->
+        dsl_activity_entries(mod)
+
+      function_exported?(mod, :__activity_type__, 0) ->
+        [{mod.__activity_type__(), {mod, :__server_legacy_activity__}}]
+
+      true ->
+        raise ArgumentError,
+              "Activity module #{inspect(mod)} is not a valid activity. " <>
+                "Add `use Temporalex.Activity` or `use Temporalex.DSL`."
+    end
+  end
+
+  defp ensure_activity_module_loaded!(mod) do
+    unless Code.ensure_loaded?(mod) do
+      raise ArgumentError,
+            "Activity module #{inspect(mod)} could not be loaded. " <>
+              "Check that the module exists and is compiled."
+    end
+  end
+
+  defp dsl_activity_entries(mod) do
+    for {name, _opts} <- mod.__temporal_activities__() do
+      impl_fn = :"__temporal_perform_#{name}__"
+      ensure_activity_impl!(mod, name, impl_fn)
+
+      {Temporalex.DSL.activity_type_string(mod, name), {mod, impl_fn}}
+    end
+  end
+
+  defp ensure_activity_impl!(mod, name, impl_fn) do
+    unless function_exported?(mod, impl_fn, 1) do
+      raise ArgumentError,
+            "Activity #{inspect(mod)}.#{name} is registered but #{impl_fn}/1 is not defined. " <>
+              "This is a bug in the module's defactivity macro."
+    end
   end
 
   defp decode_arguments([]), do: nil

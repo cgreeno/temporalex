@@ -29,9 +29,13 @@ defmodule Temporalex.WorkflowTaskExecutor do
   import Bitwise
   require Logger
 
-  alias Coresdk.WorkflowCommands.{WorkflowCommand, CompleteWorkflowExecution, ScheduleActivity}
-  alias Coresdk.WorkflowCommands.{FailWorkflowExecution, StartTimer}
-  alias Coresdk.WorkflowCommands.{ContinueAsNewWorkflowExecution, StartChildWorkflowExecution}
+  alias Coresdk.WorkflowCommands.CompleteWorkflowExecution
+  alias Coresdk.WorkflowCommands.ContinueAsNewWorkflowExecution
+  alias Coresdk.WorkflowCommands.FailWorkflowExecution
+  alias Coresdk.WorkflowCommands.ScheduleActivity
+  alias Coresdk.WorkflowCommands.StartChildWorkflowExecution
+  alias Coresdk.WorkflowCommands.StartTimer
+  alias Coresdk.WorkflowCommands.WorkflowCommand
 
   defstruct [
     :server_pid,
@@ -396,12 +400,21 @@ defmodule Temporalex.WorkflowTaskExecutor do
     state = %{state | commands: [command | state.commands], status: :done}
     flush_commands(state)
 
-    # Kill the runner — it's in an invalid state
-    if state.runner_pid && Process.alive?(state.runner_pid) do
-      Process.exit(state.runner_pid, :kill)
+    state = stop_runner(state)
+
+    {:noreply, %{state | commands: [], runner_pid: nil, monitor_ref: nil}}
+  end
+
+  defp stop_runner(%{runner_pid: nil} = state), do: state
+
+  defp stop_runner(%{runner_pid: pid, monitor_ref: ref} = state) do
+    if Process.alive?(pid) do
+      Process.unlink(pid)
+      Process.exit(pid, :kill)
     end
 
-    {:noreply, %{state | commands: [], runner_pid: nil}}
+    if ref, do: Process.demonitor(ref, [:flush])
+    state
   end
 
   defp format_kind(:activity, nil), do: "activity"

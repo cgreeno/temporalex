@@ -5,6 +5,8 @@ defmodule Temporalex.BehaviourTest do
   """
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   # --- Test workflow module ---
 
   defmodule TestGreeterWorkflow do
@@ -65,8 +67,13 @@ defmodule Temporalex.BehaviourTest do
     end
 
     test "default handle_signal returns {:noreply, state}" do
-      assert {:noreply, :some_state} =
-               TestGreeterWorkflow.handle_signal("unknown", nil, :some_state)
+      log =
+        capture_log(fn ->
+          assert {:noreply, :some_state} =
+                   TestGreeterWorkflow.handle_signal("unknown", nil, :some_state)
+        end)
+
+      assert log =~ "Unhandled signal in workflow"
     end
 
     test "custom handle_signal updates state" do

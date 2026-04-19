@@ -3,6 +3,8 @@ defmodule Temporalex.EaseOfUseTest do
   use ExUnit.Case, async: true
   use Temporalex.Testing
 
+  alias Temporalex.Workflow.API
+
   # ============================================================
   # Test modules
   # ============================================================
@@ -37,25 +39,25 @@ defmodule Temporalex.EaseOfUseTest do
   describe "sleep/1 validation" do
     test "rejects zero duration" do
       assert_raise ArgumentError, ~r/must be positive/, fn ->
-        Temporalex.Workflow.API.sleep(0)
+        API.sleep(0)
       end
     end
 
     test "rejects negative duration" do
       assert_raise ArgumentError, ~r/must be positive/, fn ->
-        Temporalex.Workflow.API.sleep(-1000)
+        API.sleep(-1000)
       end
     end
 
     test "rejects non-integer" do
       assert_raise ArgumentError, ~r/must be a positive integer/, fn ->
-        Temporalex.Workflow.API.sleep(1.5)
+        API.sleep(1.5)
       end
     end
 
     test "rejects string" do
       assert_raise ArgumentError, ~r/must be a positive integer/, fn ->
-        Temporalex.Workflow.API.sleep("5000")
+        API.sleep("5000")
       end
     end
   end

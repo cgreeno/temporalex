@@ -27,8 +27,8 @@ defmodule Temporalex.Client do
   """
   require Logger
 
-  alias Temporalex.Converter
   alias Temporal.Api.Common.V1.Payloads
+  alias Temporalex.Converter
 
   @default_timeout 10_000
 
@@ -109,21 +109,19 @@ defmodule Temporalex.Client do
     with {:ok, client, namespace} <- resolve_connection(conn) do
       input_bytes = encode_args(args)
       request_id = generate_request_id()
+      request_ref = request_ref()
+      native = native_module()
 
       :ok =
-        Temporalex.Native.start_workflow(
+        native.start_workflow(
           client,
-          namespace,
-          workflow_id,
-          workflow_type,
-          task_queue,
-          input_bytes,
-          request_id,
+          {namespace, workflow_id, workflow_type, task_queue, input_bytes, request_id,
+           request_ref},
           self()
         )
 
       receive do
-        {:start_workflow_result, {:ok, run_id}} ->
+        {:start_workflow_result, ^request_ref, {:ok, run_id}} ->
           Logger.info("Client.start_workflow succeeded",
             workflow_id: workflow_id,
             run_id: run_id
@@ -131,7 +129,7 @@ defmodule Temporalex.Client do
 
           {:ok, %Temporalex.WorkflowHandle{workflow_id: workflow_id, run_id: run_id, conn: conn}}
 
-        {:start_workflow_result, {:error, reason}} ->
+        {:start_workflow_result, ^request_ref, {:error, reason}} ->
           Logger.error("Client.start_workflow failed",
             workflow_id: workflow_id,
             error: reason
@@ -205,17 +203,18 @@ defmodule Temporalex.Client do
     Logger.info("Client.get_result", workflow_id: workflow_id, run_id: run_id)
 
     with {:ok, client, namespace} <- resolve_connection(conn) do
+      request_ref = request_ref()
+      native = native_module()
+
       :ok =
-        Temporalex.Native.get_workflow_result(
+        native.get_workflow_result(
           client,
-          namespace,
-          workflow_id,
-          run_id,
+          {namespace, workflow_id, run_id, request_ref},
           self()
         )
 
       receive do
-        {:get_result_result, {:ok, result_bytes}} ->
+        {:get_result_result, ^request_ref, {:ok, result_bytes}} ->
           case decode_query_result(result_bytes) do
             {:ok, result} ->
               Logger.info("Client.get_result succeeded", workflow_id: workflow_id)
@@ -225,7 +224,7 @@ defmodule Temporalex.Client do
               {:error, {:decode_error, reason}}
           end
 
-        {:get_result_result, {:error, reason}} ->
+        {:get_result_result, ^request_ref, {:error, reason}} ->
           Logger.error("Client.get_result failed",
             workflow_id: workflow_id,
             error: reason
@@ -266,21 +265,18 @@ defmodule Temporalex.Client do
     with {:ok, client, namespace} <- resolve_connection(conn) do
       input_bytes = encode_signal_args(args)
       request_id = generate_request_id()
+      request_ref = request_ref()
+      native = native_module()
 
       :ok =
-        Temporalex.Native.signal_workflow(
+        native.signal_workflow(
           client,
-          namespace,
-          workflow_id,
-          run_id,
-          signal_name,
-          input_bytes,
-          request_id,
+          {namespace, workflow_id, run_id, signal_name, input_bytes, request_id, request_ref},
           self()
         )
 
       receive do
-        {:signal_workflow_result, :ok} ->
+        {:signal_workflow_result, ^request_ref, :ok} ->
           Logger.info("Client.signal_workflow succeeded",
             workflow_id: workflow_id,
             signal_name: signal_name
@@ -288,7 +284,7 @@ defmodule Temporalex.Client do
 
           :ok
 
-        {:signal_workflow_result, {:error, reason}} ->
+        {:signal_workflow_result, ^request_ref, {:error, reason}} ->
           Logger.error("Client.signal_workflow failed",
             workflow_id: workflow_id,
             signal_name: signal_name,
@@ -325,20 +321,18 @@ defmodule Temporalex.Client do
 
     with {:ok, client, namespace} <- resolve_connection(conn) do
       query_args_bytes = encode_signal_args(args)
+      request_ref = request_ref()
+      native = native_module()
 
       :ok =
-        Temporalex.Native.query_workflow(
+        native.query_workflow(
           client,
-          namespace,
-          workflow_id,
-          run_id,
-          query_type,
-          query_args_bytes,
+          {namespace, workflow_id, run_id, query_type, query_args_bytes, request_ref},
           self()
         )
 
       receive do
-        {:query_workflow_result, {:ok, result_bytes}} ->
+        {:query_workflow_result, ^request_ref, {:ok, result_bytes}} ->
           case decode_query_result(result_bytes) do
             {:ok, result} ->
               Logger.info("Client.query_workflow succeeded",
@@ -352,7 +346,7 @@ defmodule Temporalex.Client do
               {:error, {:decode_error, reason}}
           end
 
-        {:query_workflow_result, {:error, reason}} ->
+        {:query_workflow_result, ^request_ref, {:error, reason}} ->
           Logger.error("Client.query_workflow failed",
             workflow_id: workflow_id,
             query_type: query_type,
@@ -389,24 +383,22 @@ defmodule Temporalex.Client do
 
     with {:ok, client, namespace} <- resolve_connection(conn) do
       request_id = generate_request_id()
+      request_ref = request_ref()
+      native = native_module()
 
       :ok =
-        Temporalex.Native.cancel_workflow(
+        native.cancel_workflow(
           client,
-          namespace,
-          workflow_id,
-          run_id,
-          reason,
-          request_id,
+          {namespace, workflow_id, run_id, reason, request_id, request_ref},
           self()
         )
 
       receive do
-        {:cancel_workflow_result, :ok} ->
+        {:cancel_workflow_result, ^request_ref, :ok} ->
           Logger.info("Client.cancel_workflow succeeded", workflow_id: workflow_id)
           :ok
 
-        {:cancel_workflow_result, {:error, reason}} ->
+        {:cancel_workflow_result, ^request_ref, {:error, reason}} ->
           Logger.error("Client.cancel_workflow failed",
             workflow_id: workflow_id,
             error: reason
@@ -441,22 +433,22 @@ defmodule Temporalex.Client do
     )
 
     with {:ok, client, namespace} <- resolve_connection(conn) do
+      request_ref = request_ref()
+      native = native_module()
+
       :ok =
-        Temporalex.Native.terminate_workflow(
+        native.terminate_workflow(
           client,
-          namespace,
-          workflow_id,
-          run_id,
-          reason,
+          {namespace, workflow_id, run_id, reason, request_ref},
           self()
         )
 
       receive do
-        {:terminate_workflow_result, :ok} ->
+        {:terminate_workflow_result, ^request_ref, :ok} ->
           Logger.info("Client.terminate_workflow succeeded", workflow_id: workflow_id)
           :ok
 
-        {:terminate_workflow_result, {:error, reason}} ->
+        {:terminate_workflow_result, ^request_ref, {:error, reason}} ->
           Logger.error("Client.terminate_workflow failed",
             workflow_id: workflow_id,
             error: reason
@@ -487,11 +479,15 @@ defmodule Temporalex.Client do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
 
     with {:ok, client, namespace} <- resolve_connection(conn) do
-      :ok = Temporalex.Native.describe_workflow(client, namespace, workflow_id, run_id, self())
+      request_ref = request_ref()
+      native = native_module()
+
+      :ok =
+        native.describe_workflow(client, {namespace, workflow_id, run_id, request_ref}, self())
 
       receive do
-        {:describe_workflow_result, {:ok, info}} -> {:ok, info}
-        {:describe_workflow_result, {:error, reason}} -> {:error, reason}
+        {:describe_workflow_result, ^request_ref, {:ok, info}} -> {:ok, info}
+        {:describe_workflow_result, ^request_ref, {:error, reason}} -> {:error, reason}
       after
         timeout -> {:error, :timeout}
       end
@@ -523,11 +519,14 @@ defmodule Temporalex.Client do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
 
     with {:ok, client, namespace} <- resolve_connection(conn) do
-      :ok = Temporalex.Native.list_workflows(client, namespace, query, page_size, self())
+      request_ref = request_ref()
+      native = native_module()
+
+      :ok = native.list_workflows(client, {namespace, query, page_size, request_ref}, self())
 
       receive do
-        {:list_workflows_result, {:ok, executions}} -> {:ok, executions}
-        {:list_workflows_result, {:error, reason}} -> {:error, reason}
+        {:list_workflows_result, ^request_ref, {:ok, executions}} -> {:ok, executions}
+        {:list_workflows_result, ^request_ref, {:error, reason}} -> {:error, reason}
       after
         timeout -> {:error, :timeout}
       end
@@ -539,50 +538,54 @@ defmodule Temporalex.Client do
   # Resolve connection to {client_resource, namespace}
   # Accepts: Connection name, Temporalex instance name, pid, or map
   defp resolve_connection(conn) when is_pid(conn) do
-    try do
-      case Temporalex.Connection.get(conn) do
-        {:ok, %{client: client, namespace: namespace}} ->
-          {:ok, client, namespace}
+    case Temporalex.Connection.get(conn) do
+      {:ok, %{client: client, namespace: namespace}} ->
+        {:ok, client, namespace}
 
-        {:error, reason} ->
-          Logger.error("Client: failed to resolve connection PID", error: inspect(reason))
-          {:error, {:connection_error, reason}}
-      end
-    catch
-      :exit, reason ->
-        Logger.error("Client: connection process unavailable", error: inspect(reason))
-        {:error, {:connection_error, :not_alive}}
+      {:error, reason} ->
+        Logger.error("Client: failed to resolve connection PID", error: inspect(reason))
+        {:error, {:connection_error, reason}}
     end
+  catch
+    :exit, reason ->
+      Logger.error("Client: connection process unavailable", error: inspect(reason))
+      {:error, {:connection_error, :not_alive}}
   end
 
   defp resolve_connection(conn) when is_atom(conn) do
-    try do
-      case Temporalex.Connection.get(conn) do
-        {:ok, %{client: client, namespace: namespace}} ->
-          {:ok, client, namespace}
+    case Temporalex.Connection.get(conn) do
+      {:ok, %{client: client, namespace: namespace}} ->
+        {:ok, client, namespace}
 
-        {:error, _} ->
-          # Maybe it's an instance name — try derived connection name
-          derived = Temporalex.connection_name(conn)
+      {:error, _} ->
+        # Maybe it's an instance name — try derived connection name
+        derived = Temporalex.connection_name(conn)
 
-          case Temporalex.Connection.get(derived) do
-            {:ok, %{client: client, namespace: namespace}} ->
-              {:ok, client, namespace}
+        case Temporalex.Connection.get(derived) do
+          {:ok, %{client: client, namespace: namespace}} ->
+            {:ok, client, namespace}
 
-            {:error, reason} ->
-              Logger.error("Client: failed to resolve connection", error: inspect(reason))
-              {:error, {:connection_error, reason}}
-          end
-      end
-    catch
-      :exit, reason ->
-        Logger.error("Client: connection process unavailable", error: inspect(reason))
-        {:error, {:connection_error, :not_alive}}
+          {:error, reason} ->
+            Logger.error("Client: failed to resolve connection", error: inspect(reason))
+            {:error, {:connection_error, reason}}
+        end
     end
+  catch
+    :exit, reason ->
+      Logger.error("Client: connection process unavailable", error: inspect(reason))
+      {:error, {:connection_error, :not_alive}}
   end
 
   defp resolve_connection(%{client: client, namespace: namespace}) do
     {:ok, client, namespace}
+  end
+
+  defp native_module do
+    Application.get_env(:temporalex, :native_module, Temporalex.Native)
+  end
+
+  defp request_ref do
+    System.unique_integer([:positive, :monotonic])
   end
 
   # Encode workflow arguments to protobuf Payloads bytes

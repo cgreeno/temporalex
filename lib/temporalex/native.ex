@@ -3,7 +3,7 @@ defmodule Temporalex.Native do
   use Rustler, otp_app: :temporalex, crate: "temporalex_native"
 
   # Sync NIFs (run on DirtyCpu scheduler)
-  def create_runtime(), do: :erlang.nif_error(:nif_not_loaded)
+  def create_runtime, do: :erlang.nif_error(:nif_not_loaded)
   def connect_client(_runtime, _url, _api_key, _headers), do: :erlang.nif_error(:nif_not_loaded)
 
   def create_worker(
@@ -31,28 +31,28 @@ defmodule Temporalex.Native do
   def validate_worker(_worker, _pid), do: :erlang.nif_error(:nif_not_loaded)
 
   # Client NIFs (async — return :ok, send result to pid)
-  def start_workflow(_client, _namespace, _wf_id, _wf_type, _tq, _input, _req_id, _pid),
+  def start_workflow(_client, _request, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def signal_workflow(_client, _ns, _wf_id, _run_id, _signal, _input, _req_id, _pid),
+  def signal_workflow(_client, _request, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def query_workflow(_client, _ns, _wf_id, _run_id, _query_type, _query_args, _pid),
+  def query_workflow(_client, _request, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def cancel_workflow(_client, _ns, _wf_id, _run_id, _reason, _req_id, _pid),
+  def cancel_workflow(_client, _request, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def terminate_workflow(_client, _ns, _wf_id, _run_id, _reason, _pid),
+  def terminate_workflow(_client, _request, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def get_workflow_result(_client, _ns, _wf_id, _run_id, _pid),
+  def get_workflow_result(_client, _request, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def describe_workflow(_client, _ns, _wf_id, _run_id, _pid),
+  def describe_workflow(_client, _request, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def list_workflows(_client, _ns, _query, _page_size, _pid),
+  def list_workflows(_client, _request, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
   # Debug NIFs — decode protobuf bytes on Rust side for comparison

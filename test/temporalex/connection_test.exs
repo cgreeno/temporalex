@@ -38,9 +38,15 @@ defmodule Temporalex.ConnectionTest do
     end
 
     test "accepts http address" do
-      # Will fail to connect (no server) but shouldn't raise on validation
       name = :"conn_ok_#{System.unique_integer([:positive])}"
-      {:ok, pid} = Temporalex.Connection.start_link(name: name, address: "http://localhost:7233")
+
+      {:ok, pid} =
+        Temporalex.Connection.start_link(
+          name: name,
+          address: "http://localhost:7233",
+          connect: false
+        )
+
       assert Process.alive?(pid)
       GenServer.stop(pid)
     end
@@ -49,7 +55,11 @@ defmodule Temporalex.ConnectionTest do
       name = :"conn_https_#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Temporalex.Connection.start_link(name: name, address: "https://my-ns.tmprl.cloud:7233")
+        Temporalex.Connection.start_link(
+          name: name,
+          address: "https://my-ns.tmprl.cloud:7233",
+          connect: false
+        )
 
       assert Process.alive?(pid)
       GenServer.stop(pid)
@@ -58,15 +68,16 @@ defmodule Temporalex.ConnectionTest do
 
   describe "get/1 when not connected" do
     test "returns not_connected when runtime is nil" do
-      # Simulate a connection that hasn't finished connecting by
-      # checking the guard clause directly on the get handler
       name = :"conn_notconn_#{System.unique_integer([:positive])}"
-      {:ok, pid} = Temporalex.Connection.start_link(name: name, address: "http://localhost:7233")
 
-      # Wait for connection to complete, then verify the happy path works
-      Process.sleep(100)
-      assert {:ok, %{runtime: runtime}} = Temporalex.Connection.get(name)
-      assert runtime != nil
+      {:ok, pid} =
+        Temporalex.Connection.start_link(
+          name: name,
+          address: "http://localhost:7233",
+          connect: false
+        )
+
+      assert {:error, :not_connected} = Temporalex.Connection.get(name)
       GenServer.stop(pid)
     end
   end
@@ -74,11 +85,10 @@ defmodule Temporalex.ConnectionTest do
   describe "defaults" do
     test "address defaults to localhost:7233" do
       name = :"conn_defaults_#{System.unique_integer([:positive])}"
-      {:ok, pid} = Temporalex.Connection.start_link(name: name)
+      {:ok, pid} = Temporalex.Connection.start_link(name: name, connect: false)
       assert Process.alive?(pid)
 
-      # The struct should have the default address
-      {:ok, state} = Temporalex.Connection.get(name)
+      state = :sys.get_state(name)
       assert state.address == "http://localhost:7233"
       assert state.namespace == "default"
       GenServer.stop(pid)

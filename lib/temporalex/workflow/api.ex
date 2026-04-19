@@ -116,6 +116,8 @@ defmodule Temporalex.Workflow.API do
         continue_as_new(%{page: page + 1})
       end
   """
+  @spec continue_as_new() :: no_return()
+  @spec continue_as_new(term()) :: no_return()
   @spec continue_as_new(term(), keyword()) :: no_return()
   def continue_as_new(args \\ [], opts \\ []) do
     info = Process.get(:__temporal_workflow_info__, %{})

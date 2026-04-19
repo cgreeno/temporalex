@@ -1,9 +1,9 @@
 defmodule Temporalex.ErrorTest do
   use ExUnit.Case, async: true
 
-  alias Temporalex.Error.{ActivityFailure, TimeoutError, CancelledError, ApplicationError}
-  alias Temporalex.FailureConverter
   alias Temporal.Api.Failure.V1.Failure
+  alias Temporalex.Error.{ActivityFailure, ApplicationError, CancelledError, TimeoutError}
+  alias Temporalex.FailureConverter
 
   describe "error structs" do
     test "ActivityFailure formats message" do

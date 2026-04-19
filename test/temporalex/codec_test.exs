@@ -1,8 +1,8 @@
 defmodule Temporalex.CodecTest do
   use ExUnit.Case, async: true
 
-  alias Temporalex.Codec
   alias Temporal.Api.Common.V1.Payload
+  alias Temporalex.Codec
 
   # Test codec that base64-encodes data
   defmodule Base64Codec do

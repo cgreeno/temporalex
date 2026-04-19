@@ -109,8 +109,11 @@ defmodule Temporalex.OpenTelemetry do
   @spec inject_context() :: %{String.t() => String.t()}
   def inject_context do
     if otel_available?() do
-      # Dynamic call to avoid compile-time warnings for optional dependency
-      apply(:otel_propagator_text_map, :inject, [%{}, &Map.put(&1, &2, &3)])
+      :otel_propagator_text_map.inject(
+        :opentelemetry.get_text_map_injector(),
+        %{},
+        fn key, value, carrier -> Map.put(carrier, key, value) end
+      )
     else
       %{}
     end
@@ -125,8 +128,12 @@ defmodule Temporalex.OpenTelemetry do
   @spec extract_context(%{String.t() => String.t()}) :: :ok
   def extract_context(headers) when is_map(headers) do
     if otel_available?() do
-      # Dynamic call to avoid compile-time warnings for optional dependency
-      apply(:otel_propagator_text_map, :extract, [headers, &Map.keys/1, &Map.get(&1, &2)])
+      :otel_propagator_text_map.extract(
+        :opentelemetry.get_text_map_extractor(),
+        headers,
+        &Map.keys/1,
+        fn key, carrier -> Map.get(carrier, key) end
+      )
     end
 
     :ok
