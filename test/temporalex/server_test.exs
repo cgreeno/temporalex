@@ -217,11 +217,13 @@ defmodule Temporalex.ServerTest do
       start_to_close_timeout: 10_000,
       heartbeat_timeout: 2_000
 
+    alias Temporalex.Activity.Context
+
     @impl true
     def perform(ctx, %{"steps" => steps}) do
       for i <- 1..steps do
         Process.sleep(500)
-        Temporalex.Activity.Context.heartbeat(ctx, %{step: i})
+        Context.heartbeat(ctx, %{step: i})
       end
 
       {:ok, "completed-#{steps}-steps"}

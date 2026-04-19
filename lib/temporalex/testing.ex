@@ -27,6 +27,8 @@ defmodule Temporalex.Testing do
       end
   """
 
+  alias Temporalex.Workflow.API
+
   defmacro __using__(_opts) do
     quote do
       import Temporalex.Testing
@@ -274,7 +276,7 @@ defmodule Temporalex.Testing do
 
   """
   def send_signal(signal_name, payload \\ nil) do
-    Temporalex.Workflow.API.buffer_signal(signal_name, payload)
+    API.buffer_signal(signal_name, payload)
     :ok
   end
 

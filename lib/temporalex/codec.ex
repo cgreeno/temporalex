@@ -46,19 +46,22 @@ defmodule Temporalex.Codec do
 
   alias Temporal.Api.Common.V1.Payload
 
+  @typedoc false
+  @type payload :: Payload.t()
+
   @doc "Transform a payload before sending to Temporal."
-  @callback encode(Payload.t()) :: {:ok, Payload.t()} | {:error, term()}
+  @callback encode(payload()) :: {:ok, payload()} | {:error, term()}
 
   @doc "Transform a payload after receiving from Temporal."
-  @callback decode(Payload.t()) :: {:ok, Payload.t()} | {:error, term()}
+  @callback decode(payload()) :: {:ok, payload()} | {:error, term()}
 
   @doc """
   Apply a codec (or list of codecs) to encode a payload.
 
   Codecs are applied in order. Returns `{:ok, payload}` or `{:error, reason}`.
   """
-  @spec apply_encode(Payload.t(), module() | [module()] | nil) ::
-          {:ok, Payload.t()} | {:error, term()}
+  @spec apply_encode(payload(), module() | [module()] | nil) ::
+          {:ok, payload()} | {:error, term()}
   def apply_encode(payload, nil), do: {:ok, payload}
   def apply_encode(payload, codec) when is_atom(codec), do: codec.encode(payload)
 
@@ -76,8 +79,8 @@ defmodule Temporalex.Codec do
 
   Codecs are applied in reverse order (last encoder is first decoder).
   """
-  @spec apply_decode(Payload.t(), module() | [module()] | nil) ::
-          {:ok, Payload.t()} | {:error, term()}
+  @spec apply_decode(payload(), module() | [module()] | nil) ::
+          {:ok, payload()} | {:error, term()}
   def apply_decode(payload, nil), do: {:ok, payload}
   def apply_decode(payload, codec) when is_atom(codec), do: codec.decode(payload)
 

@@ -12,6 +12,16 @@ defmodule Temporalex.MixProject do
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
+      preferred_cli_env: [
+        credo: :test,
+        dialyzer: :dev,
+        docs: :dev
+      ],
+      dialyzer: [
+        plt_add_apps: [:mix],
+        plt_core_path: "_build/plts",
+        plt_local_path: "_build/plts/project.plt"
+      ],
 
       # Hex
       description:
@@ -43,6 +53,8 @@ defmodule Temporalex.MixProject do
       {:telemetry, "~> 1.0"},
       {:opentelemetry_api, "~> 1.4", optional: true},
       {:opentelemetry_semantic_conventions, "~> 0.2", optional: true},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end

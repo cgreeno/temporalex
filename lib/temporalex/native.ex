@@ -3,7 +3,7 @@ defmodule Temporalex.Native do
   use Rustler, otp_app: :temporalex, crate: "temporalex_native"
 
   # Sync NIFs (run on DirtyCpu scheduler)
-  def create_runtime(), do: :erlang.nif_error(:nif_not_loaded)
+  def create_runtime, do: :erlang.nif_error(:nif_not_loaded)
   def connect_client(_runtime, _url, _api_key, _headers), do: :erlang.nif_error(:nif_not_loaded)
 
   def create_worker(

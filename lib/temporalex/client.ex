@@ -27,8 +27,8 @@ defmodule Temporalex.Client do
   """
   require Logger
 
-  alias Temporalex.Converter
   alias Temporal.Api.Common.V1.Payloads
+  alias Temporalex.Converter
 
   @default_timeout 10_000
 
@@ -538,46 +538,42 @@ defmodule Temporalex.Client do
   # Resolve connection to {client_resource, namespace}
   # Accepts: Connection name, Temporalex instance name, pid, or map
   defp resolve_connection(conn) when is_pid(conn) do
-    try do
-      case Temporalex.Connection.get(conn) do
-        {:ok, %{client: client, namespace: namespace}} ->
-          {:ok, client, namespace}
+    case Temporalex.Connection.get(conn) do
+      {:ok, %{client: client, namespace: namespace}} ->
+        {:ok, client, namespace}
 
-        {:error, reason} ->
-          Logger.error("Client: failed to resolve connection PID", error: inspect(reason))
-          {:error, {:connection_error, reason}}
-      end
-    catch
-      :exit, reason ->
-        Logger.error("Client: connection process unavailable", error: inspect(reason))
-        {:error, {:connection_error, :not_alive}}
+      {:error, reason} ->
+        Logger.error("Client: failed to resolve connection PID", error: inspect(reason))
+        {:error, {:connection_error, reason}}
     end
+  catch
+    :exit, reason ->
+      Logger.error("Client: connection process unavailable", error: inspect(reason))
+      {:error, {:connection_error, :not_alive}}
   end
 
   defp resolve_connection(conn) when is_atom(conn) do
-    try do
-      case Temporalex.Connection.get(conn) do
-        {:ok, %{client: client, namespace: namespace}} ->
-          {:ok, client, namespace}
+    case Temporalex.Connection.get(conn) do
+      {:ok, %{client: client, namespace: namespace}} ->
+        {:ok, client, namespace}
 
-        {:error, _} ->
-          # Maybe it's an instance name — try derived connection name
-          derived = Temporalex.connection_name(conn)
+      {:error, _} ->
+        # Maybe it's an instance name — try derived connection name
+        derived = Temporalex.connection_name(conn)
 
-          case Temporalex.Connection.get(derived) do
-            {:ok, %{client: client, namespace: namespace}} ->
-              {:ok, client, namespace}
+        case Temporalex.Connection.get(derived) do
+          {:ok, %{client: client, namespace: namespace}} ->
+            {:ok, client, namespace}
 
-            {:error, reason} ->
-              Logger.error("Client: failed to resolve connection", error: inspect(reason))
-              {:error, {:connection_error, reason}}
-          end
-      end
-    catch
-      :exit, reason ->
-        Logger.error("Client: connection process unavailable", error: inspect(reason))
-        {:error, {:connection_error, :not_alive}}
+          {:error, reason} ->
+            Logger.error("Client: failed to resolve connection", error: inspect(reason))
+            {:error, {:connection_error, reason}}
+        end
     end
+  catch
+    :exit, reason ->
+      Logger.error("Client: connection process unavailable", error: inspect(reason))
+      {:error, {:connection_error, :not_alive}}
   end
 
   defp resolve_connection(%{client: client, namespace: namespace}) do

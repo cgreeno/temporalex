@@ -186,6 +186,25 @@ Learn Temporalex step by step. Each guide is self-contained with working code.
 | Signal handler | channel recv | `@workflow.signal` | `wf.signal` | `handle_signal/3` |
 | Query handler | function | `@workflow.query` | `wf.query` | `handle_query/3` |
 
+## Development
+
+Run the local quality gates before committing:
+
+```bash
+mix format
+mix test
+mix credo --strict
+mix dialyzer
+mix docs
+```
+
+The Elixir protobuf modules under `lib/temporalex/proto` are generated from the pinned
+`temporalio/sdk-core` revision used by `native/temporalex_native/Cargo.toml`. Regenerate them with:
+
+```bash
+SDK_CORE_DIR=../../temporalio/sdk-core scripts/gen-elixir-protos.sh
+```
+
 ## License
 
 MIT

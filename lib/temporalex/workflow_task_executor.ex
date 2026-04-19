@@ -29,9 +29,13 @@ defmodule Temporalex.WorkflowTaskExecutor do
   import Bitwise
   require Logger
 
-  alias Coresdk.WorkflowCommands.{WorkflowCommand, CompleteWorkflowExecution, ScheduleActivity}
-  alias Coresdk.WorkflowCommands.{FailWorkflowExecution, StartTimer}
-  alias Coresdk.WorkflowCommands.{ContinueAsNewWorkflowExecution, StartChildWorkflowExecution}
+  alias Coresdk.WorkflowCommands.CompleteWorkflowExecution
+  alias Coresdk.WorkflowCommands.ContinueAsNewWorkflowExecution
+  alias Coresdk.WorkflowCommands.FailWorkflowExecution
+  alias Coresdk.WorkflowCommands.ScheduleActivity
+  alias Coresdk.WorkflowCommands.StartChildWorkflowExecution
+  alias Coresdk.WorkflowCommands.StartTimer
+  alias Coresdk.WorkflowCommands.WorkflowCommand
 
   defstruct [
     :server_pid,

@@ -95,6 +95,7 @@ defmodule Coresdk.ActivityTask.Start do
   field :retry_policy, 16, type: Temporal.Api.Common.V1.RetryPolicy, json_name: "retryPolicy"
   field :priority, 18, type: Temporal.Api.Common.V1.Priority
   field :is_local, 17, type: :bool, json_name: "isLocal"
+  field :run_id, 19, type: :string, json_name: "runId"
 end
 
 defmodule Coresdk.ActivityTask.Cancel do

@@ -72,6 +72,7 @@ defmodule Coresdk.Nexus.NexusTask do
   field :task, 1, type: Temporal.Api.Workflowservice.V1.PollNexusTaskQueueResponse, oneof: 0
   field :cancel_task, 2, type: Coresdk.Nexus.CancelNexusTask, json_name: "cancelTask", oneof: 0
   field :request_deadline, 3, type: Google.Protobuf.Timestamp, json_name: "requestDeadline"
+  field :endpoint, 4, type: :string
 end
 
 defmodule Coresdk.Nexus.CancelNexusTask do

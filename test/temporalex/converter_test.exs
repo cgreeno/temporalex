@@ -4,8 +4,8 @@ defmodule Temporalex.ConverterTest do
   """
   use ExUnit.Case, async: true
 
-  alias Temporalex.Converter
   alias Temporal.Api.Common.V1.Payload
+  alias Temporalex.Converter
 
   describe "to_payload/1" do
     test "encodes a string" do

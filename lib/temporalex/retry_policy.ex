@@ -2,9 +2,11 @@ defmodule Temporalex.RetryPolicy do
   @moduledoc """
   Retry policy configuration for Temporal activities and workflows.
 
-  Wraps `Temporal.Api.Common.V1.RetryPolicy` with sensible defaults.
+  Wraps Temporal's generated retry policy protobuf struct with sensible defaults.
   All interval fields are in milliseconds.
   """
+
+  alias Temporal.Api.Common.V1.RetryPolicy, as: ProtoRetryPolicy
 
   @type t :: %__MODULE__{
           max_attempts: non_neg_integer(),
@@ -13,6 +15,9 @@ defmodule Temporalex.RetryPolicy do
           maximum_interval: pos_integer() | nil,
           non_retryable_error_types: [String.t()]
         }
+
+  @typedoc false
+  @type proto :: ProtoRetryPolicy.t()
 
   @enforce_keys []
   defstruct max_attempts: 0,
@@ -32,10 +37,10 @@ defmodule Temporalex.RetryPolicy do
   def from_opts(%__MODULE__{} = policy), do: policy
   def from_opts(opts) when is_list(opts), do: new(opts)
 
-  @doc "Convert to a `Temporal.Api.Common.V1.RetryPolicy` proto struct."
-  @spec to_proto(t()) :: Temporal.Api.Common.V1.RetryPolicy.t()
+  @doc "Convert to Temporal's generated retry policy protobuf struct."
+  @spec to_proto(t()) :: proto()
   def to_proto(%__MODULE__{} = p) do
-    %Temporal.Api.Common.V1.RetryPolicy{
+    %ProtoRetryPolicy{
       maximum_attempts: p.max_attempts,
       initial_interval: ms_to_duration(p.initial_interval),
       backoff_coefficient: p.backoff_coefficient,
