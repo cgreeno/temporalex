@@ -100,7 +100,11 @@ defmodule Temporalex.Connection do
       headers: headers
     }
 
-    {:ok, state, {:continue, :connect}}
+    if Keyword.get(opts, :connect, true) do
+      {:ok, state, {:continue, :connect}}
+    else
+      {:ok, state}
+    end
   end
 
   @impl true

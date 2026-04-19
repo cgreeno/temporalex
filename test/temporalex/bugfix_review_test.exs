@@ -33,7 +33,7 @@ defmodule Temporalex.BugfixReviewTest do
       send(executor, {:start, nil, []})
 
       # Executor should stay alive and workflow should complete (with error result)
-      assert_receive {:executor_commands, "fix1-run", [command], nil, :done}, 2_000
+      assert_receive {:executor_commands, "fix1-run", [_command], nil, :done}, 2_000
 
       # The executor process should still be alive
       assert Process.alive?(executor)
@@ -107,9 +107,11 @@ defmodule Temporalex.BugfixReviewTest do
 
     test "nil activation_start produces zero duration" do
       # When activation_start is nil (inline completions), duration should be 0
-      activation_start = nil
-      duration = if activation_start, do: System.monotonic_time() - activation_start, else: 0
-      assert duration == 0
+      assert activation_duration(nil_activation_start()) == 0
     end
   end
+
+  defp activation_duration(nil), do: 0
+  defp activation_duration(start), do: System.monotonic_time() - start
+  defp nil_activation_start, do: nil
 end
