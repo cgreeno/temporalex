@@ -192,7 +192,9 @@ defmodule Temporalex.Connection do
 
   @impl true
   def terminate(reason, state) do
-    Logger.info("Connection terminating",
+    level = termination_log_level(reason)
+
+    Logger.log(level, "Connection terminating",
       name: state.name,
       address: state.address,
       reason: inspect(reason)
@@ -227,4 +229,8 @@ defmodule Temporalex.Connection do
     jitter = :rand.uniform(div(capped, 2) + 1)
     capped + jitter
   end
+
+  defp termination_log_level(reason) when reason in [:normal, :shutdown], do: :debug
+  defp termination_log_level({:shutdown, _reason}), do: :debug
+  defp termination_log_level(_reason), do: :warning
 end

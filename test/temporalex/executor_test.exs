@@ -1,6 +1,8 @@
 defmodule Temporalex.ExecutorTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Temporalex.WorkflowTaskExecutor
 
   # ============================================================
@@ -182,22 +184,29 @@ defmodule Temporalex.ExecutorTest do
         )
       end
 
-      {:ok, executor} =
-        WorkflowTaskExecutor.start_link(
-          server_pid: self(),
-          run_id: "run-nd-1",
-          task_queue: "test",
-          run_fn: activity_fn,
-          replay_results: %{0 => {:timer, :ok}}
-        )
+      log =
+        capture_log(fn ->
+          {:ok, executor} =
+            WorkflowTaskExecutor.start_link(
+              server_pid: self(),
+              run_id: "run-nd-1",
+              task_queue: "test",
+              run_fn: activity_fn,
+              replay_results: %{0 => {:timer, :ok}}
+            )
 
-      send(executor, {:start, %{}, []})
+          send(executor, {:start, %{}, []})
 
-      assert_receive {:executor_commands, "run-nd-1", [cmd], nil, :done}, 1_000
-      assert {:fail_workflow_execution, fail} = cmd.variant
-      assert fail.failure.message =~ "Nondeterminism"
-      assert fail.failure.message =~ "activity"
-      assert fail.failure.message =~ "timer"
+          assert_receive {:executor_commands, "run-nd-1", [cmd], nil, :done}, 1_000
+          assert {:fail_workflow_execution, fail} = cmd.variant
+          assert fail.failure.message =~ "Nondeterminism"
+          assert fail.failure.message =~ "activity"
+          assert fail.failure.message =~ "timer"
+        end)
+
+      assert log =~ "Nondeterminism detected"
+      assert log =~ "workflow called activity(SomeActivity)"
+      assert log =~ "replay history has timer"
     end
 
     test "timer where activity expected fails with nondeterminism" do
@@ -206,22 +215,29 @@ defmodule Temporalex.ExecutorTest do
         GenServer.call(Process.get(:__temporal_executor__), {:sleep, 1000}, :infinity)
       end
 
-      {:ok, executor} =
-        WorkflowTaskExecutor.start_link(
-          server_pid: self(),
-          run_id: "run-nd-2",
-          task_queue: "test",
-          run_fn: sleep_fn,
-          replay_results: %{0 => {:activity, {:ok, "some-result"}}}
-        )
+      log =
+        capture_log(fn ->
+          {:ok, executor} =
+            WorkflowTaskExecutor.start_link(
+              server_pid: self(),
+              run_id: "run-nd-2",
+              task_queue: "test",
+              run_fn: sleep_fn,
+              replay_results: %{0 => {:activity, {:ok, "some-result"}}}
+            )
 
-      send(executor, {:start, %{}, []})
+          send(executor, {:start, %{}, []})
 
-      assert_receive {:executor_commands, "run-nd-2", [cmd], nil, :done}, 1_000
-      assert {:fail_workflow_execution, fail} = cmd.variant
-      assert fail.failure.message =~ "Nondeterminism"
-      assert fail.failure.message =~ "timer"
-      assert fail.failure.message =~ "activity"
+          assert_receive {:executor_commands, "run-nd-2", [cmd], nil, :done}, 1_000
+          assert {:fail_workflow_execution, fail} = cmd.variant
+          assert fail.failure.message =~ "Nondeterminism"
+          assert fail.failure.message =~ "timer"
+          assert fail.failure.message =~ "activity"
+        end)
+
+      assert log =~ "Nondeterminism detected"
+      assert log =~ "workflow called timer"
+      assert log =~ "replay history has activity"
     end
   end
 
@@ -233,19 +249,24 @@ defmodule Temporalex.ExecutorTest do
     test "crashed runner sends fail command" do
       crash_fn = fn _args -> raise "boom" end
 
-      {:ok, executor} =
-        WorkflowTaskExecutor.start_link(
-          server_pid: self(),
-          run_id: "run-crash",
-          task_queue: "test",
-          run_fn: crash_fn
-        )
+      log =
+        capture_log(fn ->
+          {:ok, executor} =
+            WorkflowTaskExecutor.start_link(
+              server_pid: self(),
+              run_id: "run-crash",
+              task_queue: "test",
+              run_fn: crash_fn
+            )
 
-      send(executor, {:start, %{}, []})
+          send(executor, {:start, %{}, []})
 
-      assert_receive {:executor_commands, "run-crash", [cmd], nil, :done}, 1_000
-      assert {:fail_workflow_execution, failure} = cmd.variant
-      assert failure.failure.message =~ "boom"
+          assert_receive {:executor_commands, "run-crash", [cmd], nil, :done}, 1_000
+          assert {:fail_workflow_execution, failure} = cmd.variant
+          assert failure.failure.message =~ "boom"
+        end)
+
+      assert log =~ "Workflow runner crashed"
     end
   end
 

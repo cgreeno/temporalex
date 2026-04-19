@@ -2,6 +2,8 @@ defmodule Temporalex.ClientInternalsTest do
   @moduledoc "Tests for Client internal logic via public API behavior."
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Temporalex.Client
 
   defmodule DummyWorkflow do
@@ -24,24 +26,39 @@ defmodule Temporalex.ClientInternalsTest do
       Process.sleep(10)
       refute Process.alive?(pid)
 
-      assert {:error, _} =
-               Client.start_workflow(pid, DummyWorkflow, %{}, id: "w", task_queue: "q")
+      log =
+        capture_log(fn ->
+          assert {:error, _} =
+                   Client.start_workflow(pid, DummyWorkflow, %{}, id: "w", task_queue: "q")
+        end)
+
+      assert log =~ "Client: connection process unavailable"
     end
 
     test "unregistered atom returns error tuple" do
-      assert {:error, _} =
-               Client.start_workflow(:nonexistent_conn, DummyWorkflow, %{},
-                 id: "w",
-                 task_queue: "q"
-               )
+      log =
+        capture_log(fn ->
+          assert {:error, _} =
+                   Client.start_workflow(:nonexistent_conn, DummyWorkflow, %{},
+                     id: "w",
+                     task_queue: "q"
+                   )
+        end)
+
+      assert log =~ "Client: connection process unavailable"
     end
 
     test "map connection resolves without crash" do
       # Verify the resolve_connection pattern match works for maps
       # We can't call the NIF with a fake client, so just verify the
       # describe/list paths which also use resolve_connection
-      assert {:error, _} = Client.describe_workflow(:nonexistent, "wf-1")
-      assert {:error, _} = Client.list_workflows(:nonexistent, "")
+      log =
+        capture_log(fn ->
+          assert {:error, _} = Client.describe_workflow(:nonexistent, "wf-1")
+          assert {:error, _} = Client.list_workflows(:nonexistent, "")
+        end)
+
+      assert log =~ "Client: connection process unavailable"
     end
   end
 
@@ -81,13 +98,23 @@ defmodule Temporalex.ClientInternalsTest do
 
   describe "describe_workflow" do
     test "returns error for dead connection" do
-      assert {:error, _} = Client.describe_workflow(:nonexistent, "wf-1")
+      log =
+        capture_log(fn ->
+          assert {:error, _} = Client.describe_workflow(:nonexistent, "wf-1")
+        end)
+
+      assert log =~ "Client: connection process unavailable"
     end
   end
 
   describe "list_workflows" do
     test "returns error for dead connection" do
-      assert {:error, _} = Client.list_workflows(:nonexistent, "WorkflowType = 'Test'")
+      log =
+        capture_log(fn ->
+          assert {:error, _} = Client.list_workflows(:nonexistent, "WorkflowType = 'Test'")
+        end)
+
+      assert log =~ "Client: connection process unavailable"
     end
   end
 end

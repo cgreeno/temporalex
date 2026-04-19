@@ -6,6 +6,8 @@ defmodule Temporalex.WorkflowAPITest do
   use ExUnit.Case, async: true
   use Temporalex.Testing
 
+  import ExUnit.CaptureLog
+
   alias Temporalex.Workflow.API
 
   # --- Test modules ---
@@ -123,24 +125,29 @@ defmodule Temporalex.WorkflowAPITest do
     end
 
     test "returns error tuple on replay when seq has recorded result" do
-      task =
-        Task.async(fn ->
-          {:ok, executor} =
-            Temporalex.WorkflowTaskExecutor.start(
-              server_pid: self(),
-              run_id: "run-se-2",
-              task_queue: "q",
-              run_fn: fn _ -> {:ok, "done"} end,
-              replay_results: %{0 => {:activity, {:ok, "old"}}},
-              workflow_info: %{}
-            )
+      log =
+        capture_log(fn ->
+          task =
+            Task.async(fn ->
+              {:ok, executor} =
+                Temporalex.WorkflowTaskExecutor.start(
+                  server_pid: self(),
+                  run_id: "run-se-2",
+                  task_queue: "q",
+                  run_fn: fn _ -> {:ok, "done"} end,
+                  replay_results: %{0 => {:activity, {:ok, "old"}}},
+                  workflow_info: %{}
+                )
 
-          Process.put(:__temporal_executor__, executor)
-          API.side_effect(fn -> :rand.uniform() end)
+              Process.put(:__temporal_executor__, executor)
+              API.side_effect(fn -> :rand.uniform() end)
+            end)
+
+          assert {:error, msg} = Task.await(task)
+          assert msg =~ "side_effect replay not yet supported"
         end)
 
-      assert {:error, msg} = Task.await(task)
-      assert msg =~ "side_effect replay not yet supported"
+      assert log =~ "side_effect replay not yet supported"
     end
   end
 

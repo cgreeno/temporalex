@@ -396,12 +396,21 @@ defmodule Temporalex.WorkflowTaskExecutor do
     state = %{state | commands: [command | state.commands], status: :done}
     flush_commands(state)
 
-    # Kill the runner — it's in an invalid state
-    if state.runner_pid && Process.alive?(state.runner_pid) do
-      Process.exit(state.runner_pid, :kill)
+    state = stop_runner(state)
+
+    {:noreply, %{state | commands: [], runner_pid: nil, monitor_ref: nil}}
+  end
+
+  defp stop_runner(%{runner_pid: nil} = state), do: state
+
+  defp stop_runner(%{runner_pid: pid, monitor_ref: ref} = state) do
+    if Process.alive?(pid) do
+      Process.unlink(pid)
+      Process.exit(pid, :kill)
     end
 
-    {:noreply, %{state | commands: [], runner_pid: nil}}
+    if ref, do: Process.demonitor(ref, [:flush])
+    state
   end
 
   defp format_kind(:activity, nil), do: "activity"
