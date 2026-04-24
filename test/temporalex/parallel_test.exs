@@ -79,22 +79,18 @@ defmodule Temporalex.ParallelTest do
           "tenant" => "t1"
         })
 
-      # Both branches block on activities. We need to resolve both.
-      # The parallel branches spawn immediately, so we should see two activities.
-      # But the test executor sees them as individual blocking calls from separate processes.
-      # Each branch calls its activity, which blocks on GenServer.call to executor.
-      # The executor sees two pending execute_activity calls.
+      # Mailbox arrival order from concurrent branches is nondeterministic.
+      # Resolve each activity using its own input so each branch receives
+      # what it asked for, regardless of order.
+      assert {:activity, c1} = Testing.next(exec)
+      assert {:activity, c2} = Testing.resolve(exec, response_for(hd(c1.input)))
 
-      # First activity from one branch
-      assert {:activity, _} = Testing.next(exec)
-
-      # Resolve first, second branch's activity appears
-      assert {:activity, _} = Testing.resolve(exec, {:ok, %{id: "u1"}})
-
-      # Resolve second — workflow completes
-      assert {:ok, result} = Testing.resolve(exec, {:ok, %{tenant: "t1"}})
+      assert {:ok, result} = Testing.resolve(exec, response_for(hd(c2.input)))
       assert result.user.id == "u1"
       assert result.config.tenant == "t1"
     end
+
+    defp response_for("u1"), do: {:ok, %{id: "u1"}}
+    defp response_for("t1"), do: {:ok, %{tenant: "t1"}}
   end
 end

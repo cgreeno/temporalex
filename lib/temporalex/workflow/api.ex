@@ -88,8 +88,16 @@ defmodule Temporalex.Workflow.API do
 
   Signal handlers: `{:noreply, state}`, `{:stop, state}`, `{:async, fn, state}`
   Update handlers: `{:reply, response, state}`, `{:stop, response, state}`, `{:async, fn, state}`
+
+  The `state` in `{:async, fn, state}` is ignored; use `update_state/1` inside
+  the async fn to mutate the receive state safely alongside other async work.
   """
   def receive(initial_state, opts) do
+    if Process.get(:__temporal_in_handler__) do
+      raise ArgumentError,
+            "Temporalex.Workflow.API.receive/2 cannot be called from inside a signal/update handler or parallel branch"
+    end
+
     GenServer.call(executor(), {:receive, initial_state, opts}, :infinity)
   end
 

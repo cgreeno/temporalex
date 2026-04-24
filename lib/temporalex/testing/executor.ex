@@ -25,12 +25,11 @@ defmodule Temporalex.Testing.Executor do
             async_tracker: %{},
             signal_buffer: [],
             signal_waiters: %{},
-            parallel_waiters: %{},
-            parallel_results: %{},
-            parallel_caller: nil,
-            parallel_count: 0,
+            parallels: %{},
+            branch_to_parallel: %{},
             sync_handler_pid: nil,
             sync_handler_update_from: nil,
+            pending_handler_queue: nil,
             cancelled: false,
             result: nil,
             status: :starting
@@ -54,6 +53,7 @@ defmodule Temporalex.Testing.Executor do
        workflow_module: module,
        runner_pid: pid,
        pending_queue: :queue.new(),
+       pending_handler_queue: :queue.new(),
        async_handlers: MapSet.new(),
        status: :running
      }}
@@ -82,7 +82,14 @@ defmodule Temporalex.Testing.Executor do
   # --- Test API: query / cancel ---
 
   def handle_call({:query, name, args}, _from, state) do
-    {:reply, state.workflow_module.handle_query(name, args, state.published_state), state}
+    response =
+      try do
+        state.workflow_module.handle_query(name, args, state.published_state)
+      rescue
+        e -> {:reply, {:error, inspect(e)}}
+      end
+
+    {:reply, response, state}
   end
 
   def handle_call(:cancel, _from, state) do
@@ -99,7 +106,7 @@ defmodule Temporalex.Testing.Executor do
         {:reply, :buffered, %{state | signal_buffer: state.signal_buffer ++ [{name, payload}]}}
 
       handler ->
-        dispatch_sync_handler(handler, [payload, state.receive_state], nil, state)
+        dispatch_sync_handler(handler, payload, nil, state)
     end
   end
 
@@ -121,15 +128,15 @@ defmodule Temporalex.Testing.Executor do
 
         if validator do
           case validator.(args, state.receive_state) do
-            :ok -> dispatch_sync_handler(handler, [args, state.receive_state], from, state)
+            :ok -> dispatch_sync_handler(handler, args, from, state)
             {:error, reason} -> {:reply, {:error, reason}, state}
           end
         else
-          dispatch_sync_handler(handler, [args, state.receive_state], from, state)
+          dispatch_sync_handler(handler, args, from, state)
         end
 
       handler when is_function(handler) ->
-        dispatch_sync_handler(handler, [args, state.receive_state], from, state)
+        dispatch_sync_handler(handler, args, from, state)
     end
   end
 
@@ -217,31 +224,53 @@ defmodule Temporalex.Testing.Executor do
     end
   end
 
+  def handle_call({:parallel, []}, _from, state) do
+    {:reply, [], state}
+  end
+
   def handle_call({:parallel, fns}, from, state) do
     executor = self()
+    ref = make_ref()
 
-    pids =
+    pids_by_idx =
       fns
       |> Enum.with_index()
       |> Enum.map(fn {fun, idx} ->
-        spawn_link(fn ->
-          Process.put(:__temporal_executor__, executor)
+        pid =
+          spawn_link(fn ->
+            Process.put(:__temporal_executor__, executor)
+            Process.put(:__temporal_in_handler__, true)
 
-          try do
-            exit({:parallel_result, idx, fun.()})
-          rescue
-            e -> exit({:parallel_result, idx, {:error, e}})
-          end
-        end)
+            try do
+              exit({:parallel_result, ref, idx, fun.()})
+            rescue
+              e -> exit({:parallel_result, ref, idx, {:error, e}})
+            end
+          end)
+
+        {pid, idx}
       end)
+
+    branch_idx = Map.new(pids_by_idx)
+
+    group = %{
+      ref: ref,
+      branch_idx: branch_idx,
+      results: %{},
+      count: length(fns),
+      from: from
+    }
+
+    branch_updates =
+      pids_by_idx
+      |> Enum.map(fn {pid, _} -> {pid, ref} end)
+      |> Map.new()
 
     {:noreply,
      %{
        state
-       | parallel_waiters: pids |> Enum.with_index() |> Map.new(),
-         parallel_results: %{},
-         parallel_caller: from,
-         parallel_count: length(fns)
+       | parallels: Map.put(state.parallels, ref, group),
+         branch_to_parallel: Map.merge(state.branch_to_parallel, branch_updates)
      }}
   end
 
@@ -259,7 +288,7 @@ defmodule Temporalex.Testing.Executor do
       pid == state.runner_pid -> handle_runner_exit(reason, state)
       pid == state.sync_handler_pid -> handle_sync_handler_exit(reason, state)
       Map.has_key?(state.async_tracker, pid) -> handle_async_handler_exit(pid, reason, state)
-      Map.has_key?(state.parallel_waiters, pid) -> handle_parallel_exit(pid, reason, state)
+      Map.has_key?(state.branch_to_parallel, pid) -> handle_parallel_exit(pid, reason, state)
       true -> {:noreply, state}
     end
   end
@@ -309,38 +338,92 @@ defmodule Temporalex.Testing.Executor do
   # --- Private: parallel branch exit ---
 
   defp handle_parallel_exit(pid, reason, state) do
-    {idx, waiters} = Map.pop(state.parallel_waiters, pid)
+    {ref, branch_to_parallel} = Map.pop(state.branch_to_parallel, pid)
+    group = Map.fetch!(state.parallels, ref)
+    idx = Map.fetch!(group.branch_idx, pid)
 
     result =
       case reason do
-        {:parallel_result, ^idx, value} -> value
+        {:parallel_result, ^ref, ^idx, value} -> value
         other -> {:error, {:branch_crashed, other}}
       end
 
-    results = Map.put(state.parallel_results, idx, result)
-    state = %{state | parallel_waiters: waiters, parallel_results: results}
+    results = Map.put(group.results, idx, result)
+    group = %{group | results: results}
 
-    if map_size(results) == state.parallel_count do
-      ordered = Enum.map(0..(state.parallel_count - 1), &Map.fetch!(results, &1))
-      GenServer.reply(state.parallel_caller, ordered)
-      {:noreply, %{state | parallel_caller: nil, parallel_results: %{}, parallel_count: 0}}
+    if map_size(results) == group.count do
+      ordered = Enum.map(0..(group.count - 1), &Map.fetch!(results, &1))
+      GenServer.reply(group.from, ordered)
+
+      {:noreply,
+       %{
+         state
+         | parallels: Map.delete(state.parallels, ref),
+           branch_to_parallel: branch_to_parallel
+       }}
     else
-      {:noreply, state}
+      {:noreply,
+       %{
+         state
+         | parallels: Map.put(state.parallels, ref, group),
+           branch_to_parallel: branch_to_parallel
+       }}
     end
   end
 
   # --- Private: handler dispatch ---
 
-  defp dispatch_sync_handler(handler, handler_args, update_from, state) do
+  defp dispatch_sync_handler(handler, payload, update_from, state) do
+    state =
+      if state.sync_handler_pid do
+        # Another sync handler is already running — queue this one. Handlers
+        # serialize: only one runs at a time (matches real Temporal's
+        # activation-level ordering). State is fetched at spawn time so the
+        # handler always sees the freshest receive_state.
+        entry = {handler, payload, update_from}
+        %{state | pending_handler_queue: :queue.in(entry, state.pending_handler_queue)}
+      else
+        spawn_sync_handler(handler, payload, update_from, state)
+      end
+
+    # Signals are fire-and-forget (update_from == nil): reply :ok now.
+    # Updates hold the caller until the handler's return value produces a reply.
+    if update_from do
+      {:noreply, state}
+    else
+      {:reply, :ok, state}
+    end
+  end
+
+  defp spawn_sync_handler(handler, payload, update_from, state) do
     executor = self()
+    current_state = state.receive_state
 
     pid =
       spawn_link(fn ->
         Process.put(:__temporal_executor__, executor)
-        exit({:handler_result, apply(handler, handler_args)})
+        Process.put(:__temporal_in_handler__, true)
+        exit({:handler_result, handler.(payload, current_state)})
       end)
 
-    {:reply, :ok, %{state | sync_handler_pid: pid, sync_handler_update_from: update_from}}
+    %{state | sync_handler_pid: pid, sync_handler_update_from: update_from}
+  end
+
+  defp maybe_dispatch_next_handler(state) do
+    if state.sync_handler_pid == nil do
+      case :queue.out(state.pending_handler_queue) do
+        {{:value, {handler, payload, update_from}}, rest} ->
+          spawn_sync_handler(handler, payload, update_from, %{
+            state
+            | pending_handler_queue: rest
+          })
+
+        {:empty, _} ->
+          state
+      end
+    else
+      state
+    end
   end
 
   # --- Private: apply handler return values ---
@@ -363,12 +446,17 @@ defmodule Temporalex.Testing.Executor do
     complete_receive(%{state | receive_state: final_state}, final_state)
   end
 
-  defp apply_handler_return({:async, fun, new_state}, update_from, state) do
+  defp apply_handler_return({:async, fun, _state}, update_from, state) do
+    # The third element of {:async, fn, state} is intentionally ignored.
+    # Replacing receive_state here would wipe concurrent `update_state`
+    # writes from other async fns. Use `update_state` inside the async fn
+    # to mutate receive_state safely.
     executor = self()
 
     pid =
       spawn_link(fn ->
         Process.put(:__temporal_executor__, executor)
+        Process.put(:__temporal_in_handler__, true)
         exit({:handler_result, fun.()})
       end)
 
@@ -376,8 +464,7 @@ defmodule Temporalex.Testing.Executor do
 
     drain_and_continue(%{
       state
-      | receive_state: new_state,
-        async_handlers: MapSet.put(state.async_handlers, pid),
+      | async_handlers: MapSet.put(state.async_handlers, pid),
         async_tracker: Map.put(state.async_tracker, pid, tracker_type)
     })
   end
@@ -408,7 +495,40 @@ defmodule Temporalex.Testing.Executor do
   end
 
   defp drain_and_continue(state) do
-    {:noreply, drain_buffered_signals(state)}
+    state = maybe_dispatch_next_handler(state)
+    state = drain_buffered_signals(state)
+
+    if notify_test_receiving?(state) do
+      {:noreply, notify_test_receiving(state)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  defp notify_test_receiving?(state) do
+    state.status == :in_receive and
+      state.test_caller != nil and
+      :queue.is_empty(state.pending_queue) and
+      state.sync_handler_pid == nil and
+      MapSet.size(state.async_handlers) == 0
+  end
+
+  defp notify_test_receiving(state) do
+    signal_handlers = Keyword.get(state.receive_opts || [], :signal, %{})
+    update_handlers = Keyword.get(state.receive_opts || [], :update, %{})
+    timeout = Keyword.get(state.receive_opts || [], :timeout)
+
+    GenServer.reply(
+      state.test_caller,
+      {:receive,
+       %{
+         signals: Map.keys(signal_handlers),
+         updates: Map.keys(update_handlers),
+         timeout: timeout
+       }}
+    )
+
+    %{state | test_caller: nil}
   end
 
   defp complete_receive(state, final_state) do

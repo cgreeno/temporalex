@@ -50,7 +50,15 @@
       "Bash(gh repo:*)",
       "Bash(git rm:*)",
       "Bash(gh run:*)",
-      "Bash(find /Users/chris/_apps/temporalex -type f \\\\\\(-name *test* -o -name *spec* -o -name *_test.* -o -name test_* \\\\\\))"
+      "Bash(find /Users/chris/_apps/temporalex -type f \\\\\\(-name *test* -o -name *spec* -o -name *_test.* -o -name test_* \\\\\\))",
+      "Bash(git:*)",
+      "Bash(erl -eval 'erlang:display\\(erlang:system_info\\(otp_release\\)\\), halt\\(\\).' -noshell)",
+      "Bash(rustc --version)",
+      "Bash(realpath:*)",
+      "Bash(python3:*)",
+      "Bash(cargo check:*)",
+      "Bash(mix run:*)",
+      "Bash(temporal server:*)"
     ]
   }
 }

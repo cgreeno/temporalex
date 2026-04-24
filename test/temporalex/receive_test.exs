@@ -178,10 +178,14 @@ defmodule Temporalex.ReceiveTest do
 
       assert {:receive, _info} = Testing.next(exec)
 
-      # Send restock update — triggers async handler
-      Testing.send_update(exec, "restock", [%{sku: "WIDGET", qty: 10}])
+      # send_update blocks until the handler's reply is ready. The async
+      # handler needs the test to resolve an activity before it completes,
+      # so we spawn send_update in a Task and drive the activity from here.
+      update_task =
+        Task.async(fn ->
+          Testing.send_update(exec, "restock", [%{sku: "WIDGET", qty: 10}])
+        end)
 
-      # The async handler calls an activity
       Process.sleep(20)
       assert {:activity, call} = Testing.next(exec)
       assert call.type =~ "Pricing.lookup"
@@ -189,6 +193,9 @@ defmodule Temporalex.ReceiveTest do
       # Resolve the activity — handler calls update_state then exits.
       # resolve returns {:receive, ...} since we're back in the receive loop.
       assert {:receive, _} = Testing.resolve(exec, {:ok, 19.99})
+
+      # Async handler's result is the reply to send_update.
+      _update_reply = Task.await(update_task, 1_000)
 
       # Close the receive
       Testing.send_signal(exec, "close", nil)

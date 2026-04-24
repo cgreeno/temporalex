@@ -41,10 +41,8 @@ defmodule Temporalex.Worker.Executor do
     sync_handler_pid: nil,
     sync_handler_update_from: nil,
     # Parallel
-    parallel_waiters: %{},
-    parallel_results: %{},
-    parallel_caller: nil,
-    parallel_count: 0,
+    parallels: %{},
+    branch_to_parallel: %{},
     # Metadata
     patches: nil,
     cancelled: false,
@@ -122,7 +120,7 @@ defmodule Temporalex.Worker.Executor do
       pid == state.runner_pid -> handle_runner_exit(reason, state)
       pid == state.sync_handler_pid -> handle_sync_handler_exit(reason, state)
       Map.has_key?(state.async_tracker, pid) -> handle_async_handler_exit(pid, reason, state)
-      Map.has_key?(state.parallel_waiters, pid) -> handle_parallel_exit(pid, reason, state)
+      Map.has_key?(state.branch_to_parallel, pid) -> handle_parallel_exit(pid, reason, state)
       true -> {:noreply, state}
     end
   end
@@ -228,8 +226,13 @@ defmodule Temporalex.Worker.Executor do
         {:reply, payload, %{state | signal_buffer: remaining}}
 
       nil ->
+        # Runner is parked with nothing more to produce this activation.
+        # Flush any accumulated commands (including an empty list) so
+        # Temporal knows the workflow task is complete and that we're
+        # awaiting new events (signals, timers, etc.).
         waiters = Map.put(state.signal_waiters, name, from)
-        {:noreply, %{state | signal_waiters: waiters}}
+        state = %{state | signal_waiters: waiters}
+        force_flush_commands(state)
     end
   end
 
@@ -292,36 +295,61 @@ defmodule Temporalex.Worker.Executor do
     # Drain buffered signals that have matching handlers
     state = drain_buffered_signals(state)
 
-    {:noreply, state}
+    # Runner is parked in receive. Flush any pending commands so Temporal
+    # knows this workflow task is complete — otherwise it waits forever
+    # for an activation completion.
+    force_flush_commands(state)
   end
 
   # --- Parallel ---
 
+  def handle_call({:parallel, []}, _from, state) do
+    {:reply, [], state}
+  end
+
   def handle_call({:parallel, fns}, from, state) do
     executor = self()
+    ref = make_ref()
 
-    pids =
+    pids_by_idx =
       fns
       |> Enum.with_index()
       |> Enum.map(fn {fun, idx} ->
-        spawn_link(fn ->
-          Process.put(:__temporal_executor__, executor)
+        pid =
+          spawn_link(fn ->
+            Process.put(:__temporal_executor__, executor)
+            Process.put(:__temporal_in_handler__, true)
 
-          try do
-            exit({:parallel_result, idx, fun.()})
-          rescue
-            e -> exit({:parallel_result, idx, {:error, e}})
-          end
-        end)
+            try do
+              exit({:parallel_result, ref, idx, fun.()})
+            rescue
+              e -> exit({:parallel_result, ref, idx, {:error, e}})
+            end
+          end)
+
+        {pid, idx}
       end)
+
+    branch_idx = Map.new(pids_by_idx)
+
+    group = %{
+      ref: ref,
+      branch_idx: branch_idx,
+      results: %{},
+      count: length(fns),
+      from: from
+    }
+
+    branch_updates =
+      pids_by_idx
+      |> Enum.map(fn {pid, _} -> {pid, ref} end)
+      |> Map.new()
 
     {:noreply,
      %{
        state
-       | parallel_waiters: pids |> Enum.with_index() |> Map.new(),
-         parallel_results: %{},
-         parallel_caller: from,
-         parallel_count: length(fns)
+       | parallels: Map.put(state.parallels, ref, group),
+         branch_to_parallel: Map.merge(state.branch_to_parallel, branch_updates)
      }}
   end
 
@@ -437,23 +465,36 @@ defmodule Temporalex.Worker.Executor do
   # --- Private: parallel branch exit ---
 
   defp handle_parallel_exit(pid, reason, state) do
-    {idx, waiters} = Map.pop(state.parallel_waiters, pid)
+    {ref, branch_to_parallel} = Map.pop(state.branch_to_parallel, pid)
+    group = Map.fetch!(state.parallels, ref)
+    idx = Map.fetch!(group.branch_idx, pid)
 
     result =
       case reason do
-        {:parallel_result, ^idx, value} -> value
+        {:parallel_result, ^ref, ^idx, value} -> value
         other -> {:error, {:branch_crashed, other}}
       end
 
-    results = Map.put(state.parallel_results, idx, result)
-    state = %{state | parallel_waiters: waiters, parallel_results: results}
+    results = Map.put(group.results, idx, result)
+    group = %{group | results: results}
 
-    if map_size(results) == state.parallel_count do
-      ordered = Enum.map(0..(state.parallel_count - 1), &Map.fetch!(results, &1))
-      GenServer.reply(state.parallel_caller, ordered)
-      {:noreply, %{state | parallel_caller: nil, parallel_results: %{}, parallel_count: 0}}
+    if map_size(results) == group.count do
+      ordered = Enum.map(0..(group.count - 1), &Map.fetch!(results, &1))
+      GenServer.reply(group.from, ordered)
+
+      {:noreply,
+       %{
+         state
+         | parallels: Map.delete(state.parallels, ref),
+           branch_to_parallel: branch_to_parallel
+       }}
     else
-      {:noreply, state}
+      {:noreply,
+       %{
+         state
+         | parallels: Map.put(state.parallels, ref, group),
+           branch_to_parallel: branch_to_parallel
+       }}
     end
   end
 
@@ -477,12 +518,17 @@ defmodule Temporalex.Worker.Executor do
     complete_receive(%{state | receive_state: final_state}, final_state)
   end
 
-  defp apply_handler_return({:async, fun, new_state}, update_from, state) do
+  defp apply_handler_return({:async, fun, _state}, update_from, state) do
+    # The third element of {:async, fn, state} is intentionally ignored.
+    # Replacing receive_state here would wipe concurrent `update_state`
+    # writes from other async fns. Use `update_state` inside the async fn
+    # to mutate receive_state safely.
     executor = self()
 
     pid =
       spawn_link(fn ->
         Process.put(:__temporal_executor__, executor)
+        Process.put(:__temporal_in_handler__, true)
         exit({:handler_result, fun.()})
       end)
 
@@ -490,8 +536,7 @@ defmodule Temporalex.Worker.Executor do
 
     drain_and_continue(%{
       state
-      | receive_state: new_state,
-        async_handlers: MapSet.put(state.async_handlers, pid),
+      | async_handlers: MapSet.put(state.async_handlers, pid),
         async_tracker: Map.put(state.async_tracker, pid, tracker_type)
     })
   end
@@ -514,6 +559,7 @@ defmodule Temporalex.Worker.Executor do
         pid =
           spawn_link(fn ->
             Process.put(:__temporal_executor__, executor)
+            Process.put(:__temporal_in_handler__, true)
             exit({:handler_result, handler.(payload, state.receive_state)})
           end)
 
@@ -522,7 +568,18 @@ defmodule Temporalex.Worker.Executor do
   end
 
   defp drain_and_continue(state) do
-    {:noreply, drain_buffered_signals(state)}
+    state = drain_buffered_signals(state)
+
+    # If no sync handler is currently running and no async handlers are
+    # pending, the runner is parked. Flush whatever the activation
+    # produced (including an empty completion) so Temporal acknowledges
+    # the workflow task.
+    if state.sync_handler_pid == nil and MapSet.size(state.async_handlers) == 0 and
+         state.status in [:in_receive, :receive_stopping] do
+      force_flush_commands(state)
+    else
+      {:noreply, state}
+    end
   end
 
   defp complete_receive(state, final_state) do
@@ -578,48 +635,13 @@ defmodule Temporalex.Worker.Executor do
   end
 
   defp check_replay(state, type, seq) do
-    case state.replay_log do
-      [{^type, ^seq, result} | rest] ->
-        {:replay, result, %{state | replay_log: rest}}
-
-      [{other_type, other_seq, _} | _] ->
-        # Nondeterminism — log doesn't match
-        Logger.error("Nondeterminism: expected #{type}/#{seq}, got #{other_type}/#{other_seq}")
-
-        raise "Nondeterminism detected: expected #{type} seq=#{seq}, got #{other_type} seq=#{other_seq}"
-
-      [] ->
-        {:new, state}
+    case Temporalex.Worker.Replay.consume(state.replay_log, type, seq) do
+      {:replay, result, rest} -> {:replay, result, %{state | replay_log: rest}}
+      {:new, _} -> {:new, state}
     end
   end
 
-  defp build_replay_log(jobs) do
-    # Extract resolution jobs and convert to replay log entries
-    jobs
-    |> Enum.filter(fn
-      {:resolve_activity, _} -> true
-      {:fire_timer, _} -> true
-      {:resolve_child_workflow_execution, _} -> true
-      _ -> false
-    end)
-    |> Enum.map(fn
-      {:resolve_activity, %{seq: seq, result: {:completed, payload}}} ->
-        {:activity, seq, Temporalex.Converter.decode(payload)}
-
-      {:resolve_activity, %{seq: seq, result: {:failed, failure}}} ->
-        {:activity, seq, {:error, failure}}
-
-      {:fire_timer, %{seq: seq}} ->
-        {:timer, seq, :ok}
-
-      {:resolve_child_workflow_execution, %{seq: seq, result: {:completed, payload}}} ->
-        {:child_workflow, seq, Temporalex.Converter.decode(payload)}
-
-      {:resolve_child_workflow_execution, %{seq: seq, result: {:failed, failure}}} ->
-        {:child_workflow, seq, {:error, failure}}
-    end)
-    |> Enum.sort_by(fn {_, seq, _} -> seq end)
-  end
+  defp build_replay_log(jobs), do: Temporalex.Worker.Replay.build_log(jobs)
 
   # --- Private: job categorization ---
 
@@ -732,7 +754,9 @@ defmodule Temporalex.Worker.Executor do
       case response do
         {:reply, value} ->
           payload = Temporalex.Converter.encode(value)
-          cmd = {:respond_to_query, %{query_id: qid, succeeded: %{response: payload}}}
+          # Rust encoder reads succeeded.result (see proto_bridge.rs); key
+          # name must match the native-side atom.
+          cmd = {:respond_to_query, %{query_id: qid, succeeded: %{result: payload}}}
           %{state | commands: [cmd | state.commands]}
 
         _ ->
@@ -804,6 +828,7 @@ defmodule Temporalex.Worker.Executor do
     pid =
       spawn_link(fn ->
         Process.put(:__temporal_executor__, executor)
+        Process.put(:__temporal_in_handler__, true)
         exit({:handler_result, apply(handler, handler_args)})
       end)
 
@@ -826,10 +851,18 @@ defmodule Temporalex.Worker.Executor do
 
   # --- Private: command flushing ---
 
-  # Flush immediately — called when the runner yields (blocks on a call)
+  # Flush immediately — called when the runner yields (blocks on a call).
+  # No-op when there are no commands to send.
   defp flush_commands(%{commands: []} = state), do: {:noreply, state}
 
-  defp flush_commands(state) do
+  defp flush_commands(state), do: do_flush(state)
+
+  # Force flush — always sends a completion, even with empty commands.
+  # Used when the runner parks on receive/wait_for_signal with nothing
+  # produced this activation; Temporal still needs an acknowledgement.
+  defp force_flush_commands(state), do: do_flush(state)
+
+  defp do_flush(state) do
     commands = Enum.reverse(state.commands)
 
     case Temporalex.Native.encode_workflow_completion(state.run_id, {:successful, commands}) do
