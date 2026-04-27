@@ -46,8 +46,18 @@ defmodule Temporalex.Workflow.API do
   end
 
   @doc """
-  Execute `fun` once and record its return value. On replay, returns
-  the recorded value without re-executing.
+  Execute `fun` once and return its value.
+
+  **Limitation:** `side_effect/1` is **not durable across cache
+  evictions**. If the workflow is evicted from Temporal's cache and
+  later re-activated on a different worker, `fun` runs again with a
+  new (potentially different) return value.
+
+  Use a regular `execute_activity/3` for anything non-deterministic
+  (ID generation, current time, random numbers) that must remain
+  stable after worker restart or eviction. `side_effect/1` is safe
+  only for values whose re-computation is acceptable (e.g. monitoring
+  or logging instrumentation).
   """
   def side_effect(fun) do
     GenServer.call(executor(), {:side_effect, fun}, :infinity)

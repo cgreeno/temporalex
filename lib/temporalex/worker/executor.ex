@@ -45,6 +45,7 @@ defmodule Temporalex.Worker.Executor do
     branch_to_parallel: %{},
     # Metadata
     patches: nil,
+    is_replaying: false,
     cancelled: false,
     commands: [],
     status: :idle
@@ -82,7 +83,7 @@ defmodule Temporalex.Worker.Executor do
       "Executor #{state.run_id}: processing activation with #{length(activation.jobs)} jobs"
     )
 
-    state = %{state | commands: []}
+    state = %{state | commands: [], is_replaying: Map.get(activation, :is_replaying, false)}
 
     # Categorize jobs
     {init_jobs, resolve_jobs, signal_jobs, update_jobs, query_jobs, patch_jobs, other_jobs} =
@@ -237,19 +238,24 @@ defmodule Temporalex.Worker.Executor do
   end
 
   def handle_call({:side_effect, fun}, _from, state) do
-    {seq, state} = next_seq(state)
-
-    case check_replay(state, :side_effect, seq) do
-      {:replay, result, state} ->
-        {:reply, result, state}
-
-      {:new, state} ->
-        # Execute once and record (side effects aren't commands, they're marker events)
-        result = fun.()
-        # In production, this would record a SideEffect marker.
-        # For now, execute and return immediately.
-        {:reply, result, state}
-    end
+    # KNOWN LIMITATION: side_effect is not durable across cache evictions.
+    #
+    # Within a single Executor's lifetime, side_effect runs exactly once
+    # per call site (the runner process keeps the value in its own stack),
+    # so identical workflow code sees identical results — the contract
+    # users expect in the happy path.
+    #
+    # However, if the workflow is evicted from Temporal's cache and later
+    # re-activated on a different worker, the Executor replays the
+    # workflow from history and side_effect runs again with a new value.
+    # Modern Temporal deprecated this pattern in favor of LocalActivity,
+    # which has proper marker-event support in workflow history. Use an
+    # Activity or LocalActivity (when implemented — see
+    # `notes/local_activity_design.md`) for non-deterministic work that
+    # must survive eviction.
+    {_seq, state} = next_seq(state)
+    result = fun.()
+    {:reply, result, state}
   end
 
   def handle_call({:publish_state, new_state}, _from, state) do
@@ -257,18 +263,29 @@ defmodule Temporalex.Worker.Executor do
   end
 
   def handle_call({:patched?, patch_id}, _from, state) do
-    if MapSet.member?(state.patches, patch_id) do
-      {:reply, true, state}
-    else
-      cmd = {:set_patch_marker, %{patch_id: patch_id, deprecated: false}}
+    cond do
+      # Already seen this patch — from a prior call this run, or from a
+      # notify_has_patch job (means the marker exists in history).
+      MapSet.member?(state.patches, patch_id) ->
+        {:reply, true, state}
 
-      state = %{
-        state
-        | patches: MapSet.put(state.patches, patch_id),
-          commands: [cmd | state.commands]
-      }
+      # Replay: the marker wasn't in history. Code that calls patched?
+      # from the "new" branch should NOT see true during replay.
+      state.is_replaying ->
+        {:reply, false, state}
 
-      {:reply, true, state}
+      # New execution, first time seeing this patch: emit the marker and
+      # record it so subsequent calls in this run return true.
+      true ->
+        cmd = {:set_patch_marker, %{patch_id: patch_id, deprecated: false}}
+
+        state = %{
+          state
+          | patches: MapSet.put(state.patches, patch_id),
+            commands: [cmd | state.commands]
+        }
+
+        {:reply, true, state}
     end
   end
 

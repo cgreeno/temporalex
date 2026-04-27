@@ -194,30 +194,29 @@ defmodule Temporalex.ReplayTest do
   end
 
   describe "R12 — patched? on new execution" do
-    test "patched? returns true, gating the new branch" do
+    test "patched? returns true on a fresh execution, taking the new branch" do
       {:ok, exec} = Testing.start_workflow(PatchedWorkflow, %{})
       assert {:ok, :new_branch} = Testing.next(exec)
     end
   end
 
-  describe "R13 — patched? on replay with marker" do
-    # A patch marker populated on state.patches (via notify_has_patch) causes
-    # patched? to return true without emitting a new command. Testing.Executor
-    # always returns true, matching the replay behavior.
-    test "patched? returns true when the patch has already been marked" do
-      {:ok, exec} = Testing.start_workflow(PatchedWorkflow, %{})
+  describe "R13 — patched? on replay with marker in history" do
+    test "patched? returns true when the patch id is pre-marked as seen" do
+      {:ok, exec} =
+        Testing.start_workflow(PatchedWorkflow, %{},
+          is_replaying: true,
+          seen_patches: ["v2"]
+        )
+
       assert {:ok, :new_branch} = Testing.next(exec)
     end
   end
 
   describe "R14 — patched? on replay without marker" do
-    # Design note: the current implementation always returns true from
-    # patched?, regardless of marker presence. Proper replay-vs-new
-    # discrimination requires distinguishing "marker present" from
-    # "marker absent" — tracked as future work.
-    test "documents current behavior: patched? always returns true" do
-      {:ok, exec} = Testing.start_workflow(PatchedWorkflow, %{})
-      assert {:ok, :new_branch} = Testing.next(exec)
+    test "patched? returns false when replaying and the patch isn't in history" do
+      {:ok, exec} = Testing.start_workflow(PatchedWorkflow, %{}, is_replaying: true)
+
+      assert {:ok, :old_branch} = Testing.next(exec)
     end
   end
 

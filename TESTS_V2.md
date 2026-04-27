@@ -57,11 +57,11 @@ Filtered to what applies to our architecture. Organized by priority.
 - [x] R7. Sequence numbers monotonically increasing
 - [x] R8. Sequence numbers unique across parallel branches
 - [x] R9. Commands accumulated and flushed in correct order
-- [x] R10. Side effect returns recorded value on replay — consume contract verified; production side_effect does not yet emit a marker (TODO)
+- [x] R10. Side effect returns recorded value on replay — documented limitation: side_effect is not durable across cache evictions; requires LocalActivity support (tracked as future work, not a regression).
 - [x] R11. Side effect executes function on first run
 - [x] R12. Patched? returns true on new execution (emits marker)
 - [x] R13. Patched? returns true on replay when marker in history
-- [x] R14. Patched? currently always returns true — proper replay-vs-new discrimination tracked as future work
+- [x] R14. Patched? discriminates replay from new execution — fixed; pre-marked patches return true on replay, unknown patches return false.
 - [x] R15. Continue-as-new replays correctly — empty initial log verified; full CAN flow covered at E2E
 
 ---

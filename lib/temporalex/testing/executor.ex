@@ -32,14 +32,20 @@ defmodule Temporalex.Testing.Executor do
             pending_handler_queue: nil,
             cancelled: false,
             result: nil,
-            status: :starting
+            status: :starting,
+            # Replay / versioning controls (driven by test API).
+            is_replaying: false,
+            patches: nil
 
   # --- Init ---
 
   @impl true
-  def init({module, args}) do
+  def init({module, args, opts}) do
     Process.flag(:trap_exit, true)
     executor = self()
+
+    is_replaying = Keyword.get(opts, :is_replaying, false)
+    seen_patches = Keyword.get(opts, :seen_patches, []) |> MapSet.new()
 
     pid =
       spawn_link(fn ->
@@ -55,9 +61,15 @@ defmodule Temporalex.Testing.Executor do
        pending_queue: :queue.new(),
        pending_handler_queue: :queue.new(),
        async_handlers: MapSet.new(),
+       patches: seen_patches,
+       is_replaying: is_replaying,
        status: :running
      }}
   end
+
+  # Backwards-compatible init clause for callers still using the old
+  # 2-tuple form.
+  def init({module, args}), do: init({module, args, []})
 
   # --- Test API: next / resolve ---
 
@@ -94,6 +106,18 @@ defmodule Temporalex.Testing.Executor do
 
   def handle_call(:cancel, _from, state) do
     {:reply, :ok, %{state | cancelled: true}}
+  end
+
+  # Mark this executor as replaying; `patched?` will return false for any
+  # patch that isn't already in state.patches (i.e. not in history).
+  def handle_call(:set_replaying, _from, state) do
+    {:reply, :ok, %{state | is_replaying: true}}
+  end
+
+  # Pre-populate seen patches, mirroring notify_has_patch jobs from a
+  # replay activation.
+  def handle_call({:mark_patch_seen, patch_id}, _from, state) do
+    {:reply, :ok, %{state | patches: MapSet.put(state.patches, patch_id)}}
   end
 
   # --- Test API: signal delivery ---
@@ -182,8 +206,17 @@ defmodule Temporalex.Testing.Executor do
     {:reply, :ok, %{state | published_state: new_state}}
   end
 
-  def handle_call({:patched?, _patch_id}, _from, state) do
-    {:reply, true, state}
+  def handle_call({:patched?, patch_id}, _from, state) do
+    cond do
+      MapSet.member?(state.patches, patch_id) ->
+        {:reply, true, state}
+
+      state.is_replaying ->
+        {:reply, false, state}
+
+      true ->
+        {:reply, true, %{state | patches: MapSet.put(state.patches, patch_id)}}
+    end
   end
 
   def handle_call({:deprecate_patch, _patch_id}, _from, state) do

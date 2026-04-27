@@ -23,9 +23,18 @@ defmodule Temporalex.Testing do
 
   alias Temporalex.Testing.Executor
 
-  @doc "Start a workflow in test mode. Returns `{:ok, executor_pid}`."
-  def start_workflow(module, args \\ %{}) do
-    GenServer.start_link(Executor, {module, args})
+  @doc """
+  Start a workflow in test mode. Returns `{:ok, executor_pid}`.
+
+  Options:
+    * `:is_replaying` — when true, `patched?/1` returns false for patches
+      that haven't been marked as seen (via `:seen_patches` or
+      `mark_patch_seen/2`). Models a Temporal replay activation.
+    * `:seen_patches` — a list of patch ids to pre-populate as "seen",
+      mirroring `notify_has_patch` jobs from an activation's history.
+  """
+  def start_workflow(module, args \\ %{}, opts \\ []) do
+    GenServer.start_link(Executor, {module, args, opts})
     |> case do
       {:ok, pid} -> {:ok, pid}
       error -> error
@@ -70,6 +79,19 @@ defmodule Temporalex.Testing do
 
   @doc "Set the workflow's cancelled flag."
   def cancel(exec), do: GenServer.call(exec, :cancel, 5000)
+
+  @doc """
+  Flip the executor into replay mode. Subsequent `patched?` calls that
+  haven't seen the patch id (via `mark_patch_seen/2`) will return false.
+  """
+  def set_replaying(exec), do: GenServer.call(exec, :set_replaying, 5000)
+
+  @doc """
+  Mark a patch id as "seen in history" — mirrors what a notify_has_patch
+  job would do during replay. After this, `patched?(id)` returns true.
+  """
+  def mark_patch_seen(exec, patch_id),
+    do: GenServer.call(exec, {:mark_patch_seen, patch_id}, 5000)
 
   @doc """
   Run a workflow with a pre-loaded operation log. Convenience wrapper
