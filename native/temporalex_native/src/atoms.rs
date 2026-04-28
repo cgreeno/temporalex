@@ -73,6 +73,7 @@ rustler::atoms! {
     respond_to_query,
     set_patch_marker,
     start_child_workflow_execution,
+    schedule_local_activity,
 
     // Proto bridge: removal reasons
     cache_full,

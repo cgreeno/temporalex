@@ -28,6 +28,10 @@ defmodule Temporalex.E2ETest do
     defactivity(multiply(a, b), do: {:ok, a * b})
     defactivity(echo(x), do: {:ok, x})
     defactivity(fail_once(x), do: {:error, {:always_fails, x}})
+
+    defactivity tag_id(prefix), local: true do
+      {:ok, "#{prefix}-#{:erlang.phash2(prefix, 1_000_000)}"}
+    end
   end
 
   # --- Test workflows ---
@@ -44,6 +48,16 @@ defmodule Temporalex.E2ETest do
       {:ok, sum} = Acts.add(args["a"], args["b"])
       {:ok, product} = Acts.multiply(sum, args["c"])
       {:ok, %{sum: sum, product: product}}
+    end
+  end
+
+  defmodule LocalActivityWorkflow do
+    use Temporalex.Workflow
+
+    def run(args) do
+      {:ok, tag} = Acts.tag_id(args["prefix"])
+      {:ok, doubled} = Acts.multiply(2, 3)
+      {:ok, %{tag: tag, doubled: doubled}}
     end
   end
 
@@ -622,6 +636,21 @@ defmodule Temporalex.E2ETest do
       cli_cancel(wf_id)
 
       cli_wait_terminal(wf_id, 30_000)
+    end
+  end
+
+  describe "E2E19 — local activity end-to-end" do
+    test "workflow runs a local activity then a regular activity" do
+      %{task_queue: tq} = start_worker([LocalActivityWorkflow], [Acts])
+
+      wf_id =
+        cli_start_workflow(
+          "Temporalex.E2ETest.LocalActivityWorkflow",
+          tq,
+          input: ~s({"prefix": "ord"})
+        )
+
+      cli_wait(wf_id, "Completed")
     end
   end
 

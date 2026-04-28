@@ -30,6 +30,9 @@ defmodule Temporalex.Testing.Executor do
             sync_handler_pid: nil,
             sync_handler_update_from: nil,
             pending_handler_queue: nil,
+            receive_timer_ref: nil,
+            receive_timer_id: nil,
+            receive_stop_value: nil,
             cancelled: false,
             result: nil,
             status: :starting,
@@ -174,6 +177,11 @@ defmodule Temporalex.Testing.Executor do
     {:noreply, enqueue_pending(state, {:activity, %{type: type, input: input, opts: opts}}, from)}
   end
 
+  def handle_call({:execute_local_activity, type, input, opts}, from, state) do
+    {:noreply,
+     enqueue_pending(state, {:local_activity, %{type: type, input: input, opts: opts}}, from)}
+  end
+
   def handle_call({:start_child_workflow, workflow_type, args, opts}, from, state) do
     {:noreply,
      enqueue_pending(
@@ -240,6 +248,7 @@ defmodule Temporalex.Testing.Executor do
         status: :in_receive
     }
 
+    state = arm_receive_timer(state, timeout)
     state = drain_buffered_signals(state)
 
     receive_info =
@@ -325,6 +334,25 @@ defmodule Temporalex.Testing.Executor do
       true -> {:noreply, state}
     end
   end
+
+  # Receive timer fired. Replies {:timeout, receive_state} to the runner
+  # and tears down the receive. Stale fires (after the receive already
+  # exited normally) are ignored via the timer_id check.
+  def handle_info({:receive_timeout, id}, %{receive_timer_id: id} = state)
+      when state.status in [:in_receive, :receive_stopping] do
+    state = %{state | receive_timer_ref: nil, receive_timer_id: nil}
+    timeout_reply = {:timeout, state.receive_state}
+
+    if MapSet.size(state.async_handlers) > 0 do
+      # Pending async handlers — wait for them, then complete with the
+      # captured timeout value.
+      {:noreply, %{state | status: :receive_stopping, receive_stop_value: timeout_reply}}
+    else
+      do_complete_receive(state, timeout_reply)
+    end
+  end
+
+  def handle_info({:receive_timeout, _stale_id}, state), do: {:noreply, state}
 
   # --- Private: runner exit ---
 
@@ -565,6 +593,8 @@ defmodule Temporalex.Testing.Executor do
   end
 
   defp complete_receive(state, final_state) do
+    state = cancel_receive_timer(state)
+
     if MapSet.size(state.async_handlers) > 0 do
       {:noreply, %{state | status: :receive_stopping}}
     else
@@ -576,12 +606,44 @@ defmodule Temporalex.Testing.Executor do
     GenServer.reply(state.receive_from, final_state)
 
     {:noreply,
-     %{state | receive_state: nil, receive_opts: nil, receive_from: nil, status: :running}}
+     %{
+       state
+       | receive_state: nil,
+         receive_opts: nil,
+         receive_from: nil,
+         status: :running
+     }}
+  end
+
+  # --- Private: receive timeout ---
+
+  defp arm_receive_timer(state, nil), do: state
+
+  defp arm_receive_timer(state, timeout) when is_integer(timeout) and timeout >= 0 do
+    timer_id = make_ref()
+    timer_ref = Process.send_after(self(), {:receive_timeout, timer_id}, timeout)
+    %{state | receive_timer_ref: timer_ref, receive_timer_id: timer_id}
+  end
+
+  defp cancel_receive_timer(%{receive_timer_ref: nil} = state), do: state
+
+  defp cancel_receive_timer(%{receive_timer_ref: ref} = state) do
+    _ = Process.cancel_timer(ref)
+    # Drain a stale message if it was already in the mailbox.
+    receive do
+      {:receive_timeout, _} -> :ok
+    after
+      0 -> :ok
+    end
+
+    %{state | receive_timer_ref: nil, receive_timer_id: nil}
   end
 
   defp maybe_complete_receive(%{status: :receive_stopping} = state) do
     if MapSet.size(state.async_handlers) == 0 do
-      do_complete_receive(state, state.receive_state)
+      reply_value = state.receive_stop_value || state.receive_state
+      state = %{state | receive_stop_value: nil}
+      do_complete_receive(state, reply_value)
     else
       {:noreply, state}
     end

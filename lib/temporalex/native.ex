@@ -49,8 +49,20 @@ defmodule Temporalex.Native do
 
   # --- Client operations (async, send result to pid) ---
 
-  def start_workflow(_client, _ns, _wf_id, _wf_type, _tq, _input, _req_id, _pid),
-    do: :erlang.nif_error(:nif_not_loaded)
+  def start_workflow(
+        _client,
+        _ns,
+        _wf_id,
+        _wf_type,
+        _tq,
+        _input,
+        _req_id,
+        _execution_timeout_ms,
+        _run_timeout_ms,
+        _task_timeout_ms,
+        _pid
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
 
   def signal_workflow(_client, _ns, _wf_id, _run_id, _signal, _input, _req_id, _pid),
     do: :erlang.nif_error(:nif_not_loaded)

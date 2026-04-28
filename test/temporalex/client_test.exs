@@ -55,6 +55,22 @@ defmodule Temporalex.ClientTest do
         end
       end
     end
+
+    test "Client.start_workflow accepts execution/run/task timeout opts" do
+      # Reach the NIF call — fake_client makes it bail with ArgumentError
+      # before any retry, but only AFTER our Elixir surface has accepted
+      # the opts. Confirms the new options aren't rejected at the boundary.
+      assert_raise ArgumentError, fn ->
+        Client.start_workflow(:fake_client, "default",
+          workflow_id: "wf-1",
+          workflow_type: "Some.Wf",
+          task_queue: "q",
+          execution_timeout_ms: 60_000,
+          run_timeout_ms: 30_000,
+          task_timeout_ms: 10_000
+        )
+      end
+    end
   end
 
   describe "CL3 — signal_workflow requires workflow_id and signal_name" do

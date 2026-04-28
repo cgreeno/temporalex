@@ -48,7 +48,11 @@ defmodule Temporalex.Worker.Executor do
     is_replaying: false,
     cancelled: false,
     commands: [],
-    status: :idle
+    status: :idle,
+    # Receive timeout
+    receive_timer_ref: nil,
+    receive_timer_id: nil,
+    receive_stop_value: nil
   ]
 
   def start_link(opts) do
@@ -134,6 +138,21 @@ defmodule Temporalex.Worker.Executor do
     {:noreply, state}
   end
 
+  # Receive timer fired (SDK-local, not a workflow timer).
+  def handle_info({:receive_timeout, id}, %{receive_timer_id: id} = state)
+      when state.status in [:in_receive, :receive_stopping] do
+    state = %{state | receive_timer_ref: nil, receive_timer_id: nil}
+    timeout_reply = {:timeout, state.receive_state}
+
+    if MapSet.size(state.async_handlers) > 0 do
+      {:noreply, %{state | status: :receive_stopping, receive_stop_value: timeout_reply}}
+    else
+      do_complete_receive(state, timeout_reply)
+    end
+  end
+
+  def handle_info({:receive_timeout, _stale_id}, state), do: {:noreply, state}
+
   # --- Workflow API calls (from runner/handler processes) ---
 
   @impl true
@@ -157,6 +176,36 @@ defmodule Temporalex.Worker.Executor do
              task_queue: state.task_queue,
              input: payloads,
              schedule_to_close_timeout_ms: timeout
+           }}
+
+        state = %{
+          state
+          | commands: [cmd | state.commands],
+            pending_calls: Map.put(state.pending_calls, seq, from)
+        }
+
+        flush_commands(state)
+    end
+  end
+
+  def handle_call({:execute_local_activity, type, input, opts}, from, state) do
+    {seq, state} = next_seq(state)
+
+    case check_replay(state, :activity, seq) do
+      {:replay, result, state} ->
+        {:reply, result, state}
+
+      {:new, state} ->
+        payloads = Temporalex.Converter.encode_args(input)
+        timeout = Keyword.get(opts, :start_to_close_timeout_ms, 30_000)
+
+        cmd =
+          {:schedule_local_activity,
+           %{
+             seq: seq,
+             activity_type: type,
+             input: payloads,
+             start_to_close_timeout_ms: timeout
            }}
 
         state = %{
@@ -308,6 +357,12 @@ defmodule Temporalex.Worker.Executor do
         receive_from: from,
         status: :in_receive
     }
+
+    # Arm an SDK-side timer for the optional :timeout. Note: this is not
+    # a workflow timer command — it's local to the executor process and
+    # fires only while this Executor is alive. After cache eviction the
+    # timer is gone (and a new activation would re-arm it on replay).
+    state = arm_receive_timer(state, Keyword.get(opts, :timeout))
 
     # Drain buffered signals that have matching handlers
     state = drain_buffered_signals(state)
@@ -600,6 +655,8 @@ defmodule Temporalex.Worker.Executor do
   end
 
   defp complete_receive(state, final_state) do
+    state = cancel_receive_timer(state)
+
     if MapSet.size(state.async_handlers) > 0 do
       {:noreply, %{state | status: :receive_stopping}}
     else
@@ -611,18 +668,50 @@ defmodule Temporalex.Worker.Executor do
     GenServer.reply(state.receive_from, final_state)
 
     {:noreply,
-     %{state | receive_state: nil, receive_opts: nil, receive_from: nil, status: :running}}
+     %{
+       state
+       | receive_state: nil,
+         receive_opts: nil,
+         receive_from: nil,
+         status: :running
+     }}
   end
 
   defp maybe_complete_receive(%{status: :receive_stopping} = state) do
     if MapSet.size(state.async_handlers) == 0 do
-      do_complete_receive(state, state.receive_state)
+      reply_value = state.receive_stop_value || state.receive_state
+      state = %{state | receive_stop_value: nil}
+      do_complete_receive(state, reply_value)
     else
       {:noreply, state}
     end
   end
 
   defp maybe_complete_receive(state), do: {:noreply, state}
+
+  # --- Private: receive timer (SDK-local) ---
+
+  defp arm_receive_timer(state, nil), do: state
+
+  defp arm_receive_timer(state, timeout) when is_integer(timeout) and timeout >= 0 do
+    timer_id = make_ref()
+    timer_ref = Process.send_after(self(), {:receive_timeout, timer_id}, timeout)
+    %{state | receive_timer_ref: timer_ref, receive_timer_id: timer_id}
+  end
+
+  defp cancel_receive_timer(%{receive_timer_ref: nil} = state), do: state
+
+  defp cancel_receive_timer(%{receive_timer_ref: ref} = state) do
+    _ = Process.cancel_timer(ref)
+
+    receive do
+      {:receive_timeout, _} -> :ok
+    after
+      0 -> :ok
+    end
+
+    %{state | receive_timer_ref: nil, receive_timer_id: nil}
+  end
 
   # --- Private: signal buffer ---
 

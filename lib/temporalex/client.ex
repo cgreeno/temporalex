@@ -58,6 +58,11 @@ defmodule Temporalex.Client do
   ## Options (optional)
   - `:input` — workflow input (will be ETF-encoded)
   - `:request_id` — idempotency key (auto-generated if omitted)
+  - `:execution_timeout_ms` — total time the workflow is allowed to run
+    (across continue-as-new chains)
+  - `:run_timeout_ms` — time a single run is allowed to take
+  - `:task_timeout_ms` — time a single workflow task is allowed to take
+    before being retried by the server
   """
   def start_workflow(client, namespace, opts) do
     workflow_id = Keyword.fetch!(opts, :workflow_id)
@@ -65,6 +70,10 @@ defmodule Temporalex.Client do
     task_queue = Keyword.fetch!(opts, :task_queue)
     input = Keyword.get(opts, :input)
     request_id = Keyword.get(opts, :request_id, generate_request_id())
+
+    execution_timeout_ms = Keyword.get(opts, :execution_timeout_ms, 0)
+    run_timeout_ms = Keyword.get(opts, :run_timeout_ms, 0)
+    task_timeout_ms = Keyword.get(opts, :task_timeout_ms, 0)
 
     input_payload = if input, do: Temporalex.Converter.encode(input), else: nil
 
@@ -76,6 +85,9 @@ defmodule Temporalex.Client do
       task_queue,
       input_payload,
       request_id,
+      execution_timeout_ms,
+      run_timeout_ms,
+      task_timeout_ms,
       self()
     )
 

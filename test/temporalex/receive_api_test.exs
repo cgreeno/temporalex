@@ -271,10 +271,7 @@ defmodule Temporalex.ReceiveApiTest do
     end
   end
 
-  describe "RC2 — timeout carried in receive descriptor" do
-    # Note: Testing.Executor does not auto-fire receive timeouts — full
-    # {:timeout, state} behavior requires timer integration (tracked as
-    # future work). The descriptor exposure of :timeout is verified here.
+  describe "RC2 — receive auto-fires on timeout" do
     test "receive_opts timeout surfaces in the descriptor" do
       {:ok, exec} = Testing.start_workflow(TimeoutDescriptorWorkflow, %{})
       assert {:receive, info} = Testing.next(exec)
@@ -283,6 +280,63 @@ defmodule Temporalex.ReceiveApiTest do
       Testing.send_signal(exec, "done", nil)
       Process.sleep(20)
       assert {:ok, :initial} = Testing.next(exec)
+    end
+
+    defmodule QuickTimeoutWorkflow do
+      use Temporalex.Workflow
+
+      def run(_args) do
+        result =
+          API.receive(0,
+            signal: %{
+              "tick" => fn _payload, count -> {:noreply, count + 1} end
+            },
+            timeout: 50
+          )
+
+        {:ok, result}
+      end
+    end
+
+    test "no signal arrives within the timeout → {:timeout, state} returned" do
+      {:ok, exec} = Testing.start_workflow(QuickTimeoutWorkflow, %{})
+      assert {:receive, _} = Testing.next(exec)
+
+      # Wait for the auto-fire.
+      Process.sleep(120)
+
+      assert {:ok, {:timeout, 0}} = Testing.next(exec)
+    end
+
+    test "signal cancels the timer and the receive stops normally" do
+      defmodule TimeoutOrSignalWorkflow do
+        use Temporalex.Workflow
+
+        def run(_args) do
+          result =
+            API.receive(:waiting,
+              signal: %{
+                "go" => fn _payload, _state -> {:stop, :got_signal} end
+              },
+              timeout: 5_000
+            )
+
+          {:ok, result}
+        end
+      end
+
+      {:ok, exec} = Testing.start_workflow(TimeoutOrSignalWorkflow, %{})
+      assert {:receive, _} = Testing.next(exec)
+
+      Testing.send_signal(exec, "go", nil)
+      Process.sleep(20)
+
+      # Stopped via signal — NOT a timeout, even though we let some time pass.
+      assert {:ok, :got_signal} = Testing.next(exec)
+
+      # And the timer stays cancelled — no stale {:timeout, _} message.
+      Process.sleep(50)
+      refute_received _
     end
   end
 

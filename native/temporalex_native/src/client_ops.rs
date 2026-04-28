@@ -32,6 +32,10 @@ fn start_workflow(
     task_queue: String,
     input: Term,
     request_id: String,
+    // Timeouts in milliseconds. Pass 0 (or negative) to omit a timeout.
+    execution_timeout_ms: i64,
+    run_timeout_ms: i64,
+    task_timeout_ms: i64,
     pid: LocalPid,
 ) -> Atom {
     let handle = client.runtime_handle.clone();
@@ -46,6 +50,17 @@ fn start_workflow(
         let payload = encode_payload_from_nif_term(input);
         payload.map(|p| Payloads { payloads: vec![p] })
     };
+
+    fn ms_to_duration(ms: i64) -> Option<::prost_wkt_types::Duration> {
+        if ms <= 0 {
+            None
+        } else {
+            Some(::prost_wkt_types::Duration {
+                seconds: ms / 1000,
+                nanos: ((ms % 1000) * 1_000_000) as i32,
+            })
+        }
+    }
 
     handle.spawn(async move {
         let guard = TaskGuard::new(pid, atoms::start_workflow_result());
@@ -64,6 +79,9 @@ fn start_workflow(
             input: payloads,
             request_id,
             identity: format!("temporalex@{}", std::process::id()),
+            workflow_execution_timeout: ms_to_duration(execution_timeout_ms),
+            workflow_run_timeout: ms_to_duration(run_timeout_ms),
+            workflow_task_timeout: ms_to_duration(task_timeout_ms),
             ..Default::default()
         };
 

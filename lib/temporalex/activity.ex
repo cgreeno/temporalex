@@ -37,11 +37,36 @@ defmodule Temporalex.Activity do
   - `:timeout` — schedule-to-close timeout in ms (default: 30_000)
   - `:heartbeat_timeout` — heartbeat timeout in ms
   - `:retry_policy` — retry configuration map
+  - `:local` — when true, the dispatch function calls
+    `execute_local_activity/3` instead. Use for short, in-process
+    operations (id generation, current time, lookups). Local activities
+    are recorded in workflow history and survive worker crashes.
+  - `:start_to_close_timeout_ms` — local activity timeout (default: 30_000)
   """
   defmacro defactivity(head, opts \\ [], do: body) do
     {name, args} = parse_head(head)
     impl_name = :"__#{name}__"
     activity_type = activity_type_string(__CALLER__.module, name)
+    local? = Keyword.get(opts, :local, false)
+
+    dispatch_call =
+      if local? do
+        quote do
+          Temporalex.Workflow.API.execute_local_activity(
+            unquote(activity_type),
+            input,
+            unquote(opts)
+          )
+        end
+      else
+        quote do
+          Temporalex.Workflow.API.execute_activity(
+            unquote(activity_type),
+            input,
+            unquote(opts)
+          )
+        end
+      end
 
     quote do
       # Register for __temporal_activities__/0
@@ -50,12 +75,7 @@ defmodule Temporalex.Activity do
       # Dispatch function — called from workflow code
       def unquote(name)(unquote_splicing(args)) do
         input = unquote(args)
-
-        Temporalex.Workflow.API.execute_activity(
-          unquote(activity_type),
-          input,
-          unquote(opts)
-        )
+        unquote(dispatch_call)
       end
 
       # Implementation function — called by server when activity task arrives

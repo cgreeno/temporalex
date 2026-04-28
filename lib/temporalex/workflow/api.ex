@@ -35,6 +35,24 @@ defmodule Temporalex.Workflow.API do
     GenServer.call(executor(), {:execute_activity, type, input, opts}, :infinity)
   end
 
+  @doc """
+  Execute a *local* activity. Blocks until completion.
+
+  Local activities are short, in-process operations that the worker
+  runs directly without round-tripping through the Temporal task queue.
+  Use them for cheap deterministic-with-side-effects work (id
+  generation, current time, small lookups). Their result is recorded
+  in workflow history, so they survive worker crashes — unlike
+  `side_effect/1` — making them the safe replacement for non-durable
+  inline functions.
+
+  Options:
+  - `:start_to_close_timeout_ms` (default 30_000)
+  """
+  def execute_local_activity(type, input, opts \\ []) do
+    GenServer.call(executor(), {:execute_local_activity, type, input, opts}, :infinity)
+  end
+
   @doc "Durable timer. Blocks for `duration_ms` milliseconds."
   def sleep(duration_ms) do
     GenServer.call(executor(), {:sleep, duration_ms}, :infinity)
@@ -48,16 +66,15 @@ defmodule Temporalex.Workflow.API do
   @doc """
   Execute `fun` once and return its value.
 
-  **Limitation:** `side_effect/1` is **not durable across cache
-  evictions**. If the workflow is evicted from Temporal's cache and
-  later re-activated on a different worker, `fun` runs again with a
-  new (potentially different) return value.
+  **Deprecated for non-deterministic work.** Use `execute_local_activity/3`
+  (or `defactivity ..., local: true`) instead — local activities are
+  recorded in workflow history and survive worker crashes/cache evictions.
 
-  Use a regular `execute_activity/3` for anything non-deterministic
-  (ID generation, current time, random numbers) that must remain
-  stable after worker restart or eviction. `side_effect/1` is safe
-  only for values whose re-computation is acceptable (e.g. monitoring
-  or logging instrumentation).
+  `side_effect/1` is **not durable across cache evictions**: if the
+  workflow is evicted and later re-activated on a different worker,
+  `fun` runs again with a new value. Safe only for values whose
+  re-computation is acceptable (e.g. monitoring or logging
+  instrumentation).
   """
   def side_effect(fun) do
     GenServer.call(executor(), {:side_effect, fun}, :infinity)

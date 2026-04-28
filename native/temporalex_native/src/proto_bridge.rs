@@ -397,6 +397,26 @@ fn decode_workflow_command<'a>(
             schedule_to_close_timeout: Some(ms_to_duration(timeout)),
             ..Default::default()
         })
+    } else if tag == atoms::schedule_local_activity() {
+        let seq: u32 = get_map_val(env, info, atoms::seq())?;
+        let activity_type: String = get_map_val(env, info, atoms::activity_type())?;
+        let input_terms: Vec<Term> = get_map_val_or(env, info, atoms::input(), vec![]);
+        let timeout: u64 = get_map_val_or(env, info, atoms::start_to_close_timeout_ms(), 30000);
+
+        let input: Vec<_> = input_terms
+            .into_iter()
+            .filter_map(|t| encode_payload_from_term(env, t).ok())
+            .collect();
+
+        workflow_command::Variant::ScheduleLocalActivity(ScheduleLocalActivity {
+            seq,
+            activity_id: seq.to_string(),
+            activity_type,
+            attempt: 1,
+            arguments: input,
+            start_to_close_timeout: Some(ms_to_duration(timeout)),
+            ..Default::default()
+        })
     } else if tag == atoms::start_timer() {
         let seq: u32 = get_map_val(env, info, atoms::seq())?;
         let ms: u64 = get_map_val(env, info, atoms::start_to_fire_timeout_ms())?;

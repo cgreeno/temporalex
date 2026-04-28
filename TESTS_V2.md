@@ -3,7 +3,7 @@
 Derived from Go, TypeScript, Python, Java SDK test suites + Temporal conformance repo.
 Filtered to what applies to our architecture. Organized by priority.
 
-**Current:** 245 tests (227 unit + 18 E2E) | **Target:** ~220 tests (target exceeded)
+**Current:** 252 tests (233 unit + 19 E2E) | **Target:** ~220 tests (target exceeded)
 
 ---
 
@@ -20,7 +20,7 @@ Filtered to what applies to our architecture. Organized by priority.
 - [x] W8. Workflow module validation: missing run/1 raises CompileError
 - [x] W9. Workflow __temporal_workflow_type__/0 returns correct string (no Elixir. prefix)
 - [x] W10. Workflow not found on worker causes task failure (not permanent fail) — registry lookup via type string
-- [x] W11. Workflow options (timeouts) passed correctly at start — activity opts passthrough verified; Client.start_workflow timeout opts are not yet plumbed
+- [x] W11. Workflow options (timeouts) passed correctly at start — Client.start_workflow accepts :execution_timeout_ms, :run_timeout_ms, :task_timeout_ms; plumbed through NIF as prost_wkt_types::Duration on the start request.
 - [x] W12. Dynamic workflow dispatch (workflow type as string lookup)
 
 ### Activity Execution (14 tests)
@@ -57,7 +57,7 @@ Filtered to what applies to our architecture. Organized by priority.
 - [x] R7. Sequence numbers monotonically increasing
 - [x] R8. Sequence numbers unique across parallel branches
 - [x] R9. Commands accumulated and flushed in correct order
-- [x] R10. Side effect returns recorded value on replay — documented limitation: side_effect is not durable across cache evictions; requires LocalActivity support (tracked as future work, not a regression).
+- [x] R10. Side effect returns recorded value on replay — `side_effect/1` is documented as non-durable; `execute_local_activity/3` (or `defactivity ..., local: true`) is the durable replacement, recorded in workflow history.
 - [x] R11. Side effect executes function on first run
 - [x] R12. Patched? returns true on new execution (emits marker)
 - [x] R13. Patched? returns true on replay when marker in history
@@ -110,7 +110,7 @@ Filtered to what applies to our architecture. Organized by priority.
 
 ### API.receive (14 tests)
 - [x] RC1. Receive blocks caller, returns on {:stop, state}
-- [x] RC2. Receive with timeout — descriptor exposes timeout; auto-fire behavior is future work
+- [x] RC2. Receive with timeout — auto-fires; SDK-local timer (Process.send_after) replies {:timeout, state}; cancelled cleanly when handler stops the receive first.
 - [x] RC3. Receive with mixed signal + update handlers
 - [x] RC4. Receive state is independent from published state
 - [x] RC5. Receive state scoped to one receive block
