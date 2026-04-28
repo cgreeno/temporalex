@@ -210,4 +210,4 @@ the workflow programming model.
 
 ## License
 
-TBD before stable release.
+MIT — see [LICENSE](LICENSE).
