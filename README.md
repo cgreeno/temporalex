@@ -145,7 +145,7 @@ before the scope returns.
 | `API.update_state(fn)` | inside an async handler | Atomically transform the receive's reducer state. |
 
 Full details, return-value contracts, and design rationale: see
-[`architecture.md`](architecture.md).
+[`docs/architecture.md`](docs/architecture.md).
 
 ---
 
@@ -203,10 +203,9 @@ native/temporalex_native/
 
 ## Contributing
 
-The project is in active development. The test plan is tracked in
-[`TESTS_V2.md`](TESTS_V2.md) — items still flagged as scaffold or future-work
-are good places to start. The architecture document is the source of truth for
-the workflow programming model.
+The project is in active development. [`docs/architecture.md`](docs/architecture.md)
+is the source of truth for the workflow programming model — read it before
+proposing changes to the public API.
 
 ## License
 

@@ -17,3 +17,10 @@ temporalex-*.tar
 
 # OS
 .DS_Store
+
+# Local Claude Code config
+/.claude/
+
+# Internal working docs (kept locally, not published)
+/TESTS.md
+/TESTS_V2.md
