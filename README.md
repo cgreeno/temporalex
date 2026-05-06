@@ -9,9 +9,11 @@ timers, signals, queries, updates, child workflows, and continue-as-new all
 work the same way they do in the official SDKs, but the programming surface is
 designed for Elixir, not transliterated from another language.
 
-> **Status: pre-release.** v0.2 is a clean rewrite from v0.1; the API is not
-> backwards-compatible. 252 tests pass against a live Temporal dev server.
-> Suitable for evaluation. Do not run on critical production paths yet.
+> **Status: 0.2.0 on Hex.** From this release forward, upgrades aim to be
+> backwards-compatible within the `0.x` line — no more clean-slate rewrites.
+> Breaking changes will be flagged in the CHANGELOG and accompanied by a
+> deprecation period whenever practical. 303 unit tests plus end-to-end
+> integration tests against a live Temporal dev server.
 
 ---
 
@@ -20,7 +22,7 @@ designed for Elixir, not transliterated from another language.
 ```elixir
 # mix.exs
 defp deps do
-  [{:temporalex, github: "cgreeno/temporalex", branch: "main"}]
+  [{:temporalex, "~> 0.2.0"}]
 end
 ```
 
