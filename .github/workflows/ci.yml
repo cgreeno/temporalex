@@ -35,7 +35,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
+          # NIF source affects what's compiled into _build/test/lib/.../priv/native/.
+          # If we don't include it in the key, a stale cache can hide a missing .so.
+          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/temporalex_native/Cargo.lock', 'native/temporalex_native/src/**') }}
           restore-keys: ${{ runner.os }}-mix-
 
       - name: Cache Rust
@@ -75,7 +77,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
+          # NIF source affects what's compiled into _build/test/lib/.../priv/native/.
+          # If we don't include it in the key, a stale cache can hide a missing .so.
+          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/temporalex_native/Cargo.lock', 'native/temporalex_native/src/**') }}
           restore-keys: ${{ runner.os }}-mix-
 
       - name: Cache Rust
@@ -118,7 +122,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
+          # NIF source affects what's compiled into _build/test/lib/.../priv/native/.
+          # If we don't include it in the key, a stale cache can hide a missing .so.
+          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/temporalex_native/Cargo.lock', 'native/temporalex_native/src/**') }}
           restore-keys: ${{ runner.os }}-mix-
 
       - name: Cache Rust
