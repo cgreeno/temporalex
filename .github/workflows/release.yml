@@ -48,8 +48,8 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-
+            priv/native
+          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/temporalex_native/Cargo.lock', 'native/temporalex_native/src/**') }}
 
       - name: Cache Rust
         uses: actions/cache@v4

@@ -35,10 +35,15 @@ jobs:
           path: |
             deps
             _build
-          # NIF source affects what's compiled into _build/test/lib/.../priv/native/.
-          # If we don't include it in the key, a stale cache can hide a missing .so.
+            # priv/native is gitignored — it's where Rustler outputs the
+            # compiled .so before mix copies it to _build/.../priv/native/.
+            # Without caching priv/native, a fresh checkout has no .so and
+            # `mix compile` thinks nothing has changed.
+            priv/native
           key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/temporalex_native/Cargo.lock', 'native/temporalex_native/src/**') }}
-          restore-keys: ${{ runner.os }}-mix-
+          # No restore-keys — partial restores were the source of the bug:
+          # a stale _build was hiding a missing .so. Better to do a clean
+          # rebuild on key miss than restore an inconsistent cache.
 
       - name: Cache Rust
         uses: actions/cache@v4
@@ -77,10 +82,15 @@ jobs:
           path: |
             deps
             _build
-          # NIF source affects what's compiled into _build/test/lib/.../priv/native/.
-          # If we don't include it in the key, a stale cache can hide a missing .so.
+            # priv/native is gitignored — it's where Rustler outputs the
+            # compiled .so before mix copies it to _build/.../priv/native/.
+            # Without caching priv/native, a fresh checkout has no .so and
+            # `mix compile` thinks nothing has changed.
+            priv/native
           key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/temporalex_native/Cargo.lock', 'native/temporalex_native/src/**') }}
-          restore-keys: ${{ runner.os }}-mix-
+          # No restore-keys — partial restores were the source of the bug:
+          # a stale _build was hiding a missing .so. Better to do a clean
+          # rebuild on key miss than restore an inconsistent cache.
 
       - name: Cache Rust
         uses: actions/cache@v4
@@ -122,10 +132,15 @@ jobs:
           path: |
             deps
             _build
-          # NIF source affects what's compiled into _build/test/lib/.../priv/native/.
-          # If we don't include it in the key, a stale cache can hide a missing .so.
+            # priv/native is gitignored — it's where Rustler outputs the
+            # compiled .so before mix copies it to _build/.../priv/native/.
+            # Without caching priv/native, a fresh checkout has no .so and
+            # `mix compile` thinks nothing has changed.
+            priv/native
           key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/temporalex_native/Cargo.lock', 'native/temporalex_native/src/**') }}
-          restore-keys: ${{ runner.os }}-mix-
+          # No restore-keys — partial restores were the source of the bug:
+          # a stale _build was hiding a missing .so. Better to do a clean
+          # rebuild on key miss than restore an inconsistent cache.
 
       - name: Cache Rust
         uses: actions/cache@v4
