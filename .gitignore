@@ -18,6 +18,9 @@ temporalex-*.tar
 # OS
 .DS_Store
 
+# Erlang crash dumps
+erl_crash.dump
+
 # Local Claude Code config
 /.claude/
 
