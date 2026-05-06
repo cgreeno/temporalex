@@ -69,7 +69,11 @@ defmodule Temporalex.Worker.Executor do
     # Receive timeout
     receive_timer_ref: nil,
     receive_timer_id: nil,
-    receive_stop_value: nil
+    receive_stop_value: nil,
+    # Set true while inside handle_info({:activation, _}). Used by the
+    # test harness to validate the one-completion-per-activation
+    # protocol invariant — see test/support/executor_test_helpers.ex.
+    in_activation: false
   ]
 
   def start_link(opts) do
@@ -108,7 +112,17 @@ defmodule Temporalex.Worker.Executor do
       "Executor #{state.run_id}: processing activation with #{length(activation.jobs)} jobs"
     )
 
-    state = %{state | commands: [], is_replaying: Map.get(activation, :is_replaying, false)}
+    # Notify the test seam that an activation window is starting. Used by
+    # the test harness to validate the one-completion-per-activation
+    # protocol invariant — see test/support/executor_test_helpers.ex.
+    if pid = state.flush_to, do: send(pid, {:activation_start, state.run_id})
+
+    state = %{
+      state
+      | commands: [],
+        is_replaying: Map.get(activation, :is_replaying, false),
+        in_activation: true
+    }
 
     # Categorize jobs
     {init_jobs, resolve_jobs, signal_jobs, update_jobs, query_jobs, patch_jobs, other_jobs} =
@@ -135,8 +149,20 @@ defmodule Temporalex.Worker.Executor do
     # 7. Handle evictions/cancels
     state = handle_other_jobs(other_jobs, state)
 
-    # 8. Flush commands if the runner is blocked or done
-    maybe_flush_commands(state)
+    # 8. Drain any in-flight sync handler synchronously, processing its
+    #    API calls and exit inline. Required for the wire-protocol
+    #    invariant: each activation must produce exactly one
+    #    `complete_workflow_activation` call. Without this, an update
+    #    handler that exits between `handle_info({:activation, _})` and
+    #    the next gen_server cycle would emit `Completed` out-of-band,
+    #    which Core rejects as "Task not found when completing".
+    state = drain_handler_until_settled(state, deadline_ms(50))
+
+    # 9. Flush commands if the runner is blocked or done
+    {:noreply, state} = maybe_flush_commands(state)
+
+    state = %{state | in_activation: false}
+    {:noreply, state}
   end
 
   # --- Process exits ---
@@ -1096,6 +1122,54 @@ defmodule Temporalex.Worker.Executor do
 
     %{state | commands: [cmd | state.commands]}
   end
+
+  # --- Private: inline handler drain ---
+
+  # Drain any in-flight sync handler's API calls and exit inline, so its
+  # commands land in the SAME activation completion. Required for the
+  # wire-protocol invariant. Bounded by `deadline` (epoch-ms).
+  defp drain_handler_until_settled(state, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    cond do
+      remaining == 0 ->
+        state
+
+      state.sync_handler_pid == nil ->
+        state
+
+      true ->
+        handler_pid = state.sync_handler_pid
+
+        receive do
+          {:EXIT, ^handler_pid, reason} ->
+            {:noreply, new_state} = handle_sync_handler_exit(reason, state)
+            drain_handler_until_settled(new_state, deadline)
+
+          {:"$gen_call", {caller_pid, _} = from, request} when caller_pid == handler_pid ->
+            new_state = dispatch_inline_call(request, from, state)
+            drain_handler_until_settled(new_state, deadline)
+        after
+          remaining -> state
+        end
+    end
+  end
+
+  # Drive a handle_call as if the gen_server framework had received it,
+  # mirroring its return semantics: send the reply on `{:reply, _, _}`,
+  # leave the caller parked on `{:noreply, _}`.
+  defp dispatch_inline_call(request, from, state) do
+    case handle_call(request, from, state) do
+      {:reply, reply, new_state} ->
+        GenServer.reply(from, reply)
+        new_state
+
+      {:noreply, new_state} ->
+        new_state
+    end
+  end
+
+  defp deadline_ms(ms), do: System.monotonic_time(:millisecond) + ms
 
   # Validators run inline in this GenServer's process, so a crashing
   # validator would otherwise take down the executor. Trap raise/throw/exit

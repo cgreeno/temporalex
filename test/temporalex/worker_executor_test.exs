@@ -191,6 +191,102 @@ defmodule Temporalex.WorkerExecutorTest do
 
   # --- Bug #1: updates respond to Temporal ---
 
+  describe "wire protocol invariant: one completion per activation" do
+    # The bug that escaped local testing: dispatch_updates emits Accepted
+    # in the activation containing do_update, the handler runs in a
+    # separate process and emits Completed after handle_activation has
+    # already flushed. Result: two complete_workflow_activation calls for
+    # one workflow task, which Core rejects with "Task not found".
+    #
+    # The harness `assert_one_flush_per_activation` correlates
+    # :activation_start/:activation_end markers with :flushed messages
+    # to surface this class of bug locally without a Temporal server.
+    defmodule AsyncUpdateWorkflow do
+      use Temporalex.Workflow
+
+      def run(_args) do
+        result =
+          API.receive(:initial,
+            update: %{
+              "via_activity" => fn _args, state ->
+                # Handler parks on an activity. The activity's resolution
+                # arrives in a later activation; the handler resumes and
+                # exits. Completed must be emitted in the resolution
+                # activation, not out-of-band.
+                {:ok, _value} = API.execute_activity("compute", [42])
+                {:reply, :done, state}
+              end
+            },
+            signal: %{"stop" => fn _payload, s -> {:stop, s} end}
+          )
+
+        {:ok, result}
+      end
+    end
+
+    test "update with handler that parks on an activity: 1 flush per activation across both" do
+      {:ok, exec} = start_executor(AsyncUpdateWorkflow)
+
+      send_activation(exec, init_activation(AsyncUpdateWorkflow))
+      Process.sleep(50)
+
+      send_activation(
+        exec,
+        activation([
+          {:do_update, %{id: "u1", protocol_instance_id: "p1", name: "via_activity", input: []}}
+        ])
+      )
+
+      Process.sleep(50)
+
+      # Resolution activation: the activity completes, handler resumes
+      # and exits → Completed must land in THIS activation's flush.
+      send_activation(
+        exec,
+        activation([
+          {:resolve_activity,
+           %{seq: 1, result: {:completed, Temporalex.Converter.encode({:ok, :the_value})}}}
+        ])
+      )
+
+      Process.sleep(100)
+
+      # Three activations: init, do_update, resolve_activity.
+      # Each must produce exactly one flush.
+      assert_one_flush_per_activation(300)
+    end
+
+    test "update with simple sync handler completes in one activation flush" do
+      {:ok, exec} = start_executor(UpdateRespondingWorkflow)
+
+      # Send init + do_update separated by a settle pause. We do NOT
+      # consume any messages with assert_receive — the harness needs to
+      # see every :activation_start and :flushed event in mailbox order
+      # to build correct windows.
+      send_activation(exec, init_activation(UpdateRespondingWorkflow))
+      Process.sleep(50)
+
+      send_activation(
+        exec,
+        activation([
+          {:do_update,
+           %{
+             id: "u1",
+             protocol_instance_id: "p1",
+             name: "echo",
+             input: [Temporalex.Converter.encode(:hello)]
+           }}
+        ])
+      )
+
+      Process.sleep(100)
+
+      # The harness fails the test if any activation window produced
+      # zero or more than one flush.
+      assert_one_flush_per_activation(300)
+    end
+  end
+
   describe "update handler responses are emitted as UpdateResponse commands" do
     test "{:reply, response, state} emits accepted + completed UpdateResponse" do
       {:ok, exec} = start_executor(UpdateRespondingWorkflow)
