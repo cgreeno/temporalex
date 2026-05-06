@@ -44,6 +44,37 @@ defmodule Temporalex.UpdatesTest do
     end
   end
 
+  # Validator that crashes — exercises the executor's defense against
+  # buggy user code running inline in the executor process.
+  defmodule CrashingValidatorWorkflow do
+    use Temporalex.Workflow
+
+    def run(_args) do
+      result =
+        API.receive(:initial,
+          update: %{
+            "raise" => {
+              fn _args, _state -> {:reply, :ok, :handled} end,
+              validator: fn _args, _state -> raise("validator boom") end
+            },
+            "throw" => {
+              fn _args, _state -> {:reply, :ok, :handled} end,
+              validator: fn _args, _state -> throw(:nope) end
+            },
+            "exit" => {
+              fn _args, _state -> {:reply, :ok, :handled} end,
+              validator: fn _args, _state -> exit(:bye) end
+            }
+          },
+          signal: %{
+            "done" => fn _payload, s -> {:stop, s} end
+          }
+        )
+
+      {:ok, result}
+    end
+  end
+
   # Sync handler with validator.
   defmodule ValidatedWorkflow do
     use Temporalex.Workflow
@@ -158,6 +189,29 @@ defmodule Temporalex.UpdatesTest do
     end
   end
 
+  # Sync update handler that crashes. Exercises the executor's reply path
+  # when the handler dies before producing a return value.
+  defmodule SyncCrashWorkflow do
+    use Temporalex.Workflow
+
+    def run(_args) do
+      result =
+        API.receive(:initial,
+          update: %{
+            "explode_raise" => fn _args, _state -> raise("boom") end,
+            "explode_throw" => fn _args, _state -> throw(:boom) end,
+            "explode_exit" => fn _args, _state -> exit(:boom) end,
+            "ok" => fn _args, state -> {:reply, :survived, state} end
+          },
+          signal: %{
+            "done" => fn _payload, s -> {:stop, s} end
+          }
+        )
+
+      {:ok, result}
+    end
+  end
+
   defmodule NoHandlerWorkflow do
     use Temporalex.Workflow
 
@@ -230,6 +284,38 @@ defmodule Temporalex.UpdatesTest do
 
       # Rejected update did not add anything.
       assert {:ok, []} = Testing.next(exec)
+    end
+  end
+
+  describe "U3b — validator crashes (raise/throw/exit) do not kill the executor" do
+    test "raising validator surfaces {:error, _} and workflow continues" do
+      {:ok, exec} = Testing.start_workflow(CrashingValidatorWorkflow, %{})
+      assert {:receive, _} = Testing.next(exec)
+
+      assert {:error, _} = Testing.send_update(exec, "raise", [])
+      Testing.send_signal(exec, "done", nil)
+      Process.sleep(20)
+      assert {:ok, :initial} = Testing.next(exec)
+    end
+
+    test "throwing validator surfaces {:error, _} and workflow continues" do
+      {:ok, exec} = Testing.start_workflow(CrashingValidatorWorkflow, %{})
+      assert {:receive, _} = Testing.next(exec)
+
+      assert {:error, _} = Testing.send_update(exec, "throw", [])
+      Testing.send_signal(exec, "done", nil)
+      Process.sleep(20)
+      assert {:ok, :initial} = Testing.next(exec)
+    end
+
+    test "exiting validator surfaces {:error, _} and workflow continues" do
+      {:ok, exec} = Testing.start_workflow(CrashingValidatorWorkflow, %{})
+      assert {:receive, _} = Testing.next(exec)
+
+      assert {:error, _} = Testing.send_update(exec, "exit", [])
+      Testing.send_signal(exec, "done", nil)
+      Process.sleep(20)
+      assert {:ok, :initial} = Testing.next(exec)
     end
   end
 
@@ -334,6 +420,40 @@ defmodule Temporalex.UpdatesTest do
       Testing.send_signal(exec, "done", nil)
       Process.sleep(20)
       assert {:ok, %{last: 12}} = Testing.next(exec)
+    end
+  end
+
+  describe "U9b — sync update handler crashes (raise/throw/exit) reply to caller" do
+    # Without the fix, send_update hangs forever when the sync handler
+    # dies before producing a return value (it has no reply path).
+    test "raising sync handler returns {:error, _} to the update caller" do
+      {:ok, exec} = Testing.start_workflow(SyncCrashWorkflow, %{})
+      assert {:receive, _} = Testing.next(exec)
+
+      task = Task.async(fn -> Testing.send_update(exec, "explode_raise", []) end)
+      assert {:error, _reason} = Task.await(task, 500)
+
+      # Workflow still functional.
+      assert :survived = Testing.send_update(exec, "ok", [])
+      Testing.send_signal(exec, "done", nil)
+      Process.sleep(20)
+      assert {:ok, :initial} = Testing.next(exec)
+    end
+
+    test "throwing sync handler returns {:error, _}" do
+      {:ok, exec} = Testing.start_workflow(SyncCrashWorkflow, %{})
+      assert {:receive, _} = Testing.next(exec)
+
+      task = Task.async(fn -> Testing.send_update(exec, "explode_throw", []) end)
+      assert {:error, _reason} = Task.await(task, 500)
+    end
+
+    test "exiting sync handler returns {:error, _}" do
+      {:ok, exec} = Testing.start_workflow(SyncCrashWorkflow, %{})
+      assert {:receive, _} = Testing.next(exec)
+
+      task = Task.async(fn -> Testing.send_update(exec, "explode_exit", []) end)
+      assert {:error, _reason} = Task.await(task, 500)
     end
   end
 

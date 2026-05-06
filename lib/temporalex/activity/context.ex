@@ -40,10 +40,16 @@ defmodule Temporalex.Activity.Context do
     if cancelled?(ctx) do
       {:cancelled, :activity_cancelled}
     else
-      details_bytes = if details, do: :erlang.term_to_binary(details), else: <<>>
-      Temporalex.Native.record_activity_heartbeat(ctx.worker, ctx.task_token, details_bytes)
+      payload = encode_heartbeat_payload(details)
+      Temporalex.Native.record_activity_heartbeat(ctx.worker, ctx.task_token, payload)
     end
   end
+
+  @doc false
+  # Encode heartbeat details to the same Payload shape as activity I/O so the
+  # encoding metadata survives the round-trip through Temporal history.
+  def encode_heartbeat_payload(nil), do: nil
+  def encode_heartbeat_payload(details), do: Temporalex.Converter.encode(details)
 
   @doc "Check if the activity has been cancelled."
   def cancelled? do

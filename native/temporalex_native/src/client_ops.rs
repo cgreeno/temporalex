@@ -1,6 +1,5 @@
 //! Client operations: start, signal, query, cancel workflows via gRPC.
 
-use prost::Message;
 use rustler::{Atom, Binary, Encoder, LocalPid, ResourceArc, Term};
 use std::collections::HashMap;
 use temporalio_common::protos::temporal::api::{

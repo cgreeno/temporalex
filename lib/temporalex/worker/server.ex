@@ -34,7 +34,14 @@ defmodule Temporalex.Worker.Server do
 
   @impl true
   def init(config) do
-    {:ok, %__MODULE__{config: config, status: :connecting}, {:continue, :connect}}
+    if Map.get(config, :skip_connect) do
+      # Test seam: skip the connect/start_worker flow entirely. The server
+      # sits idle in :running so test code can drive handle_info paths
+      # (DOWN, activations, etc.) without a Temporal server.
+      {:ok, %__MODULE__{config: config, status: :running}}
+    else
+      {:ok, %__MODULE__{config: config, status: :connecting}, {:continue, :connect}}
+    end
   end
 
   @impl true
@@ -52,6 +59,21 @@ defmodule Temporalex.Worker.Server do
     )
 
     {:noreply, %{state | runtime: runtime}}
+  end
+
+  # --- Test-only handle_call ---
+
+  # Monitor every pid currently in state.executors. Used by tests that
+  # inject fake executor pids via :sys.replace_state — only available
+  # when the :skip_connect config flag is set.
+  @impl true
+  def handle_call(:__test_monitor_executor__, _from, state) do
+    if Map.get(state.config, :skip_connect) do
+      Enum.each(state.executors, fn {_run_id, pid} -> Process.monitor(pid) end)
+      {:reply, :ok, state}
+    else
+      {:reply, {:error, :not_in_test_mode}, state}
+    end
   end
 
   # --- Connection established ---
@@ -151,6 +173,11 @@ defmodule Temporalex.Worker.Server do
         case Enum.find(state.executors, fn {_run_id, exec_pid} -> exec_pid == pid end) do
           {run_id, _} ->
             Logger.warning("Executor for #{run_id} exited: #{inspect(reason)}")
+            # Fail the workflow task on Temporal's side so it can retry
+            # (replay against fresh executor) instead of waiting for the
+            # task timeout. Best-effort — if encoding/sending fails we
+            # already logged.
+            fail_workflow_task(run_id, fail_message_for(reason), state)
             {:noreply, %{state | executors: Map.delete(state.executors, run_id)}}
 
           nil ->
@@ -188,13 +215,41 @@ defmodule Temporalex.Worker.Server do
 
   # --- Shutdown ---
 
+  # Shut the worker down and wait for it to drain (poll loops finish, in-flight
+  # activations complete). Without the wait, Tokio tasks can be ripped while
+  # mid-completion — and worse, Core can panic on a non-empty completion sent
+  # to a run that's already been evicted by the shutdown. Bounded by
+  # the timeout so a buggy worker can't block BEAM termination.
+  @default_shutdown_timeout_ms 30_000
+
   @impl true
-  def terminate(_reason, %{worker: worker}) when not is_nil(worker) do
-    Temporalex.Native.initiate_shutdown(worker)
+  def terminate(_reason, %{worker: worker} = state) when not is_nil(worker) do
+    timeout = Map.get(state.config, :shutdown_timeout_ms, @default_shutdown_timeout_ms)
+    await_worker_shutdown(worker, state, timeout)
     :ok
   end
 
   def terminate(_reason, _state), do: :ok
+
+  defp await_worker_shutdown(worker, state, timeout) do
+    # Reuse the same test pid for both completion and shutdown seams.
+    test_pid = Map.get(state.config, :completion_to)
+
+    if is_pid(test_pid) do
+      send(test_pid, {:server_shutdown_initiated, worker})
+    else
+      # Async NIF — sends {:shutdown_complete, :ok} when Core's drain is done.
+      Temporalex.Native.shutdown_worker(worker, self())
+    end
+
+    receive do
+      {:shutdown_complete, :ok} -> :ok
+    after
+      timeout ->
+        Logger.error("Worker shutdown timed out after #{timeout}ms — forcing exit")
+        :timeout
+    end
+  end
 
   # --- Private: activation handling ---
 
@@ -337,12 +392,26 @@ defmodule Temporalex.Worker.Server do
   # --- Private: completions ---
 
   defp send_workflow_completion(run_id, status, state) do
-    case Temporalex.Native.encode_workflow_completion(run_id, status) do
-      {:ok, bytes} ->
-        Temporalex.Native.complete_workflow_activation(state.worker, bytes, self())
+    test_pid = Map.get(state.config, :completion_to)
 
-      {:error, reason} ->
-        Logger.error("Failed to encode workflow completion: #{inspect(reason)}")
+    cond do
+      is_pid(test_pid) ->
+        send(test_pid, {:server_completion, run_id, status})
+
+      is_nil(state.worker) ->
+        # Pre-connect path: nothing we can usefully do.
+        Logger.warning(
+          "Cannot send workflow completion for #{run_id}: worker not yet initialized"
+        )
+
+      true ->
+        case Temporalex.Native.encode_workflow_completion(run_id, status) do
+          {:ok, bytes} ->
+            Temporalex.Native.complete_workflow_activation(state.worker, bytes, self())
+
+          {:error, reason} ->
+            Logger.error("Failed to encode workflow completion: #{inspect(reason)}")
+        end
     end
   end
 
@@ -354,6 +423,28 @@ defmodule Temporalex.Worker.Server do
       {:error, reason} ->
         Logger.error("Failed to encode activity result: #{inspect(reason)}")
     end
+  end
+
+  # When an executor process dies mid-activation, fail the workflow task on
+  # Temporal's side so it can be retried promptly instead of waiting for the
+  # workflow-task timeout. Best-effort: if encoding/sending fails we log and
+  # let the timeout take over.
+  defp fail_workflow_task(run_id, message, state) do
+    send_workflow_completion(run_id, {:failed, %{message: message}}, state)
+  end
+
+  @doc false
+  # Format the executor-exit reason into a short human-readable message for
+  # the workflow-task failure. Public-with-@doc-false so the test can call it
+  # without spinning up a full server. Keep the output bounded — failure
+  # messages are persisted in workflow history.
+  def fail_message_for(:normal), do: "executor exited normally without completing activation"
+  def fail_message_for(:shutdown), do: "executor shutdown before completing activation"
+  def fail_message_for({:shutdown, _}), do: "executor shutdown before completing activation"
+
+  def fail_message_for(reason) do
+    formatted = reason |> inspect(limit: 5, printable_limit: 200) |> String.slice(0, 500)
+    "executor crashed: #{formatted}"
   end
 
   # --- Private: registry builders ---

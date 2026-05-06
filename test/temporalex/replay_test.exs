@@ -89,20 +89,20 @@ defmodule Temporalex.ReplayTest do
   end
 
   describe "R3 — activity where timer expected" do
-    test "consume raises when the head is an activity but caller asks for timer" do
+    test "consume raises NondeterminismError when head is activity but caller asks for timer" do
       log = [{:activity, 1, :ok}]
 
-      assert_raise RuntimeError, ~r/Nondeterminism/, fn ->
+      assert_raise Temporalex.NondeterminismError, ~r/expected timer.*got activity/, fn ->
         Replay.consume(log, :timer, 1)
       end
     end
   end
 
   describe "R4 — timer where activity expected" do
-    test "consume raises when the head is a timer but caller asks for activity" do
+    test "consume raises NondeterminismError when head is timer but caller asks for activity" do
       log = [{:timer, 1, :ok}]
 
-      assert_raise RuntimeError, ~r/Nondeterminism/, fn ->
+      assert_raise Temporalex.NondeterminismError, ~r/expected activity.*got timer/, fn ->
         Replay.consume(log, :activity, 1)
       end
     end
@@ -227,6 +227,49 @@ defmodule Temporalex.ReplayTest do
     test "fresh activation (only initialize_workflow job) builds an empty log" do
       jobs = [{:initialize_workflow, %{workflow_type: "X", arguments: []}}]
       assert Replay.build_log(jobs) == []
+    end
+  end
+
+  describe "R16 — cancelled activity in history" do
+    test "build_log accepts a cancelled activity resolution" do
+      jobs = [{:resolve_activity, %{seq: 1, result: {:cancelled, %{message: "cancelled"}}}}]
+
+      assert [{:activity, 1, {:error, {:cancelled, %{message: "cancelled"}}}}] =
+               Replay.build_log(jobs)
+    end
+
+    test "consume returns the cancelled error tuple to the caller" do
+      log = [{:activity, 1, {:error, {:cancelled, %{message: "x"}}}}]
+
+      assert {:replay, {:error, {:cancelled, %{message: "x"}}}, []} =
+               Replay.consume(log, :activity, 1)
+    end
+  end
+
+  describe "R17 — cancelled child workflow in history" do
+    test "build_log accepts a cancelled child workflow resolution" do
+      jobs = [
+        {:resolve_child_workflow_execution,
+         %{seq: 1, result: {:cancelled, %{message: "cancelled"}}}}
+      ]
+
+      assert [{:child_workflow, 1, {:error, {:cancelled, %{message: "cancelled"}}}}] =
+               Replay.build_log(jobs)
+    end
+  end
+
+  describe "R18 — backoff is not a final resolution" do
+    # Local-activity backoffs surface as {:resolve_activity, %{result: {:backoff, _}}}
+    # from the Rust bridge (proto_bridge.rs encodes Status::Backoff). They are
+    # intermediate signals — the runner must stay parked until a final result
+    # arrives. They must not appear in the replay log.
+    test "build_log skips backoff entries" do
+      jobs = [
+        {:resolve_activity, %{seq: 1, result: {:backoff, "retry-info"}}},
+        {:resolve_activity, %{seq: 2, result: {:completed, payload(:done)}}}
+      ]
+
+      assert [{:activity, 2, :done}] = Replay.build_log(jobs)
     end
   end
 end

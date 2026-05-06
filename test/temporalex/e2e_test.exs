@@ -119,6 +119,50 @@ defmodule Temporalex.E2ETest do
     end
   end
 
+  defmodule UpdateDrivenWorkflow do
+    use Temporalex.Workflow
+
+    def run(_args) do
+      result =
+        API.receive(%{count: 0},
+          update: %{
+            "increment" => fn [n], state ->
+              {:reply, state.count + n, %{state | count: state.count + n}}
+            end,
+            "snapshot" => fn _args, state -> {:reply, state.count, state} end,
+            "stop" => fn _args, state -> {:stop, state.count, state} end
+          }
+        )
+
+      {:ok, result}
+    end
+  end
+
+  # Workflow with an update handler that crashes AFTER the update has been
+  # accepted by the SDK. Used to verify the Accept→Reject(failure) transition
+  # in Temporal Core's update state machine: per the audit at
+  # update_state_machine.rs, jumping straight to Reject is allowed before
+  # Accept, but post-Accept the SDK expects Completed. We send Rejected with
+  # a failure message — Core may panic, accept, or retry. This integration
+  # test verifies our SDK doesn't lock the workflow even when the path
+  # exercises that transition.
+  defmodule UpdateCrashWorkflow do
+    use Temporalex.Workflow
+
+    def run(_args) do
+      result =
+        API.receive(:initial,
+          update: %{
+            "explode" => fn _args, _state -> raise("update handler boom") end,
+            "ping" => fn _args, state -> {:reply, :pong, state} end
+          },
+          signal: %{"done" => fn _payload, s -> {:stop, s} end}
+        )
+
+      {:ok, result}
+    end
+  end
+
   defmodule MultiPhaseWorkflow do
     use Temporalex.Workflow
 
@@ -652,6 +696,101 @@ defmodule Temporalex.E2ETest do
 
       cli_wait(wf_id, "Completed")
     end
+  end
+
+  describe "E2E20 — update returns response to caller" do
+    # Verifies the full update round-trip: a worker running the
+    # UpdateDrivenWorkflow receives an update, runs the handler, and the
+    # CLI receives the handler's return value as the update response.
+    # Without the UpdateResponse wiring this test would hang on the CLI
+    # update-execute call until update timeout.
+    test "update handler return value surfaces to the caller" do
+      %{task_queue: tq} = start_worker([UpdateDrivenWorkflow], [])
+
+      wf_id = cli_start_workflow("Temporalex.E2ETest.UpdateDrivenWorkflow", tq)
+
+      Process.sleep(500)
+
+      # Each update should resolve quickly with the handler's reply value.
+      out = cli_update(wf_id, "increment", 5)
+      assert out =~ "5"
+
+      out = cli_update(wf_id, "increment", 3)
+      assert out =~ "8"
+
+      _ = cli_update(wf_id, "stop", nil)
+
+      cli_wait(wf_id, "Completed")
+    end
+  end
+
+  describe "E2E21 — update handler crash post-acceptance does not lock the workflow" do
+    # The handler runs AFTER the SDK has accepted the update — we send
+    # Accepted before invoking the handler. If the handler then crashes,
+    # we currently emit Rejected. Per the audit, Core's update state
+    # machine may not love this Accept→Reject transition. This test
+    # verifies that, regardless of how Core treats it, the workflow does
+    # NOT permanently lock — subsequent updates and signals still work.
+    test "subsequent updates/signals work after a crashing update handler" do
+      %{task_queue: tq} = start_worker([UpdateCrashWorkflow], [])
+
+      wf_id = cli_start_workflow("Temporalex.E2ETest.UpdateCrashWorkflow", tq)
+
+      Process.sleep(500)
+
+      # Crash the first update. The CLI may report a failure or hang on
+      # update timeout — either way, the workflow itself must continue.
+      _ = cli_update_allow_failure(wf_id, "explode", nil)
+
+      # Now confirm a subsequent update succeeds — this is the critical
+      # invariant. If the workflow is locked (no further updates accepted),
+      # this would hang on the update timeout.
+      out = cli_update(wf_id, "ping", nil)
+      assert out =~ "pong"
+
+      # And a signal still drains the receive cleanly.
+      cli_signal(wf_id, "done")
+      cli_wait(wf_id, "Completed")
+    end
+  end
+
+  # Like cli_update but tolerates non-zero exit codes (used to probe the
+  # handler-crash post-acceptance path, where Core's response is uncertain).
+  defp cli_update_allow_failure(wf_id, name, input) do
+    args =
+      [
+        "workflow",
+        "update",
+        "execute",
+        "--workflow-id",
+        wf_id,
+        "--name",
+        name,
+        "--output",
+        "json"
+      ] ++ if input != nil, do: ["--input", Jason.encode!(input)], else: []
+
+    {out, _code} = System.cmd("temporal", args, stderr_to_stdout: true)
+    out
+  end
+
+  defp cli_update(wf_id, name, input) do
+    args =
+      [
+        "workflow",
+        "update",
+        "execute",
+        "--workflow-id",
+        wf_id,
+        "--name",
+        name,
+        "--output",
+        "json"
+      ] ++ if input != nil, do: ["--input", Jason.encode!(input)], else: []
+
+    {out, code} = System.cmd("temporal", args, stderr_to_stdout: true)
+    assert code == 0, "temporal workflow update failed: #{out}"
+    out
   end
 
   # Waits for either Completed, Failed, or Canceled.

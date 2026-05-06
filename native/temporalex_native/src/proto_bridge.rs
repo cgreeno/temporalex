@@ -329,10 +329,15 @@ fn encode_workflow_completion<'a>(
 
     let completion_status = if tag == atoms::successful() {
         let command_terms: Vec<Term<'a>> = value.decode()?;
-        let commands: Vec<temporalio_common::protos::coresdk::workflow_commands::WorkflowCommand> = command_terms
+        // Propagate decode errors instead of silently dropping bad commands.
+        // A workflow that emits a malformed command should fail loudly rather
+        // than completing the activation with a missing command.
+        let commands: Vec<
+            temporalio_common::protos::coresdk::workflow_commands::WorkflowCommand,
+        > = command_terms
             .iter()
-            .filter_map(|cmd| decode_workflow_command(env, *cmd).ok())
-            .collect();
+            .map(|cmd| decode_workflow_command(env, *cmd))
+            .collect::<NifResult<Vec<_>>>()?;
         workflow_activation_completion::Status::Successful(workflow_completion::Success {
             commands,
             ..Default::default()
@@ -373,6 +378,7 @@ fn decode_workflow_command<'a>(
 ) -> NifResult<temporalio_common::protos::coresdk::workflow_commands::WorkflowCommand> {
     use temporalio_common::protos::coresdk::workflow_commands::{self, *};
     use temporalio_common::protos::coresdk::workflow_commands::workflow_command;
+    use temporalio_common::protos::temporal::api::failure::v1::Failure;
 
     let (tag, info): (rustler::Atom, Term<'a>) = cmd.decode()?;
 
@@ -385,8 +391,8 @@ fn decode_workflow_command<'a>(
 
         let input: Vec<_> = input_terms
             .into_iter()
-            .filter_map(|t| encode_payload_from_term(env, t).ok())
-            .collect();
+            .map(|t| encode_payload_from_term(env, t))
+            .collect::<NifResult<Vec<_>>>()?;
 
         workflow_command::Variant::ScheduleActivity(ScheduleActivity {
             seq,
@@ -405,8 +411,8 @@ fn decode_workflow_command<'a>(
 
         let input: Vec<_> = input_terms
             .into_iter()
-            .filter_map(|t| encode_payload_from_term(env, t).ok())
-            .collect();
+            .map(|t| encode_payload_from_term(env, t))
+            .collect::<NifResult<Vec<_>>>()?;
 
         workflow_command::Variant::ScheduleLocalActivity(ScheduleLocalActivity {
             seq,
@@ -426,8 +432,13 @@ fn decode_workflow_command<'a>(
             start_to_fire_timeout: Some(ms_to_duration(ms)),
         })
     } else if tag == atoms::complete_workflow_execution() {
-        let result_term = info.map_get(enc(&atoms::result(), env)).ok();
-        let result = result_term.and_then(|t| encode_payload_from_term(env, t).ok());
+        // Surface payload encoding errors instead of silently dropping the
+        // result — a corrupt result here means the workflow appears to have
+        // completed with no value, which is hard to debug.
+        let result = match info.map_get(enc(&atoms::result(), env)) {
+            Ok(t) => Some(encode_payload_from_term(env, t)?),
+            Err(_) => None,
+        };
 
         workflow_command::Variant::CompleteWorkflowExecution(CompleteWorkflowExecution {
             result,
@@ -446,8 +457,8 @@ fn decode_workflow_command<'a>(
         let arg_terms: Vec<Term> = get_map_val_or(env, info, atoms::arguments(), vec![]);
         let args: Vec<_> = arg_terms
             .into_iter()
-            .filter_map(|t| encode_payload_from_term(env, t).ok())
-            .collect();
+            .map(|t| encode_payload_from_term(env, t))
+            .collect::<NifResult<Vec<_>>>()?;
 
         workflow_command::Variant::ContinueAsNewWorkflowExecution(ContinueAsNewWorkflowExecution {
             workflow_type: wf_type,
@@ -457,11 +468,16 @@ fn decode_workflow_command<'a>(
     } else if tag == atoms::respond_to_query() {
         let query_id: String = get_map_val(env, info, atoms::query_id())?;
 
-        // Try to get succeeded.response
-        let succeeded = info.map_get(enc(&atoms::succeeded(), env)).ok();
-        let response = succeeded
-            .and_then(|s| s.map_get(enc(&atoms::result(), env)).ok())
-            .and_then(|t| encode_payload_from_term(env, t).ok());
+        // Try to get succeeded.result. If the user provided a malformed
+        // payload, surface the error so the query failure is visible
+        // rather than returning an empty response that looks like nil.
+        let response = match info.map_get(enc(&atoms::succeeded(), env)) {
+            Ok(s) => match s.map_get(enc(&atoms::result(), env)) {
+                Ok(t) => Some(encode_payload_from_term(env, t)?),
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
 
         workflow_command::Variant::RespondToQuery(QueryResult {
             query_id,
@@ -486,8 +502,8 @@ fn decode_workflow_command<'a>(
         let input_terms: Vec<Term> = get_map_val_or(env, info, atoms::input(), vec![]);
         let input: Vec<_> = input_terms
             .into_iter()
-            .filter_map(|t| encode_payload_from_term(env, t).ok())
-            .collect();
+            .map(|t| encode_payload_from_term(env, t))
+            .collect::<NifResult<Vec<_>>>()?;
 
         workflow_command::Variant::StartChildWorkflowExecution(StartChildWorkflowExecution {
             seq,
@@ -496,6 +512,36 @@ fn decode_workflow_command<'a>(
             task_queue,
             input,
             ..Default::default()
+        })
+    } else if tag == atoms::update_response() {
+        // %{protocol_instance_id: pid, response: {:accepted, %{}} | {:completed, payload} | {:rejected, %{message: ...}}}
+        let protocol_instance_id: String =
+            get_map_val(env, info, atoms::protocol_instance_id())?;
+        let response_term: Term = info
+            .map_get(enc(&atoms::response(), env))
+            .map_err(|_| rustler::Error::Term(Box::new("update_response missing :response")))?;
+        let (resp_tag, resp_value): (rustler::Atom, Term) = response_term.decode()?;
+
+        let resp_oneof = if resp_tag == atoms::accepted() {
+            workflow_commands::update_response::Response::Accepted(())
+        } else if resp_tag == atoms::completed() {
+            let payload = encode_payload_from_term(env, resp_value)?;
+            workflow_commands::update_response::Response::Completed(payload)
+        } else if resp_tag == atoms::rejected() {
+            let msg: String = get_map_val_or(env, resp_value, atoms::message(), "rejected".into());
+            workflow_commands::update_response::Response::Rejected(Failure {
+                message: msg,
+                ..Default::default()
+            })
+        } else {
+            return Err(rustler::Error::Term(Box::new(format!(
+                "unknown update_response variant"
+            ))));
+        };
+
+        workflow_command::Variant::UpdateResponse(UpdateResponse {
+            protocol_instance_id,
+            response: Some(resp_oneof),
         })
     } else {
         return Err(rustler::Error::Term(Box::new(format!(

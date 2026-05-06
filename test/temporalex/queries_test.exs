@@ -83,6 +83,20 @@ defmodule Temporalex.QueriesTest do
     end
   end
 
+  defmodule ThrowQueryWorkflow do
+    use Temporalex.Workflow
+
+    def handle_query("ok", _args, state), do: {:reply, state}
+    def handle_query("throw", _args, _state), do: throw(:bad_query)
+    def handle_query("exit", _args, _state), do: exit(:bad_query_exit)
+
+    def run(_args) do
+      API.publish_state(:alive)
+      {:ok, _} = Acts.work(:a)
+      {:ok, :finished}
+    end
+  end
+
   defmodule MultiQueryWorkflow do
     use Temporalex.Workflow
 
@@ -166,6 +180,29 @@ defmodule Temporalex.QueriesTest do
       assert {:reply, :alive} = Testing.query(exec, "ok")
 
       # Workflow still runs to completion.
+      assert {:ok, :finished} = Testing.resolve(exec, {:ok, :a})
+    end
+  end
+
+  describe "Q6b — handler throw does not crash workflow" do
+    test "throwing handler returns {:error, _}; workflow continues" do
+      {:ok, exec} = Testing.start_workflow(ThrowQueryWorkflow, %{})
+      assert {:activity, _} = Testing.next(exec)
+
+      assert {:reply, {:error, _msg}} = Testing.query(exec, "throw")
+      assert {:reply, :alive} = Testing.query(exec, "ok")
+      assert {:ok, :finished} = Testing.resolve(exec, {:ok, :a})
+    end
+  end
+
+  describe "Q6c — handler exit does not crash workflow" do
+    test "exiting handler returns {:error, _}; workflow continues" do
+      {:ok, exec} = Testing.start_workflow(ThrowQueryWorkflow, %{})
+      assert {:activity, _} = Testing.next(exec)
+
+      assert {:reply, {:error, _msg}} = Testing.query(exec, "exit")
+      # Both the workflow and other queries continue functioning.
+      assert {:reply, :alive} = Testing.query(exec, "ok")
       assert {:ok, :finished} = Testing.resolve(exec, {:ok, :a})
     end
   end

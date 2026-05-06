@@ -216,6 +216,39 @@ defmodule Temporalex.ReceiveApiTest do
     end
   end
 
+  # Receive with an async handler that mutates state via update_state
+  # AFTER a stop signal has fired. The stop signal returns a constant
+  # `:frozen` (not current state) — the contract is the receive must
+  # return `:frozen` regardless of subsequent state mutations.
+  defmodule StopFreezesValueWorkflow do
+    use Temporalex.Workflow
+
+    def run(_args) do
+      result =
+        API.receive(:initial,
+          update: %{
+            "slow" => fn _args, state ->
+              {:async,
+               fn ->
+                 # Park on an activity so the async is in-flight when stop arrives.
+                 {:ok, _} = Acts.echo(:wait)
+                 # After stop has fired, mutate receive_state. With the
+                 # bug, this mutation perturbs the value `complete_receive`
+                 # eventually returns. Without the bug, the stop's `:frozen`
+                 # is preserved.
+                 API.update_state(fn _s -> {:ok, :polluted_after_stop} end)
+               end, state}
+            end
+          },
+          signal: %{
+            "stop" => fn _payload, _state -> {:stop, :frozen} end
+          }
+        )
+
+      {:ok, result}
+    end
+  end
+
   defmodule NestedReceiveWorkflow do
     use Temporalex.Workflow
 
@@ -500,11 +533,18 @@ defmodule Temporalex.ReceiveApiTest do
       Testing.send_signal(exec, "stop", nil)
       Process.sleep(20)
 
+      # Verify the workflow is *still* parked — receive has not returned.
+      # If it had, the call below would have produced {:ok, _} or another
+      # descriptor; instead it times out.
+      catch_exit(GenServer.call(exec, :next, 100))
+
       # Complete the activity → async handler finishes → receive can exit.
       Testing.resolve(exec, {:ok, :done})
       _ = Task.await(update_task, 1_000)
 
-      assert {:ok, %{count: 1}} = Testing.next(exec)
+      # Stop captured state at the moment :stop fired (count: 0). The
+      # async handler's post-stop mutation must not perturb this value.
+      assert {:ok, %{count: 0}} = Testing.next(exec)
     end
   end
 
@@ -541,6 +581,167 @@ defmodule Temporalex.ReceiveApiTest do
       Testing.send_signal(exec, "done", nil)
       Process.sleep(20)
       assert {:ok, %{counter: 5}} = Testing.next(exec)
+    end
+  end
+
+  describe "RC15 — :stop value is frozen at the moment of stop" do
+    test "stop value is preserved even if a pending async handler mutates state afterwards" do
+      {:ok, exec} = Testing.start_workflow(StopFreezesValueWorkflow, %{})
+      assert {:receive, _} = Testing.next(exec)
+
+      # Trigger the async handler — it parks on Acts.echo.
+      update_task = Task.async(fn -> Testing.send_update(exec, "slow", []) end)
+      Process.sleep(20)
+      assert {:activity, _} = Testing.next(exec)
+
+      # Stop the receive while the async is still pending. Receive transitions
+      # to :receive_stopping; stop value should be captured as :frozen.
+      Testing.send_signal(exec, "stop", nil)
+      Process.sleep(20)
+
+      # Resolve the activity → async runs `update_state` → receive completes.
+      Testing.resolve(exec, {:ok, :wait})
+      _ = Task.await(update_task, 1_000)
+
+      # Without the fix, the receive returns :polluted_after_stop because
+      # complete_receive dropped :frozen and maybe_complete_receive falls
+      # back to receive_state.
+      assert {:ok, :frozen} = Testing.next(exec)
+    end
+  end
+
+  describe "RC16 — timer fires while sync handler is mid-flight" do
+    # Race: receive_timer fires AND a sync handler is still running.
+    # Status transitions:
+    #   1. Receive entered (:in_receive, sync_handler_pid set, receive_from set)
+    #   2. Timer fires → do_complete_receive runs (status -> :running,
+    #      receive_from cleared)
+    #   3. Sync handler returns {:stop, _} → apply_handler_return →
+    #      complete_receive
+    # Without the receive_from-nil guard, step 3 calls
+    # `GenServer.reply(nil, ...)` which raises FunctionClauseError and
+    # crashes the executor. The contract: timer wins (first stop wins).
+    defmodule TimerVsSlowHandlerWorkflow do
+      use Temporalex.Workflow
+
+      def run(_args) do
+        result =
+          API.receive(:initial,
+            signal: %{
+              "go" => fn _payload, _state ->
+                # Sleep past the timeout. The timer should fire while
+                # we're sleeping. When we then return {:stop, _}, the
+                # executor must NOT try to reply to a cleared receive_from.
+                Process.sleep(80)
+                {:stop, :handler_won}
+              end
+            },
+            timeout: 30
+          )
+
+        {:ok, result}
+      end
+    end
+
+    test "timer fires while handler is running: timer wins, no executor crash" do
+      Process.flag(:trap_exit, true)
+      {:ok, exec} = Testing.start_workflow(TimerVsSlowHandlerWorkflow, %{})
+      monitor_ref = Process.monitor(exec)
+      assert {:receive, _} = Testing.next(exec)
+
+      Testing.send_signal(exec, "go", nil)
+
+      # Wait for both the 30ms timer AND the 80ms handler sleep to elapse.
+      Process.sleep(150)
+
+      # Executor must still be alive. If the cleared receive_from caused
+      # a crash, this would have failed with FunctionClauseError.
+      refute_received {:DOWN, ^monitor_ref, :process, ^exec, _}
+
+      # First stop wins: timer fired before the handler returned, so
+      # the receive's value is the timer's {:timeout, :initial}.
+      assert {:ok, {:timeout, :initial}} = Testing.next(exec)
+    end
+  end
+
+  describe "RC17 — sync handler clobbers concurrent async update_state writes" do
+    # Documented gotcha pinned in code: sync handlers capture receive_state
+    # at spawn time and full-state-replace it on return. If an async
+    # handler's spawned fn runs `update_state` DURING the sync handler's
+    # execution, the async's mutation is silently lost.
+    #
+    # The sequence:
+    #   1. Update handler returns {:async, fn, _} — async fn spawned,
+    #      not queued.
+    #   2. Sync signal handler dispatched while async fn is in flight.
+    #      Sync handler captures state at spawn time.
+    #   3. Async fn calls update_state — mutation lands in receive_state.
+    #   4. Sync handler returns {:noreply, computed_state} where
+    #      computed_state was derived from the captured (stale) state.
+    #   5. apply_handler_return replaces receive_state with the sync
+    #      handler's value, dropping the async's mutation.
+    defmodule SyncClobbersAsyncWorkflow do
+      use Temporalex.Workflow
+
+      def run(_args) do
+        result =
+          API.receive(%{count: 0},
+            update: %{
+              # Returns :async — the async fn runs in its own process,
+              # NOT queued. Sleeps before calling update_state to widen
+              # the race window.
+              "trigger_async" => fn _args, state ->
+                {:async,
+                 fn ->
+                   Process.sleep(40)
+                   API.update_state(fn s -> {:ok, %{count: s.count + 100}} end)
+                 end, state}
+              end
+            },
+            signal: %{
+              # Captures state at spawn, sleeps long enough for the async
+              # to run its update_state, then full-state-replaces. The
+              # async's +100 is clobbered.
+              "slow_sync" => fn _payload, state ->
+                Process.sleep(60)
+                {:noreply, %{count: state.count + 1}}
+              end,
+              "done" => fn _payload, state -> {:stop, state} end
+            }
+          )
+
+        {:ok, result}
+      end
+    end
+
+    test "sync handler returning while async update_state is in flight clobbers async write" do
+      {:ok, exec} = Testing.start_workflow(SyncClobbersAsyncWorkflow, %{})
+      assert {:receive, _} = Testing.next(exec)
+
+      # Trigger async update — handler returns :async, spawning the
+      # background fn that sleeps 40ms before update_state.
+      update_task = Task.async(fn -> Testing.send_update(exec, "trigger_async", []) end)
+      Process.sleep(5)
+
+      # While the async fn is still sleeping (no update_state yet),
+      # dispatch the slow_sync handler. It captures state %{count: 0}
+      # at spawn time.
+      Testing.send_signal(exec, "slow_sync", nil)
+      Process.sleep(10)
+
+      # Wait for the async to finish, ensuring its update_state ran.
+      _ = Task.await(update_task, 500)
+
+      # Wait for the sync handler to finish and replace state.
+      Process.sleep(100)
+
+      Testing.send_signal(exec, "done", nil)
+      Process.sleep(20)
+
+      # The clobber: async's +100 was overwritten by sync's
+      # `state.count + 1` where state.count was 0 at spawn time.
+      # Final state = %{count: 1}, not %{count: 101}.
+      assert {:ok, %{count: 1}} = Testing.next(exec)
     end
   end
 

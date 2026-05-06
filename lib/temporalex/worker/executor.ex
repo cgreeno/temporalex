@@ -13,6 +13,11 @@ defmodule Temporalex.Worker.Executor do
 
   require Logger
 
+  # Hard caps to bound memory under flood scenarios (misbehaving signal
+  # producer, server-side replay storm). Override via opts for tests.
+  @default_max_signal_buffer 10_000
+  @default_max_pending_handlers 10_000
+
   defstruct [
     # Identity
     :server_pid,
@@ -20,6 +25,9 @@ defmodule Temporalex.Worker.Executor do
     :run_id,
     :task_queue,
     :workflow_module,
+    # Test seam: when set, do_flush sends {:flushed, run_id, commands} to this
+    # pid instead of calling the NIF. Production callers leave this nil.
+    :flush_to,
     # Runner
     :runner_pid,
     # Replay
@@ -36,10 +44,19 @@ defmodule Temporalex.Worker.Executor do
     async_tracker: %{},
     # Signals
     signal_buffer: [],
+    # Length-tracked counterpart of signal_buffer — :queue.len / List.length
+    # is O(n), so we maintain a separate counter for the cap check.
+    signal_buffer_size: 0,
     signal_waiters: %{},
-    # Sync handler
+    # Sync handler — only one runs at a time. Subsequent dispatches queue
+    # behind it; pending_handler_queue is drained as each finishes. Matches
+    # Temporal's per-activation single-threaded handler ordering.
     sync_handler_pid: nil,
     sync_handler_update_from: nil,
+    pending_handler_queue: nil,
+    pending_handler_count: 0,
+    max_signal_buffer: nil,
+    max_pending_handlers: nil,
     # Parallel
     parallels: %{},
     branch_to_parallel: %{},
@@ -71,7 +88,11 @@ defmodule Temporalex.Worker.Executor do
       run_id: opts.run_id,
       task_queue: opts.task_queue,
       workflow_module: opts.workflow_module,
+      flush_to: Map.get(opts, :flush_to),
+      max_signal_buffer: Map.get(opts, :max_signal_buffer, @default_max_signal_buffer),
+      max_pending_handlers: Map.get(opts, :max_pending_handlers, @default_max_pending_handlers),
       async_handlers: MapSet.new(),
+      pending_handler_queue: :queue.new(),
       patches: MapSet.new(),
       status: :idle
     }
@@ -144,10 +165,17 @@ defmodule Temporalex.Worker.Executor do
     state = %{state | receive_timer_ref: nil, receive_timer_id: nil}
     timeout_reply = {:timeout, state.receive_state}
 
-    if MapSet.size(state.async_handlers) > 0 do
-      {:noreply, %{state | status: :receive_stopping, receive_stop_value: timeout_reply}}
-    else
-      do_complete_receive(state, timeout_reply)
+    cond do
+      state.status == :receive_stopping ->
+        # A handler already started the stop with a captured value — first
+        # decision wins, don't override with the timer fire.
+        {:noreply, state}
+
+      MapSet.size(state.async_handlers) > 0 ->
+        {:noreply, %{state | status: :receive_stopping, receive_stop_value: timeout_reply}}
+
+      true ->
+        do_complete_receive(state, timeout_reply)
     end
   end
 
@@ -273,7 +301,8 @@ defmodule Temporalex.Worker.Executor do
   def handle_call({:wait_for_signal, name}, from, state) do
     case pop_signal(state.signal_buffer, name) do
       {payload, remaining} ->
-        {:reply, payload, %{state | signal_buffer: remaining}}
+        {:reply, payload,
+         %{state | signal_buffer: remaining, signal_buffer_size: state.signal_buffer_size - 1}}
 
       nil ->
         # Runner is parked with nothing more to produce this activation.
@@ -503,11 +532,39 @@ defmodule Temporalex.Worker.Executor do
   defp handle_sync_handler_exit({:handler_result, handler_return}, state) do
     update_from = state.sync_handler_update_from
     state = %{state | sync_handler_pid: nil, sync_handler_update_from: nil}
-    apply_handler_return(handler_return, update_from, state)
+    # Apply this handler's return first (mutating receive_state), THEN drain
+    # the next queued handler so it observes those mutations.
+    apply_handler_return_then_drain(handler_return, update_from, state)
   end
 
-  defp handle_sync_handler_exit(_reason, state) do
-    {:noreply, %{state | sync_handler_pid: nil, sync_handler_update_from: nil}}
+  defp handle_sync_handler_exit(reason, state) do
+    update_from = state.sync_handler_update_from
+    state = %{state | sync_handler_pid: nil, sync_handler_update_from: nil}
+
+    state =
+      if update_from do
+        # Handler crashed AFTER we already emitted :accepted. Emit a
+        # :rejected response so the Update API caller doesn't hang.
+        emit_update_rejected(state, update_from, "handler crashed: #{inspect(reason)}")
+      else
+        state
+      end
+
+    # Promote the next queued handler (if any) THEN run drain_and_continue
+    # to flush whatever the rejection produced. Mirrors the success path
+    # in apply_handler_return_then_drain.
+    state = maybe_dispatch_next_handler(state)
+    drain_and_continue(state)
+  end
+
+  # Wraps apply_handler_return so that after a handler's return is applied
+  # we drain the next queued handler. The next handler must see the latest
+  # receive_state (mutated by this return) — not a stale snapshot.
+  defp apply_handler_return_then_drain(handler_return, update_from, state) do
+    case apply_handler_return(handler_return, update_from, state) do
+      {:noreply, state} -> {:noreply, maybe_dispatch_next_handler(state)}
+      other -> other
+    end
   end
 
   # --- Private: async handler exit ---
@@ -517,21 +574,24 @@ defmodule Temporalex.Worker.Executor do
     async_handlers = MapSet.delete(state.async_handlers, pid)
     state = %{state | async_tracker: async_tracker, async_handlers: async_handlers}
 
-    case {tracker_info, reason} do
-      {{:update, update_from}, {:handler_result, result}} when update_from != nil ->
-        GenServer.reply(update_from, result)
-        maybe_complete_receive(state)
+    state =
+      case {tracker_info, reason} do
+        {{:update, protocol_instance_id}, {:handler_result, result}}
+        when protocol_instance_id != nil ->
+          emit_update_completed(state, protocol_instance_id, result)
 
-      {{:signal, _}, {:handler_result, _}} ->
-        maybe_complete_receive(state)
+        {{:update, protocol_instance_id}, _} when protocol_instance_id != nil ->
+          emit_update_rejected(
+            state,
+            protocol_instance_id,
+            "handler crashed: #{inspect(reason)}"
+          )
 
-      {{:update, update_from}, _} when update_from != nil ->
-        GenServer.reply(update_from, {:error, {:handler_crashed, reason}})
-        maybe_complete_receive(state)
+        _ ->
+          state
+      end
 
-      _ ->
-        maybe_complete_receive(state)
-    end
+    maybe_complete_receive(state)
   end
 
   # --- Private: parallel branch exit ---
@@ -572,21 +632,45 @@ defmodule Temporalex.Worker.Executor do
 
   # --- Private: handler return values ---
 
-  defp apply_handler_return({:noreply, new_state}, _update_from, state) do
+  defp apply_handler_return({:noreply, new_state}, update_from, state) do
+    # Updates require an explicit response — {:noreply} is a contract
+    # violation. Reject so the API caller doesn't hang.
+    state =
+      if update_from do
+        emit_update_rejected(
+          state,
+          update_from,
+          "update handler returned {:noreply, _} — must return {:reply, response, state} or {:stop, response, state}"
+        )
+      else
+        state
+      end
+
     drain_and_continue(%{state | receive_state: new_state})
   end
 
-  defp apply_handler_return({:stop, final_state}, _update_from, state) do
+  defp apply_handler_return({:stop, final_state}, update_from, state) do
+    state =
+      if update_from do
+        emit_update_rejected(
+          state,
+          update_from,
+          "update handler returned {:stop, state} — must return {:stop, response, state} to surface a value"
+        )
+      else
+        state
+      end
+
     complete_receive(%{state | receive_state: final_state}, final_state)
   end
 
   defp apply_handler_return({:reply, response, new_state}, update_from, state) do
-    if update_from, do: GenServer.reply(update_from, response)
+    state = if update_from, do: emit_update_completed(state, update_from, response), else: state
     drain_and_continue(%{state | receive_state: new_state})
   end
 
   defp apply_handler_return({:stop, response, final_state}, update_from, state) do
-    if update_from, do: GenServer.reply(update_from, response)
+    state = if update_from, do: emit_update_completed(state, update_from, response), else: state
     complete_receive(%{state | receive_state: final_state}, final_state)
   end
 
@@ -626,16 +710,14 @@ defmodule Temporalex.Worker.Executor do
 
       {before, [{name, payload} | rest]} ->
         handler = Map.fetch!(signal_handlers, name)
-        executor = self()
 
-        pid =
-          spawn_link(fn ->
-            Process.put(:__temporal_executor__, executor)
-            Process.put(:__temporal_in_handler__, true)
-            exit({:handler_result, handler.(payload, state.receive_state)})
-          end)
+        state = %{
+          state
+          | signal_buffer: before ++ rest,
+            signal_buffer_size: state.signal_buffer_size - 1
+        }
 
-        %{state | signal_buffer: before ++ rest, sync_handler_pid: pid}
+        dispatch_sync_handler(handler, [payload, state.receive_state], nil, state)
     end
   end
 
@@ -657,10 +739,26 @@ defmodule Temporalex.Worker.Executor do
   defp complete_receive(state, final_state) do
     state = cancel_receive_timer(state)
 
-    if MapSet.size(state.async_handlers) > 0 do
-      {:noreply, %{state | status: :receive_stopping}}
-    else
-      do_complete_receive(state, final_state)
+    cond do
+      # Receive already completed (timer fired and won; or another stop
+      # already replied). receive_from is nil, so any further completion
+      # would call GenServer.reply(nil, _) → FunctionClauseError.
+      is_nil(state.receive_from) ->
+        {:noreply, state}
+
+      state.status == :receive_stopping ->
+        # Already stopping — first stop wins (a queued handler or a racing
+        # timer must not overwrite the originally decided value).
+        {:noreply, state}
+
+      MapSet.size(state.async_handlers) > 0 ->
+        # Capture final_state — concurrent async handlers may mutate
+        # receive_state via update_state before they exit, but the receive's
+        # return value must reflect the moment :stop fired.
+        {:noreply, %{state | status: :receive_stopping, receive_stop_value: final_state}}
+
+      true ->
+        do_complete_receive(state, final_state)
     end
   end
 
@@ -718,11 +816,37 @@ defmodule Temporalex.Worker.Executor do
   defp buffer_signal(state, name, payload) do
     case Map.pop(state.signal_waiters, name) do
       {nil, _} ->
-        %{state | signal_buffer: state.signal_buffer ++ [{name, payload}]}
+        enqueue_signal_capped(state, name, payload)
 
       {from, remaining} ->
         GenServer.reply(from, payload)
         %{state | signal_waiters: remaining}
+    end
+  end
+
+  # Append a buffered signal, dropping the oldest if the cap is hit. Caps
+  # are intentionally per-executor (per workflow run): a single workflow
+  # cannot fill the worker's heap by spamming itself with signals.
+  defp enqueue_signal_capped(state, name, payload) do
+    if state.signal_buffer_size >= state.max_signal_buffer do
+      Logger.warning(
+        "Executor #{state.run_id}: signal buffer at cap #{state.max_signal_buffer}; dropping oldest"
+      )
+
+      [_dropped | rest] = state.signal_buffer
+
+      %{
+        state
+        | signal_buffer: rest ++ [{name, payload}],
+          # Size unchanged: dropped one, added one.
+          signal_buffer_size: state.signal_buffer_size
+      }
+    else
+      %{
+        state
+        | signal_buffer: state.signal_buffer ++ [{name, payload}],
+          signal_buffer_size: state.signal_buffer_size + 1
+      }
     end
   end
 
@@ -752,38 +876,44 @@ defmodule Temporalex.Worker.Executor do
   # --- Private: job categorization ---
 
   defp categorize_jobs(jobs) do
-    Enum.reduce(jobs, {[], [], [], [], [], [], []}, fn job,
-                                                       {init, resolve, signal, update, query,
-                                                        patch, other} ->
-      case job do
-        {:initialize_workflow, _} = j ->
-          {[j | init], resolve, signal, update, query, patch, other}
+    {init, resolve, signal, update, query, patch, other} =
+      Enum.reduce(jobs, {[], [], [], [], [], [], []}, fn job,
+                                                         {init, resolve, signal, update, query,
+                                                          patch, other} ->
+        case job do
+          {:initialize_workflow, _} = j ->
+            {[j | init], resolve, signal, update, query, patch, other}
 
-        {:resolve_activity, _} = j ->
-          {init, [j | resolve], signal, update, query, patch, other}
+          {:resolve_activity, _} = j ->
+            {init, [j | resolve], signal, update, query, patch, other}
 
-        {:fire_timer, _} = j ->
-          {init, [j | resolve], signal, update, query, patch, other}
+          {:fire_timer, _} = j ->
+            {init, [j | resolve], signal, update, query, patch, other}
 
-        {:resolve_child_workflow_execution, _} = j ->
-          {init, [j | resolve], signal, update, query, patch, other}
+          {:resolve_child_workflow_execution, _} = j ->
+            {init, [j | resolve], signal, update, query, patch, other}
 
-        {:signal_workflow, _} = j ->
-          {init, resolve, [j | signal], update, query, patch, other}
+          {:signal_workflow, _} = j ->
+            {init, resolve, [j | signal], update, query, patch, other}
 
-        {:do_update, _} = j ->
-          {init, resolve, signal, [j | update], query, patch, other}
+          {:do_update, _} = j ->
+            {init, resolve, signal, [j | update], query, patch, other}
 
-        {:query_workflow, _} = j ->
-          {init, resolve, signal, update, [j | query], patch, other}
+          {:query_workflow, _} = j ->
+            {init, resolve, signal, update, [j | query], patch, other}
 
-        {:notify_has_patch, _} = j ->
-          {init, resolve, signal, update, query, [j | patch], other}
+          {:notify_has_patch, _} = j ->
+            {init, resolve, signal, update, query, [j | patch], other}
 
-        j ->
-          {init, resolve, signal, update, query, patch, [j | other]}
-      end
-    end)
+          j ->
+            {init, resolve, signal, update, query, patch, [j | other]}
+        end
+      end)
+
+    # Reverse to restore activation order — signals/updates and other jobs
+    # must be processed in the order Temporal delivered them.
+    {Enum.reverse(init), Enum.reverse(resolve), Enum.reverse(signal), Enum.reverse(update),
+     Enum.reverse(query), Enum.reverse(patch), Enum.reverse(other)}
   end
 
   # --- Private: activation job handlers ---
@@ -815,6 +945,14 @@ defmodule Temporalex.Worker.Executor do
 
       {:resolve_child_workflow_execution, %{seq: seq, result: {:failed, failure}}}, state ->
         unblock_pending(state, seq, {:error, failure})
+
+      {:resolve_child_workflow_execution, %{seq: seq, result: {:cancelled, failure}}}, state ->
+        unblock_pending(state, seq, {:error, {:cancelled, failure}})
+
+      # Backoff on a local-activity is intentional passthrough — the runner
+      # stays parked until the eventual final resolution arrives.
+      {:resolve_activity, %{result: {:backoff, _}}}, state ->
+        state
 
       _, state ->
         state
@@ -855,6 +993,8 @@ defmodule Temporalex.Worker.Executor do
           state.workflow_module.handle_query(qtype, decoded_args, state.published_state)
         rescue
           e -> {:reply, {:error, inspect(e)}}
+        catch
+          kind, value -> {:reply, {:error, "#{kind}: #{inspect(value)}"}}
         end
 
       case response do
@@ -872,42 +1012,105 @@ defmodule Temporalex.Worker.Executor do
   end
 
   defp dispatch_updates(update_jobs, state) do
-    Enum.reduce(update_jobs, state, fn {:do_update, %{id: _id, name: name, input: input}},
+    Enum.reduce(update_jobs, state, fn {:do_update,
+                                        %{
+                                          id: _id,
+                                          protocol_instance_id: pid,
+                                          name: name,
+                                          input: input
+                                        }},
                                        state ->
       if state.status != :in_receive do
-        # Updates rejected outside receive
+        # Updates outside a receive can't be served — reject.
         Logger.warning("Update #{name} rejected: not in receive")
-        state
+        emit_update_rejected(state, pid, "no receive in progress")
       else
         update_handlers = Keyword.get(state.receive_opts, :update, %{})
 
         case Map.get(update_handlers, name) do
           nil ->
             Logger.warning("Update #{name} rejected: no handler")
-            state
+            emit_update_rejected(state, pid, "no handler for #{name}")
 
           {handler, opts} when is_list(opts) ->
             decoded_args = Temporalex.Converter.decode_args(input)
             validator = Keyword.get(opts, :validator)
 
             if validator do
-              case validator.(decoded_args, state.receive_state) do
+              case run_validator(validator, decoded_args, state.receive_state) do
                 :ok ->
-                  dispatch_sync_handler(handler, [decoded_args, state.receive_state], nil, state)
+                  state = emit_update_accepted(state, pid)
+                  dispatch_sync_handler(handler, [decoded_args, state.receive_state], pid, state)
 
-                {:error, _reason} ->
-                  state
+                {:error, reason} ->
+                  emit_update_rejected(state, pid, "validator: #{inspect(reason)}")
               end
             else
-              dispatch_sync_handler(handler, [decoded_args, state.receive_state], nil, state)
+              state = emit_update_accepted(state, pid)
+              dispatch_sync_handler(handler, [decoded_args, state.receive_state], pid, state)
             end
 
           handler when is_function(handler) ->
             decoded_args = Temporalex.Converter.decode_args(input)
-            dispatch_sync_handler(handler, [decoded_args, state.receive_state], nil, state)
+            state = emit_update_accepted(state, pid)
+            dispatch_sync_handler(handler, [decoded_args, state.receive_state], pid, state)
         end
       end
     end)
+  end
+
+  # --- Private: update response emission ---
+
+  # Per Temporal protocol, update flow is:
+  #   accepted (validator passed)  →  completed (handler returned)
+  # OR:
+  #   rejected (validator failed, OR handler crashed after acceptance).
+  # Without these UpdateResponse commands the Temporal Update API caller
+  # hangs until update timeout.
+  defp emit_update_accepted(state, protocol_instance_id) do
+    cmd =
+      {:update_response,
+       %{protocol_instance_id: protocol_instance_id, response: {:accepted, %{}}}}
+
+    %{state | commands: [cmd | state.commands]}
+  end
+
+  defp emit_update_completed(state, protocol_instance_id, result) do
+    payload = Temporalex.Converter.encode(result)
+
+    cmd =
+      {:update_response,
+       %{protocol_instance_id: protocol_instance_id, response: {:completed, payload}}}
+
+    %{state | commands: [cmd | state.commands]}
+  end
+
+  defp emit_update_rejected(state, protocol_instance_id, message)
+       when is_binary(message) do
+    cmd =
+      {:update_response,
+       %{
+         protocol_instance_id: protocol_instance_id,
+         response: {:rejected, %{message: message}}
+       }}
+
+    %{state | commands: [cmd | state.commands]}
+  end
+
+  # Validators run inline in this GenServer's process, so a crashing
+  # validator would otherwise take down the executor. Trap raise/throw/exit
+  # and treat any failure as a validation rejection.
+  defp run_validator(validator, args, state) do
+    try do
+      case validator.(args, state) do
+        :ok -> :ok
+        {:error, _} = err -> err
+      end
+    rescue
+      e -> {:error, {:validator_crashed, inspect(e)}}
+    catch
+      kind, value -> {:error, {:validator_crashed, "#{kind}: #{inspect(value)}"}}
+    end
   end
 
   defp handle_other_jobs(other_jobs, state) do
@@ -928,7 +1131,40 @@ defmodule Temporalex.Worker.Executor do
 
   # --- Private: handler dispatch ---
 
+  # Single entry point for spawning a sync handler. If one is already running,
+  # queue this dispatch behind it. Handlers run serially in dispatch order so
+  # each one observes the prior one's mutations to receive_state.
   defp dispatch_sync_handler(handler, handler_args, update_from, state) do
+    cond do
+      state.sync_handler_pid == nil ->
+        spawn_sync_handler(handler, handler_args, update_from, state)
+
+      state.pending_handler_count >= state.max_pending_handlers ->
+        # Cap reached. Updates need a response so the caller doesn't hang;
+        # signals are fire-and-forget so we just drop with a warning.
+        Logger.warning(
+          "Executor #{state.run_id}: handler queue at cap #{state.max_pending_handlers}; " <>
+            "rejecting (update_from=#{inspect(update_from)})"
+        )
+
+        if update_from do
+          emit_update_rejected(state, update_from, "handler queue full")
+        else
+          state
+        end
+
+      true ->
+        entry = {handler, handler_args, update_from}
+
+        %{
+          state
+          | pending_handler_queue: :queue.in(entry, state.pending_handler_queue),
+            pending_handler_count: state.pending_handler_count + 1
+        }
+    end
+  end
+
+  defp spawn_sync_handler(handler, handler_args, update_from, state) do
     executor = self()
 
     pid =
@@ -939,6 +1175,62 @@ defmodule Temporalex.Worker.Executor do
       end)
 
     %{state | sync_handler_pid: pid, sync_handler_update_from: update_from}
+  end
+
+  # Drain one queued handler when the current one finishes. Refetches
+  # receive_state at spawn time so each handler sees the freshest state.
+  # If the receive has already ended (status moved past :receive_stopping),
+  # drain the entire queue instead — emit :rejected for any update entries
+  # so their callers don't hang.
+  defp maybe_dispatch_next_handler(state) do
+    cond do
+      state.status not in [:in_receive, :receive_stopping] ->
+        drain_queued_handlers_post_receive(state)
+
+      state.sync_handler_pid != nil ->
+        state
+
+      true ->
+        case :queue.out(state.pending_handler_queue) do
+          {{:value, {handler, handler_args, update_from}}, rest} ->
+            spawn_sync_handler(
+              handler,
+              refresh_handler_args(handler_args, state),
+              update_from,
+              %{
+                state
+                | pending_handler_queue: rest,
+                  pending_handler_count: state.pending_handler_count - 1
+              }
+            )
+
+          {:empty, _} ->
+            state
+        end
+    end
+  end
+
+  defp drain_queued_handlers_post_receive(state) do
+    state =
+      Enum.reduce(:queue.to_list(state.pending_handler_queue), state, fn
+        {_handler, _args, nil}, s ->
+          s
+
+        {_handler, _args, protocol_instance_id}, s ->
+          emit_update_rejected(s, protocol_instance_id, "receive ended before handler ran")
+      end)
+
+    %{state | pending_handler_queue: :queue.new(), pending_handler_count: 0}
+  end
+
+  # When a queued handler runs, it should see the latest receive_state, not
+  # the snapshot at queue-time. Args lists end with the receive_state slot
+  # (handlers take [payload, state] or [decoded_args, state]).
+  defp refresh_handler_args([_ | _] = args, state) do
+    case Enum.reverse(args) do
+      [_old_state | rest] -> Enum.reverse([state.receive_state | rest])
+      _ -> args
+    end
   end
 
   # --- Private: pending calls ---
@@ -967,6 +1259,12 @@ defmodule Temporalex.Worker.Executor do
   # Used when the runner parks on receive/wait_for_signal with nothing
   # produced this activation; Temporal still needs an acknowledgement.
   defp force_flush_commands(state), do: do_flush(state)
+
+  defp do_flush(%{flush_to: pid} = state) when is_pid(pid) do
+    commands = Enum.reverse(state.commands)
+    send(pid, {:flushed, state.run_id, commands})
+    {:noreply, %{state | commands: []}}
+  end
 
   defp do_flush(state) do
     commands = Enum.reverse(state.commands)

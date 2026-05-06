@@ -102,6 +102,8 @@ defmodule Temporalex.Testing.Executor do
         state.workflow_module.handle_query(name, args, state.published_state)
       rescue
         e -> {:reply, {:error, inspect(e)}}
+      catch
+        kind, value -> {:reply, {:error, "#{kind}: #{inspect(value)}"}}
       end
 
     {:reply, response, state}
@@ -154,7 +156,7 @@ defmodule Temporalex.Testing.Executor do
         validator = Keyword.get(opts, :validator)
 
         if validator do
-          case validator.(args, state.receive_state) do
+          case run_validator(validator, args, state.receive_state) do
             :ok -> dispatch_sync_handler(handler, args, from, state)
             {:error, reason} -> {:reply, {:error, reason}, state}
           end
@@ -343,16 +345,41 @@ defmodule Temporalex.Testing.Executor do
     state = %{state | receive_timer_ref: nil, receive_timer_id: nil}
     timeout_reply = {:timeout, state.receive_state}
 
-    if MapSet.size(state.async_handlers) > 0 do
-      # Pending async handlers — wait for them, then complete with the
-      # captured timeout value.
-      {:noreply, %{state | status: :receive_stopping, receive_stop_value: timeout_reply}}
-    else
-      do_complete_receive(state, timeout_reply)
+    cond do
+      state.status == :receive_stopping ->
+        # A handler already started the stop with a captured value — first
+        # decision wins, don't override with the timer fire.
+        {:noreply, state}
+
+      MapSet.size(state.async_handlers) > 0 ->
+        # Pending async handlers — wait for them, then complete with the
+        # captured timeout value.
+        {:noreply, %{state | status: :receive_stopping, receive_stop_value: timeout_reply}}
+
+      true ->
+        do_complete_receive(state, timeout_reply)
     end
   end
 
   def handle_info({:receive_timeout, _stale_id}, state), do: {:noreply, state}
+
+  # --- Private: validator (called inline from handle_call) ---
+
+  # Validators run inline in this GenServer's process, so a crashing
+  # validator would otherwise take down the workflow. Trap raise/throw/exit
+  # and surface them as `{:error, _}` to the caller.
+  defp run_validator(validator, args, state) do
+    try do
+      case validator.(args, state) do
+        :ok -> :ok
+        {:error, _} = err -> err
+      end
+    rescue
+      e -> {:error, {:validator_crashed, inspect(e)}}
+    catch
+      kind, value -> {:error, {:validator_crashed, "#{kind}: #{inspect(value)}"}}
+    end
+  end
 
   # --- Private: runner exit ---
 
@@ -368,8 +395,18 @@ defmodule Temporalex.Testing.Executor do
     apply_handler_return(handler_return, update_from, state)
   end
 
-  defp handle_sync_handler_exit(_reason, state) do
-    {:noreply, %{state | sync_handler_pid: nil, sync_handler_update_from: nil}}
+  defp handle_sync_handler_exit(reason, state) do
+    update_from = state.sync_handler_update_from
+
+    if update_from do
+      # Update caller is waiting for a reply — surface the crash instead of
+      # leaving them blocked forever.
+      GenServer.reply(update_from, {:error, {:handler_crashed, reason}})
+    end
+
+    state = %{state | sync_handler_pid: nil, sync_handler_update_from: nil}
+    state = maybe_dispatch_next_handler(state)
+    {:noreply, state}
   end
 
   # --- Private: async handler exit ---
@@ -595,10 +632,26 @@ defmodule Temporalex.Testing.Executor do
   defp complete_receive(state, final_state) do
     state = cancel_receive_timer(state)
 
-    if MapSet.size(state.async_handlers) > 0 do
-      {:noreply, %{state | status: :receive_stopping}}
-    else
-      do_complete_receive(state, final_state)
+    cond do
+      # Receive already completed (timer fired and won; or another stop
+      # already replied). receive_from is nil, so any further completion
+      # would call GenServer.reply(nil, _) → FunctionClauseError.
+      is_nil(state.receive_from) ->
+        {:noreply, state}
+
+      state.status == :receive_stopping ->
+        # Already stopping — first stop wins (a queued handler or a racing
+        # timer must not overwrite the originally decided value).
+        {:noreply, state}
+
+      MapSet.size(state.async_handlers) > 0 ->
+        # Capture final_state — concurrent async handlers may mutate
+        # receive_state via update_state before they exit, but the receive's
+        # return value must reflect the moment :stop fired.
+        {:noreply, %{state | status: :receive_stopping, receive_stop_value: final_state}}
+
+      true ->
+        do_complete_receive(state, final_state)
     end
   end
 

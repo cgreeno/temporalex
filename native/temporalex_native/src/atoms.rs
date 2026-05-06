@@ -74,6 +74,12 @@ rustler::atoms! {
     set_patch_marker,
     start_child_workflow_execution,
     schedule_local_activity,
+    update_response,
+
+    // Update response variants
+    accepted,
+    rejected,
+    response,
 
     // Proto bridge: removal reasons
     cache_full,

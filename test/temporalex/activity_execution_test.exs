@@ -263,6 +263,31 @@ defmodule Temporalex.ActivityExecutionTest do
     end
   end
 
+  describe "A11b — heartbeat encodes details as a Payload, not raw ETF" do
+    # Heartbeat details must round-trip through the same Payload format
+    # as activity inputs/outputs. The old code sent raw ETF bytes which
+    # the Rust side could not interpret as a Payload — losing the encoding
+    # metadata. Verify the helper that prepares the payload preserves
+    # `binary/etf` metadata for arbitrary terms.
+    test "complex Elixir term produces a payload map with binary/etf metadata" do
+      details = %{progress: 42, items: ["a", "b", "c"], stage: :running}
+      payload = Context.encode_heartbeat_payload(details)
+
+      assert %{metadata: %{"encoding" => "binary/etf"}, data: data} = payload
+      assert is_binary(data)
+      assert Temporalex.Converter.decode(payload) == details
+    end
+
+    test "binary input is encoded as binary/plain" do
+      payload = Context.encode_heartbeat_payload(<<0, 1, 2, 3>>)
+      assert %{metadata: %{"encoding" => "binary/plain"}, data: <<0, 1, 2, 3>>} = payload
+    end
+
+    test "nil details produces nil payload" do
+      assert Context.encode_heartbeat_payload(nil) == nil
+    end
+  end
+
   describe "A12 — heartbeat short-circuits when cancelled" do
     test "heartbeat returns {:cancelled, _} once the cancel flag is set" do
       ref = Context.new_cancel_ref()

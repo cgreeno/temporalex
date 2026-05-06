@@ -11,7 +11,8 @@ defmodule Temporalex.Native do
   def start_worker(_runtime, _client, _task_queue, _namespace, _max_cached_workflows, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  # Fire-and-forget heartbeat
+  # Fire-and-forget heartbeat. `details` is a payload map
+  # `%{metadata: ..., data: ...}` (from `Temporalex.Converter.encode/1`) or `nil`.
   def record_activity_heartbeat(_worker, _task_token, _details),
     do: :erlang.nif_error(:nif_not_loaded)
 

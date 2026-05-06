@@ -162,6 +162,91 @@ defmodule Temporalex.ProtoBridgeTest do
     end
   end
 
+  describe "PB7d — malformed input payloads surface errors" do
+    # An activity whose argument list contains a non-payload term (e.g. an
+    # atom where a %{data, metadata} map is expected) used to be silently
+    # filter_mapped away — so the activity ran with FEWER arguments than
+    # the workflow intended. Verify this now fails loudly.
+    test "schedule_activity with a non-payload argument returns {:error, _}" do
+      cmd = {:schedule_activity, %{seq: 1, activity_type: "x", input: [:not_a_payload_map]}}
+
+      assert {:error, _reason} =
+               Native.encode_workflow_completion("run-x", {:successful, [cmd]})
+    end
+
+    test "start_child_workflow_execution with a malformed input returns {:error, _}" do
+      cmd =
+        {:start_child_workflow_execution,
+         %{seq: 1, workflow_type: "Child", workflow_id: "c1", input: [:bogus]}}
+
+      assert {:error, _reason} =
+               Native.encode_workflow_completion("run-x", {:successful, [cmd]})
+    end
+  end
+
+  describe "PB7c — encode_workflow_completion: malformed commands surface errors" do
+    # The encoder used to silently drop commands it couldn't decode (via
+    # filter_map(.ok())). That hid bugs — a typo in a command name produced
+    # an empty completion that Temporal acknowledged as success while the
+    # workflow's intent was lost. Verify the encoder now propagates errors.
+    test "unknown command type returns {:error, _}" do
+      result =
+        Native.encode_workflow_completion("run-x", {:successful, [{:not_a_real_command, %{}}]})
+
+      assert {:error, _reason} = result
+    end
+
+    test "command missing required fields returns {:error, _}" do
+      # schedule_activity requires :seq — omit it and ensure we surface
+      # the error rather than silently dropping the command.
+      result =
+        Native.encode_workflow_completion(
+          "run-x",
+          {:successful, [{:schedule_activity, %{activity_type: "x"}}]}
+        )
+
+      assert {:error, _reason} = result
+    end
+  end
+
+  describe "PB7b — encode_workflow_completion: update_response command" do
+    # Updates handlers must be answered with an UpdateResponse command.
+    # Without it the Temporal Update API caller times out. We verify the
+    # encoder does NOT drop this command type by comparing against an
+    # empty-commands baseline — if the encoder silently drops unknown
+    # commands (the bug we're fixing), the two byte strings would match.
+    test "accepted+completed update_response produces non-empty distinct bytes" do
+      payload = Temporalex.Converter.encode(:done)
+      pid = "proto-instance-1"
+
+      cmds = [
+        {:update_response, %{protocol_instance_id: pid, response: {:accepted, %{}}}},
+        {:update_response, %{protocol_instance_id: pid, response: {:completed, payload}}}
+      ]
+
+      {:ok, with_updates} = Native.encode_workflow_completion("run-1", {:successful, cmds})
+      {:ok, empty} = Native.encode_workflow_completion("run-1", {:successful, []})
+
+      assert byte_size(with_updates) > byte_size(empty),
+             "update_response commands appear to have been dropped by the encoder"
+    end
+
+    test "rejected update_response produces non-empty distinct bytes" do
+      cmds = [
+        {:update_response,
+         %{
+           protocol_instance_id: "p1",
+           response: {:rejected, %{message: "bad input"}}
+         }}
+      ]
+
+      {:ok, with_reject} = Native.encode_workflow_completion("run-1", {:successful, cmds})
+      {:ok, empty} = Native.encode_workflow_completion("run-1", {:successful, []})
+
+      assert byte_size(with_reject) > byte_size(empty)
+    end
+  end
+
   describe "PB8 — encode_activity_result: completed / failed / cancelled" do
     test "encodes a completed activity result" do
       payload = Temporalex.Converter.encode(:activity_done)

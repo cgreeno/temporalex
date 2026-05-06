@@ -54,7 +54,11 @@ defmodule Temporalex.Worker do
       headers: Keyword.get(opts, :headers, %{}),
       max_cached_workflows: Keyword.get(opts, :max_cached_workflows, 1000),
       activity_supervisor: activity_sup,
-      executor_supervisor: executor_sup
+      executor_supervisor: executor_sup,
+      # Test seam: when set, Server skips the connect/start_worker flow and
+      # sits idle in :running. Use only from tests that drive the Server
+      # directly via :sys.replace_state.
+      skip_connect: Keyword.get(opts, :skip_connect, false)
     }
 
     children = [
@@ -63,6 +67,12 @@ defmodule Temporalex.Worker do
       {Temporalex.Worker.Server, config}
     ]
 
-    Supervisor.init(children, strategy: :rest_for_one)
+    # :one_for_all because all three children form a single coherent unit:
+    # the Server holds the WorkerResource NIF reference, the executors hold
+    # cloned references via their state.worker, and the Task.Supervisor
+    # runs the activity tasks that report back to the Server. If any one
+    # dies, the others' references are stale or their callbacks point to
+    # a dead recipient — restart the whole group.
+    Supervisor.init(children, strategy: :one_for_all)
   end
 end

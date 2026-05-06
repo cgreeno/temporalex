@@ -39,11 +39,16 @@ defmodule Temporalex.Worker.Replay do
   def consume([], _type, _seq), do: {:new, []}
 
   def consume([{other_type, other_seq, _} | _], type, seq) do
-    raise "Nondeterminism detected: expected #{type} seq=#{seq}, got #{other_type} seq=#{other_seq}"
+    raise Temporalex.NondeterminismError,
+      message:
+        "Nondeterminism detected: expected #{type} seq=#{seq}, got #{other_type} seq=#{other_seq}"
   end
 
   # --- private ---
 
+  # Backoff is an intermediate signal for local-activity retries — not a final
+  # resolution, so it must not enter the replay log.
+  defp resolvable?({:resolve_activity, %{result: {:backoff, _}}}), do: false
   defp resolvable?({:resolve_activity, _}), do: true
   defp resolvable?({:fire_timer, _}), do: true
   defp resolvable?({:resolve_child_workflow_execution, _}), do: true
@@ -55,6 +60,9 @@ defmodule Temporalex.Worker.Replay do
   defp to_entry({:resolve_activity, %{seq: seq, result: {:failed, failure}}}),
     do: {:activity, seq, {:error, failure}}
 
+  defp to_entry({:resolve_activity, %{seq: seq, result: {:cancelled, failure}}}),
+    do: {:activity, seq, {:error, {:cancelled, failure}}}
+
   defp to_entry({:fire_timer, %{seq: seq}}),
     do: {:timer, seq, :ok}
 
@@ -63,4 +71,7 @@ defmodule Temporalex.Worker.Replay do
 
   defp to_entry({:resolve_child_workflow_execution, %{seq: seq, result: {:failed, failure}}}),
     do: {:child_workflow, seq, {:error, failure}}
+
+  defp to_entry({:resolve_child_workflow_execution, %{seq: seq, result: {:cancelled, failure}}}),
+    do: {:child_workflow, seq, {:error, {:cancelled, failure}}}
 end

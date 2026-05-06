@@ -1,5 +1,6 @@
 use prost::Message;
-use rustler::{Atom, Binary, Encoder, LocalPid, ResourceArc};
+use rustler::{Atom, Binary, Encoder, LocalPid, ResourceArc, Term};
+use std::collections::HashMap;
 use temporalio_common::protos::coresdk::{
     workflow_completion::WorkflowActivationCompletion, ActivityTaskCompletion,
 };
@@ -94,32 +95,71 @@ fn complete_activity_task(
 }
 
 /// Sync NIF — fire-and-forget heartbeat. Core SDK throttles internally.
-/// `details_bytes` is a single protobuf-encoded Payload.
+/// `details` is a payload map `%{metadata: %{...}, data: bytes}` or `nil`.
 #[rustler::nif]
-fn record_activity_heartbeat(
+fn record_activity_heartbeat<'a>(
     worker: ResourceArc<WorkerResource>,
     task_token: Binary,
-    details_bytes: Binary,
+    details: Term<'a>,
 ) -> Atom {
     use temporalio_common::protos::coresdk::ActivityHeartbeat;
     use temporalio_common::protos::temporal::api::common::v1::Payload;
 
-    let detail = match Payload::decode(details_bytes.as_slice()) {
-        Ok(p) => p,
-        Err(_) => {
-            // If we can't decode, wrap raw bytes as a payload
-            Payload {
-                data: details_bytes.as_slice().to_vec(),
-                ..Default::default()
+    // nil → no details. Map → build a Payload with metadata + data.
+    let details_vec: Vec<Payload> = if details.is_atom() {
+        vec![]
+    } else {
+        match payload_from_map(details) {
+            Some(p) => vec![p],
+            None => {
+                error!("record_activity_heartbeat: invalid details shape — dropping");
+                vec![]
             }
         }
     };
 
     let heartbeat = ActivityHeartbeat {
         task_token: task_token.as_slice().to_vec(),
-        details: vec![detail],
+        details: details_vec,
     };
 
     worker.worker.record_activity_heartbeat(heartbeat);
     atoms::ok()
+}
+
+// Extract a Payload from an Elixir `%{metadata: %{...}, data: <<bytes>>}` map.
+fn payload_from_map(
+    term: Term,
+) -> Option<temporalio_common::protos::temporal::api::common::v1::Payload> {
+    use temporalio_common::protos::temporal::api::common::v1::Payload;
+
+    let env = term.get_env();
+    let data_term = term.map_get(atoms::data().encode(env)).ok()?;
+    let data_bin: Binary = data_term.decode().ok()?;
+    let data: Vec<u8> = data_bin.as_slice().to_vec();
+
+    let mut metadata = HashMap::new();
+    if let Ok(meta_term) = term.map_get(atoms::metadata().encode(env)) {
+        if let Some(iter) = rustler::MapIterator::new(meta_term) {
+            for (k, v) in iter {
+                if let Ok(key) = k.decode::<String>() {
+                    let val: Vec<u8> =
+                        if let Ok(val_bin) = v.decode::<Binary>() {
+                            val_bin.as_slice().to_vec()
+                        } else if let Ok(val_str) = v.decode::<String>() {
+                            val_str.into_bytes()
+                        } else {
+                            continue;
+                        };
+                    metadata.insert(key, val);
+                }
+            }
+        }
+    }
+
+    Some(Payload {
+        metadata,
+        data,
+        ..Default::default()
+    })
 }

@@ -139,10 +139,10 @@ defmodule Temporalex.ErrorTypesTest do
       assert Exception.message(err) == "expected activity seq=2, got timer seq=2"
     end
 
-    test "the replay module raises with a message matching NondeterminismError's shape" do
+    test "the replay module raises NondeterminismError with a descriptive message" do
       log = [{:activity, 1, :ok}]
 
-      assert_raise RuntimeError, ~r/Nondeterminism/, fn ->
+      assert_raise NondeterminismError, ~r/Nondeterminism/, fn ->
         Temporalex.Worker.Replay.consume(log, :timer, 1)
       end
     end
