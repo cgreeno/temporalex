@@ -77,8 +77,29 @@ worth knowing about:
 
 ### Status
 
-Suitable for evaluation and small-scale production. 301 unit tests + 28
-integration tests pass against a live Temporal dev server. The API surface
-in `Temporalex.Workflow.API` is stable for `0.2.x`; lower-level modules
-(`Worker.Server`, `Worker.Executor`, `Native`) are public for testing
-hooks but not part of the API contract — those will likely change.
+Suitable for evaluation and small-scale production. 303 unit tests pass.
+The API surface in `Temporalex.Workflow.API` is stable for `0.2.x`;
+lower-level modules (`Worker.Server`, `Worker.Executor`, `Native`) are
+public for testing hooks but not part of the API contract — those will
+likely change.
+
+### Known limitations
+
+- **Update results aren't readable via the `temporal` CLI.** Workflow
+  payloads default to `binary/etf` encoding (full Elixir term fidelity).
+  The CLI's update-execute can't render binary/etf responses — it
+  errors with "payload encoding is not supported" when displaying. The
+  update itself executes correctly; only the CLI display is affected.
+  Two ways to drive updates without the CLI today: from another worker,
+  or from external code that reads ETF directly. A
+  `Temporalex.Client.update_workflow` (matching `start_workflow`,
+  `signal_workflow`) is the planned 0.2.1 fix.
+
+### Wire-protocol invariant
+
+Each workflow activation must produce exactly one
+`complete_workflow_activation` call. The unit test harness
+`Temporalex.Test.ExecutorHelpers.assert_one_flush_per_activation`
+validates this without needing a Temporal server. Tests under
+`test/temporalex/worker_executor_test.exs` exercise the harness for
+sync update handlers and update handlers that park on activities.
