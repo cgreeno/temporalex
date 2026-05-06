@@ -89,6 +89,10 @@ jobs:
           restore-keys: ${{ runner.os }}-rust-
 
       - run: mix deps.get
+      # Explicit compile so Rustler builds the NIF and copies it to
+      # _build/test/lib/temporalex/priv/native/ before the test runner
+      # tries to load Temporalex.Native.
+      - run: mix compile
       - run: mix test
 
   e2e:
