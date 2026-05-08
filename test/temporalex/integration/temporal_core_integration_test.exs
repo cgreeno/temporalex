@@ -245,14 +245,25 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
       worker_name =
         Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
 
+      client_name =
+        Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
+
       task_queue = "temporalex-native-#{System.unique_integer([:positive])}"
+
+      {:ok, client_pid} =
+        Temporalex.Client.start_link(
+          name: client_name,
+          backend: Temporalex.Backend.TemporalCore,
+          target: "http://127.0.0.1:#{port}",
+          namespace: "default",
+          task_queue: task_queue,
+          workflow_result_timeout: 30_000
+        )
 
       {:ok, worker_pid} =
         Temporalex.Worker.start_link(
           name: worker_name,
-          backend: Temporalex.Backend.TemporalCore,
-          target: "http://127.0.0.1:#{port}",
-          namespace: "default",
+          client: client_name,
           task_queue: task_queue,
           workflows: [
             Workflow,
@@ -266,13 +277,12 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
           ],
           activities: [Activities],
           max_workflow_pollers: 2,
-          max_activity_pollers: 2,
-          workflow_result_timeout: 30_000
+          max_activity_pollers: 2
         )
 
       try do
         assert {:error, invalid_start_reason} =
-                 Temporalex.Client.start_workflow(worker_name, Workflow, :invalid_options,
+                 Temporalex.Client.start_workflow(client_name, Workflow, :invalid_options,
                    workflow_id: "temporalex-invalid-#{System.unique_integer([:positive])}",
                    workflow_task_timeout: -1,
                    timeout: 10_000
@@ -284,7 +294,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         workflow_id = "temporalex-native-#{System.unique_integer([:positive])}"
 
         assert {:ok, handle} =
-                 Temporalex.Client.start_workflow(worker_name, Workflow, input,
+                 Temporalex.Client.start_workflow(client_name, Workflow, input,
                    workflow_id: workflow_id,
                    timeout: 10_000
                  )
@@ -299,7 +309,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         interactive_id = "temporalex-interactive-#{System.unique_integer([:positive])}"
 
         assert {:ok, interactive} =
-                 Temporalex.Client.start_workflow(worker_name, InteractiveWorkflow, 0,
+                 Temporalex.Client.start_workflow(client_name, InteractiveWorkflow, 0,
                    workflow_id: interactive_id,
                    workflow_task_timeout: 10_000,
                    id_reuse_policy: :reject_duplicate,
@@ -341,7 +351,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         terminated_id = "temporalex-terminated-#{System.unique_integer([:positive])}"
 
         assert {:ok, terminated} =
-                 Temporalex.Client.start_workflow(worker_name, WaitingWorkflow, :terminate,
+                 Temporalex.Client.start_workflow(client_name, WaitingWorkflow, :terminate,
                    workflow_id: terminated_id,
                    timeout: 10_000
                  )
@@ -364,7 +374,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         cancelled_timer_id = "temporalex-cancelled-timer-#{System.unique_integer([:positive])}"
 
         assert {:ok, cancelled_timer} =
-                 Temporalex.Client.start_workflow(worker_name, WaitingWorkflow, :cancel_timer,
+                 Temporalex.Client.start_workflow(client_name, WaitingWorkflow, :cancel_timer,
                    workflow_id: cancelled_timer_id,
                    timeout: 10_000
                  )
@@ -388,7 +398,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
         assert {:ok, cancelled_activity} =
                  Temporalex.Client.start_workflow(
-                   worker_name,
+                   client_name,
                    ActivityCancellationWorkflow,
                    self(),
                    workflow_id: cancelled_activity_id,
@@ -423,7 +433,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
         assert {:ok, search_handle} =
                  Temporalex.Client.start_workflow(
-                   worker_name,
+                   client_name,
                    SearchAttributeWorkflow,
                    search_label,
                    workflow_id: search_id,
@@ -456,7 +466,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
         assert {:ok, continue_handle} =
                  Temporalex.Client.start_workflow(
-                   worker_name,
+                   client_name,
                    ContinueAsNewWorkflow,
                    %{count: 0, target: 2, label: continue_label, task_queue: task_queue},
                    workflow_id: continue_id,
@@ -479,7 +489,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
           "temporalex-non-retryable-workflow-#{System.unique_integer([:positive])}"
 
         assert {:ok, non_retryable_workflow} =
-                 Temporalex.Client.start_workflow(worker_name, FailureWorkflow, false,
+                 Temporalex.Client.start_workflow(client_name, FailureWorkflow, false,
                    workflow_id: non_retryable_workflow_id,
                    retry_policy: [initial_interval: 10, maximum_attempts: 2],
                    timeout: 10_000
@@ -496,7 +506,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
           "temporalex-typed-non-retryable-workflow-#{System.unique_integer([:positive])}"
 
         assert {:ok, typed_non_retryable_workflow} =
-                 Temporalex.Client.start_workflow(worker_name, FailureWorkflow, true,
+                 Temporalex.Client.start_workflow(client_name, FailureWorkflow, true,
                    workflow_id: typed_non_retryable_workflow_id,
                    retry_policy: [
                      initial_interval: 10,
@@ -517,7 +527,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
           "temporalex-retryable-workflow-#{System.unique_integer([:positive])}"
 
         assert {:ok, retryable_workflow} =
-                 Temporalex.Client.start_workflow(worker_name, FailureWorkflow, true,
+                 Temporalex.Client.start_workflow(client_name, FailureWorkflow, true,
                    workflow_id: retryable_workflow_id,
                    retry_policy: [initial_interval: 10, maximum_attempts: 2],
                    timeout: 10_000
@@ -535,7 +545,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
         assert {:ok, non_retryable_activity} =
                  Temporalex.Client.start_workflow(
-                   worker_name,
+                   client_name,
                    ActivityFailureWorkflow,
                    :non_retryable,
                    workflow_id: non_retryable_activity_id,
@@ -556,7 +566,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
         assert {:ok, retryable_activity} =
                  Temporalex.Client.start_workflow(
-                   worker_name,
+                   client_name,
                    ActivityFailureWorkflow,
                    :retryable,
                    workflow_id: retryable_activity_id,
@@ -574,6 +584,10 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
       after
         if Process.alive?(worker_pid) do
           Supervisor.stop(worker_pid, :normal, 15_000)
+        end
+
+        if Process.alive?(client_pid) do
+          GenServer.stop(client_pid, :normal, 15_000)
         end
       end
     after

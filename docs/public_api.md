@@ -169,20 +169,27 @@ The detailed semantics are in [programming_model.md](programming_model.md).
 
 ## Client API
 
-The implemented client API talks through a running `Temporalex.Worker` that uses `Temporalex.Backend.TemporalCore`:
+The implemented client API uses a supervised `Temporalex.Client` process that owns the backend connection resources. Workers depend on an explicit client; client operations do not route through a worker.
 
 ```elixir
+{:ok, _client} =
+  Temporalex.Client.start_link(
+    name: MyApp.TemporalClient,
+    backend: Temporalex.Backend.TemporalCore,
+    target: "http://127.0.0.1:7233",
+    namespace: "default",
+    task_queue: "orders"
+  )
+
 {:ok, handle} =
-  Temporalex.Client.start_workflow(worker, MyApp.Workflows.Checkout, %{order_id: 123},
+  Temporalex.Client.start_workflow(MyApp.TemporalClient, MyApp.Workflows.Checkout, %{order_id: 123},
     workflow_id: "order-123"
   )
 
 {:ok, result} = Temporalex.Client.get_result(handle)
 ```
 
-`worker` is the worker instance name, for example `MyApp.Temporal`.
-
-Workflow operations are available through handles or `{worker, workflow_id}`:
+Workflow operations are available through handles or `{client, workflow_id}`:
 
 ```elixir
 :ok = Temporalex.Client.signal_workflow(handle, "approve", [%{approved_by: "alice"}])
@@ -193,8 +200,8 @@ Workflow operations are available through handles or `{worker, workflow_id}`:
 :ok = Temporalex.Client.cancel_workflow(handle, reason: "user requested")
 :ok = Temporalex.Client.terminate_workflow(handle, reason: "manual override")
 
-:ok = Temporalex.Client.signal_workflow(worker, "order-123", "approve", [])
-{:ok, state} = Temporalex.Client.query_workflow(worker, "order-123", "status", [])
+:ok = Temporalex.Client.signal_workflow(MyApp.TemporalClient, "order-123", "approve", [])
+{:ok, state} = Temporalex.Client.query_workflow(MyApp.TemporalClient, "order-123", "status", [])
 ```
 
 Start options accepted by the native backend include:

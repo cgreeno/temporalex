@@ -106,7 +106,7 @@ See [backend.md](backend.md) and [temporal_core_mapping.md](temporal_core_mappin
 
 ## Supervision Overview
 
-The current native backend creates a Temporal Core runtime resource for each worker backend state. The library can later move that into a singleton runtime process:
+The native backend creates Temporal Core runtime/client resources in `Temporalex.Client`. Workers receive an explicit client and start pollers from that shared client state.
 
 ```
 Temporalex.Supervisor
@@ -117,12 +117,14 @@ Each user worker instance owns its own worker tree:
 
 ```
 MyApp.Temporal (Supervisor, strategy: :rest_for_one)
-├── MyApp.Temporal.ExecutorSupervisor
-├── MyApp.Temporal.ActivitySupervisor
-└── MyApp.Temporal.Server
+├── MyApp.TemporalClient
+└── MyApp.TemporalWorker (Supervisor, strategy: :one_for_all)
+    ├── MyApp.TemporalWorker.ExecutorSupervisor
+    ├── MyApp.TemporalWorker.ActivitySupervisor
+    └── MyApp.TemporalWorker.Server
 ```
 
-The server owns backend state and monitors each executor. Executors trap exits and link to their runner processes. Activity work runs under the activity supervisor.
+The server owns worker backend state and monitors both the client owner and each executor. Executors trap exits and link to their runner processes. Activity work runs under the activity supervisor.
 
 See [server.md](server.md).
 

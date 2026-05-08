@@ -1,8 +1,8 @@
 # Backend Boundary
 
-The backend boundary is the server-facing interface between Temporalex and an external workflow backend.
+The backend boundary is the interface between Temporalex and an external workflow backend.
 
-For v1, the backend behaviour combines transport and protocol translation. This keeps the server tests durable: tests can use a backend that sends core structs directly, while the real backend can use Rustler, Temporal Core, protobuf, and ETF payload conversion internally.
+For v1, the backend behaviour combines client transport, worker transport, and protocol translation. This keeps the server tests durable: tests can use a backend that sends core structs directly, while the real backend can use Rustler, Temporal Core, protobuf, and ETF payload conversion internally.
 
 The detailed Temporal Core mapping is documented in [temporal_core_mapping.md](temporal_core_mapping.md).
 
@@ -14,37 +14,86 @@ The backend owns those details.
 
 ## Behaviour Shape
 
-The exact callback names may evolve during implementation, but the server-facing contract should look like this:
+The exact callback names may evolve during implementation, but the contract should look like this:
 
 ```elixir
 defmodule Temporalex.Backend do
-  @type state :: term()
+  @type client_state :: term()
+  @type worker_state :: term()
 
-  @callback start_worker(opts :: keyword(), owner_pid :: pid()) ::
-              {:ok, state()} | {:error, term()}
+  @callback start_client(opts :: keyword(), owner_pid :: pid()) ::
+              {:ok, client_state()} | {:error, term()}
+
+  @callback shutdown_client(client_state()) ::
+              :ok | {:error, term()}
+
+  @callback start_worker(client_state(), opts :: keyword(), owner_pid :: pid()) ::
+              {:ok, worker_state()} | {:error, term()}
+
+  @callback start_workflow(client_state(), workflow_type :: binary(), input :: term(), opts :: keyword()) ::
+              {:ok, map()} | {:error, term()}
+
+  @callback get_workflow_result(client_state(), workflow_id :: binary(), run_id :: binary() | nil, opts :: keyword()) ::
+              {:ok, term()} | {:error, term()}
+
+  @callback signal_workflow(
+              client_state(),
+              workflow_id :: binary(),
+              run_id :: binary() | nil,
+              signal_name :: binary(),
+              args :: list(),
+              opts :: keyword()
+            ) :: :ok | {:error, term()}
+
+  @callback query_workflow(
+              client_state(),
+              workflow_id :: binary(),
+              run_id :: binary() | nil,
+              query_name :: binary(),
+              args :: list(),
+              opts :: keyword()
+            ) :: {:ok, term()} | {:error, term()}
+
+  @callback update_workflow(
+              client_state(),
+              workflow_id :: binary(),
+              run_id :: binary() | nil,
+              update_name :: binary(),
+              args :: list(),
+              opts :: keyword()
+            ) :: {:ok, term()} | {:error, term()}
+
+  @callback cancel_workflow(client_state(), workflow_id :: binary(), run_id :: binary() | nil, opts :: keyword()) ::
+              :ok | {:error, term()}
+
+  @callback terminate_workflow(client_state(), workflow_id :: binary(), run_id :: binary() | nil, opts :: keyword()) ::
+              :ok | {:error, term()}
+
+  @callback describe_workflow(client_state(), workflow_id :: binary(), run_id :: binary() | nil, opts :: keyword()) ::
+              {:ok, term()} | {:error, term()}
 
   @callback complete_workflow_activation(
-              state(),
+              worker_state(),
               Temporalex.Core.Completion.t()
             ) :: :ok | {:error, term()}
 
   @callback complete_activity_task(
-              state(),
+              worker_state(),
               Temporalex.Core.ActivityCompletion.t()
             ) :: :ok | {:error, term()}
 
   @callback record_activity_heartbeat(
-              state(),
+              worker_state(),
               task_token :: binary(),
               details :: term()
             ) :: :ok | {:error, term()}
 
-  @callback shutdown_worker(state()) ::
+  @callback shutdown_worker(worker_state()) ::
               :ok | {:error, term()}
 end
 ```
 
-Client operations currently live on `Temporalex.Client` and use the opaque Temporal Core backend state for workflow start/result, signal, query, update, cancel, terminate, and describe calls. A later standalone client backend can split these operations away from worker-owned backend state without changing executor semantics.
+`Temporalex.Client` owns `client_state`. Workers require an explicit client, resolve that state once at startup, and hold a backend worker state derived from it. Client operations use the client state directly; they do not route through a worker.
 
 ## Backend Messages
 
@@ -96,10 +145,16 @@ It can:
 Example test shape:
 
 ```elixir
+{:ok, _client} =
+  start_supervised({Temporalex.Client,
+    name: MyApp.TemporalClient,
+    backend: Temporalex.Backend.Test
+  })
+
 {:ok, worker} =
   start_supervised({Temporalex.Worker,
     name: MyApp.Temporal,
-    backend: Temporalex.Backend.Test,
+    client: MyApp.TemporalClient,
     workflows: [MyWorkflow],
     activities: []
   })

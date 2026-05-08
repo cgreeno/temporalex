@@ -21,6 +21,9 @@ defmodule Temporalex.Server do
     @moduledoc false
 
     defstruct name: nil,
+              client: nil,
+              client_pid: nil,
+              client_ref: nil,
               backend: nil,
               backend_state: nil,
               namespace: "default",
@@ -58,24 +61,31 @@ defmodule Temporalex.Server do
 
   @impl GenServer
   def init(opts) do
-    backend = Keyword.get(opts, :backend, Temporalex.Backend.Test)
+    client = Keyword.fetch!(opts, :client)
 
-    state = %State{
-      name: Keyword.fetch!(opts, :name),
-      backend: backend,
-      namespace: Keyword.get(opts, :namespace, "default"),
-      task_queue: Keyword.get(opts, :task_queue, "default"),
-      workflow_safe_mode: Keyword.get(opts, :workflow_safe_mode, :off),
-      workflow_map: workflow_map(Keyword.get(opts, :workflows, [])),
-      activity_map: activity_map(Keyword.get(opts, :activities, [])),
-      executor_supervisor: Keyword.fetch!(opts, :executor_supervisor),
-      activity_supervisor: Keyword.fetch!(opts, :activity_supervisor)
-    }
+    with {:ok, connection} <- Temporalex.Client.connection(client),
+         {:ok, backend_state} <-
+           connection.backend.start_worker(connection.backend_state, opts, self()) do
+      client_ref = Process.monitor(connection.pid)
 
-    case backend.start_worker(opts, self()) do
-      {:ok, backend_state} ->
-        {:ok, %{state | backend_state: backend_state}}
+      state = %State{
+        name: Keyword.fetch!(opts, :name),
+        client: client,
+        client_pid: connection.pid,
+        client_ref: client_ref,
+        backend: connection.backend,
+        backend_state: backend_state,
+        namespace: connection.namespace || "default",
+        task_queue: Keyword.get(opts, :task_queue, connection.task_queue || "default"),
+        workflow_safe_mode: Keyword.get(opts, :workflow_safe_mode, :off),
+        workflow_map: workflow_map(Keyword.get(opts, :workflows, [])),
+        activity_map: activity_map(Keyword.get(opts, :activities, [])),
+        executor_supervisor: Keyword.fetch!(opts, :executor_supervisor),
+        activity_supervisor: Keyword.fetch!(opts, :activity_supervisor)
+      }
 
+      {:ok, state}
+    else
       {:error, reason} ->
         {:stop, {:backend_start_failed, reason}}
     end
@@ -110,6 +120,9 @@ defmodule Temporalex.Server do
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     cond do
+      ref == state.client_ref ->
+        {:stop, {:client_down, reason}, state}
+
       Map.has_key?(state.executor_refs, ref) ->
         {:noreply, handle_executor_down(ref, reason, state)}
 
@@ -153,6 +166,10 @@ defmodule Temporalex.Server do
 
   @impl GenServer
   def terminate(_reason, %State{} = state) do
+    if state.client_ref do
+      Process.demonitor(state.client_ref, [:flush])
+    end
+
     if state.backend_state do
       state.backend.shutdown_worker(state.backend_state)
     end

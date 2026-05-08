@@ -19,13 +19,16 @@ defmodule Temporalex.BackendConformanceTest do
 
   setup do
     name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
+
+    start_supervised!({Temporalex.Client, name: client, backend: TestBackend})
 
     start_supervised!(
       {Temporalex.Worker,
-       name: name, backend: TestBackend, test_owner: self(), workflows: [Workflow], activities: []}
+       name: name, client: client, test_owner: self(), workflows: [Workflow], activities: []}
     )
 
-    %{worker: name}
+    %{client: client, worker: name}
   end
 
   test "test backend delivers workflow activations and captures workflow completions", %{

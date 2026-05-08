@@ -147,6 +147,33 @@ Test evidence:
 - `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
 - `cargo fmt --manifest-path native/temporalex_nif/Cargo.toml --check`: success.
 
+## Explicit Client Ownership Review
+
+Status: completed.
+
+Review date: May 8, 2026.
+
+Findings:
+
+- `Temporalex.Client` now owns backend client resources independently from workers.
+- `Temporalex.Worker` requires a `:client` option and does not create internal client resources.
+- Workers resolve and hold the native backend handles they need, but monitor the client owner pid and stop on client exit.
+- Worker-local supervision uses `:one_for_all` so the server, executor supervisor, and activity supervisor restart together.
+- Public workflow handles retain a client reference, not a worker reference.
+- Client operations resolve backend handles and call the backend directly instead of proxying through the client process or a worker.
+- Backend state is split into client state and worker state. Worker shutdown stops pollers without shutting down the shared client.
+- The backend behaviour explicitly includes the client-operation callbacks that `Temporalex.Client` calls.
+
+Test evidence:
+
+- `mix test test/temporalex/backend_conformance_test.exs test/temporalex/server_integration_test.exs`: 17 tests, 0 failures.
+- `mix test`: 84 tests, 0 failures, 2 external tests excluded.
+- `mix test --only external`: 2 tests, 0 failures.
+- `mix compile --warnings-as-errors`: success.
+- `mix format --check-formatted`: success.
+- `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
+- `cargo fmt --manifest-path native/temporalex_nif/Cargo.toml --check`: success.
+
 ## Native Integration Review
 
 Status: completed.
@@ -159,7 +186,7 @@ Findings:
 - Completion submission is asynchronous and failure-bearing. The server handles `{:workflow_completion, :ok | {:error, reason}}` and `{:activity_completion, :ok | {:error, reason}}` messages as fatal backend submission failures when needed.
 - Activity heartbeats flow from `Temporalex.Activity.Context.heartbeat/2` through `Temporalex.Server.record_activity_heartbeat/3` to the backend, where details are encoded as ETF payload bytes and submitted through Temporal Core.
 - Worker shutdown is covered by explicit server termination, the Rustler resource monitor, and resource drop. Shutdown initiation is scheduled on the Temporal Core Tokio runtime handle rather than called directly from BEAM scheduler threads.
-- The client path starts workflows, awaits workflow results, signals, queries, updates, cancels, terminates, and describes executions through the Temporal Core connection kept in backend state.
+- The client path starts workflows, awaits workflow results, signals, queries, updates, cancels, terminates, and describes executions through the standalone `Temporalex.Client` owner process and its backend client state.
 - Workflow start options cover task queue selection, headers, search attributes, workflow timeouts, retry policy, id reuse/conflict policies, and static metadata. Activity command encoding covers retry policy and activity cancellation type. Invalid negative duration/retry values are rejected instead of cast into oversized native durations.
 - `test/temporalex/integration/temporal_core_integration_test.exs` verifies a real Temporal dev-server run covering client start, invalid start option handling, worker polling, timer command/resolution, activity task execution, heartbeat submission, activity completion, workflow completion, signal/query/update/describe, termination, and result decoding.
 

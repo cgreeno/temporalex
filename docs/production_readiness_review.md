@@ -138,24 +138,36 @@ Remaining follow-up:
 
 ### Client Should Not Require A Running Worker
 
-Status: open.
+Status: completed on May 8, 2026.
 
-Current concern:
+Original concern:
 
 - `Temporalex.Client` routes operations through a running `Temporalex.Worker` and its backend state.
 - This is convenient for local integration tests but is not the usual SDK model.
 - A production client should be usable from web processes, jobs, IEx, or services that do not host workflow workers.
 
+Implemented:
+
+- `Temporalex.Client` is now a supervised owner process for backend client resources.
+- `Temporalex.Worker` requires an explicit `:client`; it never creates an internal client.
+- Workers resolve the client once at startup, hold the native backend handles they need, monitor the client owner pid, and stop with `{:client_down, reason}` if the client exits.
+- The worker subtree uses `:one_for_all`, so server, executor supervisor, and activity supervisor restart together after worker-local failures.
+- Workflow handles carry a client reference instead of a worker reference.
+- Client operations resolve the backend handle and call the backend directly; the client process is not a request proxy.
+- The backend behaviour now names the client-operation callbacks used by `Temporalex.Client`, so the client/backend contract is explicit.
+- Long-running client operations monitor the client owner while waiting and return `{:error, {:client_down, reason}}` if it exits.
+- Added server/backend tests for explicit client wiring and worker shutdown on client exit, plus Temporal dev-server coverage with a standalone client and worker sharing the same native client resources.
+
 References:
 
-- `../lib/temporalex/client.ex`: public client API and worker lookup.
+- `../lib/temporalex/client.ex`: client owner process and public workflow operations.
+- `../lib/temporalex/worker.ex`: mandatory client option and worker subtree strategy.
+- `../lib/temporalex/server.ex`: client resolution and monitor handling.
 - `../lib/temporalex/backend/temporal_core.ex`: native client operations.
 
-Needed:
+Remaining follow-up:
 
-- Introduce a supervised client process or resource independent of workers.
-- Keep worker APIs ergonomic by allowing workers to reuse an existing client or build one from config.
-- Ensure handles can be used with a client without retaining a worker name.
+- Add a small public type/spec pass once the next client-operation expansion settles.
 
 ### Missing Client Operations And Options
 
@@ -243,7 +255,7 @@ Status: open.
 
 Current coverage:
 
-- The real Temporal dev-server integration test covers worker startup, workflow start/result, timers, activities, heartbeats, signal/query/update/describe, termination, continue-as-new chains, activity retry/non-retryable behavior, Search Attribute visibility, and one invalid start option path.
+- The real Temporal dev-server integration test covers standalone client startup, worker startup from an explicit client, workflow start/result, timers, activities, heartbeats, signal/query/update/describe, termination, continue-as-new chains, activity retry/non-retryable behavior, Search Attribute visibility, and one invalid start option path.
 - Core tests cover deterministic command emission, replay mismatch, phase/update/query behavior, patch markers, and process teardown for the implemented surface.
 
 Missing production-confidence tests:

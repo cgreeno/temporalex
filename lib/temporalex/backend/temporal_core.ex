@@ -15,13 +15,12 @@ defmodule Temporalex.Backend.TemporalCore do
   alias Temporalex.Core.Completion
   alias Temporalex.Native
 
-  defmodule State do
+  defmodule ClientState do
     @moduledoc false
 
     defstruct [
       :runtime,
       :client,
-      :worker,
       :owner_pid,
       :namespace,
       :task_queue,
@@ -35,6 +34,21 @@ defmodule Temporalex.Backend.TemporalCore do
     ]
   end
 
+  defmodule WorkerState do
+    @moduledoc false
+
+    defstruct [
+      :runtime,
+      :client,
+      :worker,
+      :owner_pid,
+      :namespace,
+      :task_queue,
+      :start_timeout,
+      :shutdown_timeout
+    ]
+  end
+
   @default_target "http://127.0.0.1:7233"
   @default_namespace "default"
   @default_task_queue "default"
@@ -45,39 +59,26 @@ defmodule Temporalex.Backend.TemporalCore do
   @default_workflow_result_timeout 60_000
 
   @impl Temporalex.Backend
-  def start_worker(opts, owner_pid) when is_list(opts) and is_pid(owner_pid) do
+  def start_client(opts, owner_pid) when is_list(opts) and is_pid(owner_pid) do
     target = target(opts)
     namespace = Keyword.get(opts, :namespace, @default_namespace)
     task_queue = Keyword.get(opts, :task_queue, @default_task_queue)
     connect_timeout = Keyword.get(opts, :connect_timeout, @default_connect_timeout)
-    start_timeout = Keyword.get(opts, :start_timeout, @default_start_timeout)
 
     with {:ok, runtime} <- Native.create_runtime(),
          :ok <-
            Native.connect(runtime, target, Keyword.get(opts, :api_key), headers(opts), owner_pid),
-         {:ok, client} <- await_connection(connect_timeout),
-         :ok <-
-           Native.start_worker(
-             runtime,
-             client,
-             task_queue,
-             namespace,
-             workflow_poller_count(opts),
-             activity_poller_count(opts),
-             owner_pid
-           ),
-         {:ok, worker} <- await_worker(start_timeout) do
+         {:ok, client} <- await_connection(connect_timeout) do
       {:ok,
-       %State{
+       %ClientState{
          runtime: runtime,
          client: client,
-         worker: worker,
          owner_pid: owner_pid,
          namespace: namespace,
          task_queue: task_queue,
          target: target,
          connect_timeout: connect_timeout,
-         start_timeout: start_timeout,
+         start_timeout: Keyword.get(opts, :start_timeout, @default_start_timeout),
          completion_timeout: Keyword.get(opts, :completion_timeout, @default_completion_timeout),
          shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @default_shutdown_timeout),
          workflow_result_timeout:
@@ -88,7 +89,41 @@ defmodule Temporalex.Backend.TemporalCore do
   end
 
   @impl Temporalex.Backend
-  def complete_workflow_activation(%State{} = state, %Completion{} = completion) do
+  def shutdown_client(%ClientState{}), do: :ok
+
+  @impl Temporalex.Backend
+  def start_worker(%ClientState{} = client_state, opts, owner_pid)
+      when is_list(opts) and is_pid(owner_pid) do
+    task_queue = Keyword.get(opts, :task_queue, client_state.task_queue)
+    start_timeout = Keyword.get(opts, :start_timeout, @default_start_timeout)
+
+    with :ok <-
+           Native.start_worker(
+             client_state.runtime,
+             client_state.client,
+             task_queue,
+             client_state.namespace,
+             workflow_poller_count(opts),
+             activity_poller_count(opts),
+             owner_pid
+           ),
+         {:ok, worker} <- await_worker(start_timeout) do
+      {:ok,
+       %WorkerState{
+         runtime: client_state.runtime,
+         client: client_state.client,
+         worker: worker,
+         owner_pid: owner_pid,
+         namespace: client_state.namespace,
+         task_queue: task_queue,
+         start_timeout: start_timeout,
+         shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @default_shutdown_timeout)
+       }}
+    end
+  end
+
+  @impl Temporalex.Backend
+  def complete_workflow_activation(%WorkerState{} = state, %Completion{} = completion) do
     with {:ok, bytes} <-
            Codec.workflow_completion_to_bytes(completion,
              task_queue: state.task_queue,
@@ -99,7 +134,7 @@ defmodule Temporalex.Backend.TemporalCore do
   end
 
   @impl Temporalex.Backend
-  def complete_activity_task(%State{} = state, %ActivityCompletion{} = completion) do
+def complete_activity_task(%WorkerState{} = state, %ActivityCompletion{} = completion) do
     with {:ok, bytes} <-
            Codec.activity_completion_to_bytes(completion, payload_codec: state.payload_codec) do
       Native.complete_activity_task(state.worker, bytes, state.owner_pid)
@@ -107,7 +142,7 @@ defmodule Temporalex.Backend.TemporalCore do
   end
 
   @impl Temporalex.Backend
-  def record_activity_heartbeat(%State{} = state, task_token, details)
+  def record_activity_heartbeat(%WorkerState{} = state, task_token, details)
       when is_binary(task_token) do
     details_bytes =
       if is_nil(details) do
@@ -120,7 +155,7 @@ defmodule Temporalex.Backend.TemporalCore do
   end
 
   @impl Temporalex.Backend
-  def shutdown_worker(%State{} = state) do
+  def shutdown_worker(%WorkerState{} = state) do
     Native.initiate_shutdown(state.worker)
 
     with :ok <- Native.shutdown_worker(state.worker, self()) do
@@ -128,7 +163,8 @@ defmodule Temporalex.Backend.TemporalCore do
     end
   end
 
-  def start_workflow(%State{} = state, workflow_type, input, opts)
+  @impl Temporalex.Backend
+  def start_workflow(%ClientState{} = state, workflow_type, input, opts)
       when is_binary(workflow_type) and is_list(opts) do
     workflow_id = Keyword.get_lazy(opts, :workflow_id, fn -> Keyword.get(opts, :id) end)
 
@@ -152,11 +188,12 @@ defmodule Temporalex.Backend.TemporalCore do
              self(),
              ref
            ) do
-      await_ref(:workflow_started, ref, timeout)
+      await_ref(:workflow_started, ref, timeout, client_monitor(opts))
     end
   end
 
-  def get_workflow_result(%State{} = state, workflow_id, run_id, opts)
+  @impl Temporalex.Backend
+  def get_workflow_result(%ClientState{} = state, workflow_id, run_id, opts)
       when is_binary(workflow_id) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, state.workflow_result_timeout)
     ref = make_ref()
@@ -170,11 +207,12 @@ defmodule Temporalex.Backend.TemporalCore do
              self(),
              ref
            ) do
-      await_ref(:workflow_result, ref, timeout)
+      await_ref(:workflow_result, ref, timeout, client_monitor(opts))
     end
   end
 
-  def signal_workflow(%State{} = state, workflow_id, run_id, signal_name, args, opts)
+  @impl Temporalex.Backend
+  def signal_workflow(%ClientState{} = state, workflow_id, run_id, signal_name, args, opts)
       when is_binary(workflow_id) and is_binary(signal_name) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, state.completion_timeout)
     ref = make_ref()
@@ -191,11 +229,12 @@ defmodule Temporalex.Backend.TemporalCore do
              self(),
              ref
            ) do
-      await_ok_ref(:workflow_signalled, ref, timeout)
+      await_ok_ref(:workflow_signalled, ref, timeout, client_monitor(opts))
     end
   end
 
-  def query_workflow(%State{} = state, workflow_id, run_id, query_name, args, opts)
+  @impl Temporalex.Backend
+  def query_workflow(%ClientState{} = state, workflow_id, run_id, query_name, args, opts)
       when is_binary(workflow_id) and is_binary(query_name) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, state.completion_timeout)
     ref = make_ref()
@@ -212,11 +251,12 @@ defmodule Temporalex.Backend.TemporalCore do
              self(),
              ref
            ) do
-      await_ref(:workflow_queried, ref, timeout)
+      await_ref(:workflow_queried, ref, timeout, client_monitor(opts))
     end
   end
 
-  def update_workflow(%State{} = state, workflow_id, run_id, update_name, args, opts)
+  @impl Temporalex.Backend
+  def update_workflow(%ClientState{} = state, workflow_id, run_id, update_name, args, opts)
       when is_binary(workflow_id) and is_binary(update_name) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, state.workflow_result_timeout)
     ref = make_ref()
@@ -233,11 +273,12 @@ defmodule Temporalex.Backend.TemporalCore do
              self(),
              ref
            ) do
-      await_ref(:workflow_updated, ref, timeout)
+      await_ref(:workflow_updated, ref, timeout, client_monitor(opts))
     end
   end
 
-  def cancel_workflow(%State{} = state, workflow_id, run_id, opts)
+  @impl Temporalex.Backend
+  def cancel_workflow(%ClientState{} = state, workflow_id, run_id, opts)
       when is_binary(workflow_id) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, state.completion_timeout)
     ref = make_ref()
@@ -253,11 +294,12 @@ defmodule Temporalex.Backend.TemporalCore do
              self(),
              ref
            ) do
-      await_ok_ref(:workflow_cancelled, ref, timeout)
+      await_ok_ref(:workflow_cancelled, ref, timeout, client_monitor(opts))
     end
   end
 
-  def terminate_workflow(%State{} = state, workflow_id, run_id, opts)
+  @impl Temporalex.Backend
+  def terminate_workflow(%ClientState{} = state, workflow_id, run_id, opts)
       when is_binary(workflow_id) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, state.completion_timeout)
     ref = make_ref()
@@ -273,11 +315,12 @@ defmodule Temporalex.Backend.TemporalCore do
              self(),
              ref
            ) do
-      await_ok_ref(:workflow_terminated, ref, timeout)
+      await_ok_ref(:workflow_terminated, ref, timeout, client_monitor(opts))
     end
   end
 
-  def describe_workflow(%State{} = state, workflow_id, run_id, opts)
+  @impl Temporalex.Backend
+  def describe_workflow(%ClientState{} = state, workflow_id, run_id, opts)
       when is_binary(workflow_id) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, state.completion_timeout)
     ref = make_ref()
@@ -291,7 +334,7 @@ defmodule Temporalex.Backend.TemporalCore do
              self(),
              ref
            ) do
-      await_ref(:workflow_described, ref, timeout)
+      await_ref(:workflow_described, ref, timeout, client_monitor(opts))
     end
   end
 
@@ -341,6 +384,10 @@ defmodule Temporalex.Backend.TemporalCore do
     opts
     |> Keyword.take([:headers, :request_id, :update_id])
     |> normalize_native_opts()
+  end
+
+  defp client_monitor(opts) do
+    Keyword.get(opts, :client_monitor)
   end
 
   defp normalize_native_opts(opts) do
@@ -409,7 +456,9 @@ defmodule Temporalex.Backend.TemporalCore do
     end
   end
 
-  defp await_ref(tag, ref, timeout) do
+  defp await_ref(tag, ref, timeout, client_monitor)
+
+  defp await_ref(tag, ref, timeout, nil) do
     receive do
       {^tag, ^ref, {:ok, result}} -> {:ok, result}
       {^tag, ^ref, {:error, reason}} -> {:error, reason}
@@ -418,8 +467,18 @@ defmodule Temporalex.Backend.TemporalCore do
     end
   end
 
-  defp await_ok_ref(tag, ref, timeout) do
-    case await_ref(tag, ref, timeout) do
+  defp await_ref(tag, ref, timeout, {client_pid, client_ref}) do
+    receive do
+      {^tag, ^ref, {:ok, result}} -> {:ok, result}
+      {^tag, ^ref, {:error, reason}} -> {:error, reason}
+      {:DOWN, ^client_ref, :process, ^client_pid, reason} -> {:error, {:client_down, reason}}
+    after
+      timeout -> {:error, {tag, :timeout, timeout}}
+    end
+  end
+
+  defp await_ok_ref(tag, ref, timeout, client_monitor) do
+    case await_ref(tag, ref, timeout, client_monitor) do
       {:ok, :ok} -> :ok
       other -> other
     end
