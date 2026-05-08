@@ -8,6 +8,7 @@ defmodule Temporalex.BackendConformanceTest do
   alias Temporalex.Core.ActivityTask
   alias Temporalex.Core.Command
   alias Temporalex.Core.Completion
+  alias Temporalex.Failure
   alias Temporalex.SearchAttribute
 
   defmodule Workflow do
@@ -107,6 +108,64 @@ defmodule Temporalex.BackendConformanceTest do
                task_token: <<1, 2, 3>>,
                result: {:ok, :done}
              })
+
+    assert is_binary(activity_bytes)
+    assert byte_size(activity_bytes) > 0
+  end
+
+  test "TemporalCore codec encodes structured failures" do
+    failure =
+      Failure.application("declined",
+        type: "PaymentDeclined",
+        details: [%{payment_id: "payment-1"}],
+        retryable?: false
+      )
+
+    assert {:ok, workflow_bytes} =
+             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+               %Completion{
+                 run_id: "run-structured-failure-codec",
+                 status:
+                   {:ok,
+                    [
+                      %Command.FailWorkflow{reason: failure},
+                      %Command.RespondToQuery{query_id: "query", result: {:error, failure}},
+                      %Command.RespondToUpdate{
+                        protocol_instance_id: "update",
+                        response: {:rejected, failure}
+                      }
+                    ]}
+               },
+               task_queue: "temporalex-test"
+             )
+
+    assert is_binary(workflow_bytes)
+    assert byte_size(workflow_bytes) > 0
+
+    activity_failure = %Failure.ActivityError{
+      message: "activity failed",
+      activity_id: "activity-1",
+      activity_type: "Payments.charge",
+      retry_state: :maximum_attempts_reached,
+      cause: failure
+    }
+
+    assert {:ok, activity_failure_workflow_bytes} =
+             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+               %Completion{
+                 run_id: "run-activity-failure-codec",
+                 status: {:ok, [%Command.FailWorkflow{reason: activity_failure}]}
+               },
+               task_queue: "temporalex-test"
+             )
+
+    assert is_binary(activity_failure_workflow_bytes)
+    assert byte_size(activity_failure_workflow_bytes) > 0
+
+    assert {:ok, activity_bytes} =
+             Temporalex.Backend.TemporalCore.Codec.activity_completion_to_bytes(
+               %ActivityCompletion{task_token: <<1, 2, 3>>, result: {:error, failure}}
+             )
 
     assert is_binary(activity_bytes)
     assert byte_size(activity_bytes) > 0

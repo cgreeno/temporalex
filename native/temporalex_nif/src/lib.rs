@@ -41,15 +41,17 @@ use temporalio_common::protos::coresdk::workflow_completion::{
 };
 use temporalio_common::protos::coresdk::{ActivityHeartbeat, ActivityTaskCompletion};
 use temporalio_common::protos::temporal::api::common::v1::{
-    Header, Payload, Payloads, RetryPolicy, SearchAttributes,
+    ActivityType, Header, Payload, Payloads, RetryPolicy, SearchAttributes, WorkflowExecution,
+    WorkflowType,
 };
 use temporalio_common::protos::temporal::api::enums::v1::{
-    VersioningBehavior, WorkflowExecutionStatus, WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
-    WorkflowTaskFailedCause,
+    RetryState, TimeoutType, VersioningBehavior, WorkflowExecutionStatus, WorkflowIdConflictPolicy,
+    WorkflowIdReusePolicy, WorkflowTaskFailedCause,
 };
 use temporalio_common::protos::temporal::api::enums::v1::TimeoutType;
 use temporalio_common::protos::temporal::api::failure::v1::{
-    ApplicationFailureInfo, CanceledFailureInfo, Failure, TimeoutFailureInfo, failure,
+    ActivityFailureInfo, ApplicationFailureInfo, CanceledFailureInfo,
+    ChildWorkflowExecutionFailureInfo, Failure, TimeoutFailureInfo, failure,
 };
 use temporalio_common::worker::WorkerTaskTypes;
 use temporalio_sdk_core::{
@@ -140,9 +142,16 @@ rustler::atoms! {
     variant,
     cancel_reason,
     source,
+    stack_trace,
+    cause,
     details,
     type_atom = "type",
     value,
+    retryable_question = "retryable?",
+    timeout_type,
+    last_heartbeat_details,
+    retry_state,
+    failure_type,
     force_cause,
     timeout,
     start_to_close_timeout,
@@ -156,6 +165,7 @@ rustler::atoms! {
     signal,
     query,
     update,
+    exception,
     workflow_signalled,
     workflow_queried,
     workflow_updated,
@@ -167,6 +177,26 @@ rustler::atoms! {
     continued_as_new,
     running,
     paused,
+    in_progress,
+    non_retryable_failure,
+    maximum_attempts_reached,
+    retry_policy_not_set,
+    internal_server_error,
+    cancel_requested,
+    start_to_close,
+    schedule_to_start,
+    schedule_to_close,
+    heartbeat,
+    activity_failure,
+    child_workflow_failure,
+    timeout_failure,
+    cancelled_failure,
+    terminated_failure,
+    server_failure,
+    reset_workflow_failure,
+    nexus_operation_failure,
+    nexus_handler_failure,
+    unknown_failure,
     already_started,
     not_found,
     execution_timeout,
@@ -2018,7 +2048,7 @@ fn workflow_completion_from_term(
                         failure: Some(failure_from_term(
                             reason_term,
                             "Temporalex activation failure",
-                        )),
+                        )?),
                         force_cause: force_cause as i32,
                     },
                 )),
@@ -2240,7 +2270,7 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
                 failure: Some(failure_from_term(
                     map_get(command, reason())?,
                     "Temporalex workflow failure",
-                )),
+                )?),
             })
         }
         "Elixir.Temporalex.Core.Command.ContinueAsNew" => {
@@ -2315,13 +2345,13 @@ fn activity_completion_from_term(completion: Term) -> anyhow::Result<ActivityTas
         } else if tag == error() {
             ActivityExecutionResult {
                 status: Some(activity_execution_result::Status::Failed(ActivityFailure {
-                    failure: Some(failure_from_term(value, "Temporalex activity failure")),
+                    failure: Some(failure_from_term(value, "Temporalex activity failure")?),
                 })),
             }
         } else if tag == cancelled() {
             ActivityExecutionResult {
                 status: Some(activity_execution_result::Status::Cancelled(Cancellation {
-                    failure: Some(cancelled_failure_from_term(value)),
+                    failure: Some(cancelled_failure_from_term(value)?),
                 })),
             }
         } else {
@@ -2357,7 +2387,7 @@ fn query_result_from_term(command: Term) -> anyhow::Result<QueryResult> {
                 variant: Some(query_result::Variant::Failed(failure_from_term(
                     value,
                     "Temporalex query failure",
-                ))),
+                )?)),
             });
         }
     }
@@ -2380,7 +2410,7 @@ fn update_response_from_term(command: Term) -> anyhow::Result<UpdateResponse> {
             update_response::Response::Rejected(failure_from_term(
                 value,
                 "Temporalex update rejected",
-            ))
+            )?)
         } else {
             return Err(anyhow!("unsupported update response tag"));
         }
@@ -2394,18 +2424,66 @@ fn update_response_from_term(command: Term) -> anyhow::Result<UpdateResponse> {
     })
 }
 
-fn failure_from_term(term: Term, default_message: &str) -> Failure {
-    if let Some(failure) = failure_from_error_struct(term) {
-        return failure;
+fn failure_from_term(term: Term, default_message: &str) -> anyhow::Result<Failure> {
+    if let Ok((tag, error_term, _stacktrace)) = term.decode::<(Atom, Term, Term)>()
+        && tag == exception()
+    {
+        return failure_from_term(error_term, default_message);
     }
 
+    match struct_module_name(term).as_deref() {
+        Some("Elixir.Temporalex.Failure.ApplicationError") => {
+            application_failure_from_struct(term, default_message)
+        }
+        Some("Elixir.Temporalex.Failure.CancelledError") => cancelled_failure_from_term(term),
+        Some("Elixir.Temporalex.Failure.TimeoutError") => {
+            timeout_failure_from_struct(term, default_message)
+        }
+        Some("Elixir.Temporalex.Failure.ActivityError") => {
+            activity_failure_from_struct(term, default_message)
+        }
+        Some("Elixir.Temporalex.Failure.WorkflowExecutionError") => {
+            child_workflow_failure_from_struct(term, default_message)
+        }
+        _ => Ok(untyped_application_failure_from_term(term, default_message)),
+    }
+}
+
+fn application_failure_from_struct(term: Term, default_message: &str) -> anyhow::Result<Failure> {
+    let message = map_get_optional_string(term, message())?
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| default_message.to_string());
+    let failure_type = map_get_optional_string(term, type_atom())?
+        .filter(|failure_type| !failure_type.is_empty())
+        .unwrap_or_else(|| "Temporalex.ApplicationError".to_string());
+    let retryable = map_get_optional_bool(term, retryable_question())?.unwrap_or(true);
+    let details = map_get_payloads_list(term, details())?;
+
+    Ok(Failure {
+        message,
+        source: map_get_optional_string(term, source())?
+            .unwrap_or_else(|| "Temporalex".to_string()),
+        stack_trace: map_get_optional_string(term, stack_trace())?.unwrap_or_default(),
+        failure_info: Some(failure::FailureInfo::ApplicationFailureInfo(
+            ApplicationFailureInfo {
+                r#type: failure_type,
+                non_retryable: !retryable,
+                details: Some(Payloads { payloads: details }),
+                ..Default::default()
+            },
+        )),
+        cause: failure_cause_from_map(term)?,
+        ..Default::default()
+    })
+}
+
+fn untyped_application_failure_from_term(term: Term, default_message: &str) -> Failure {
     let message = term
         .decode::<String>()
         .ok()
         .filter(|message| !message.is_empty())
         .unwrap_or_else(|| default_message.to_string());
 
-    let details_payload = payload_from_term(term);
     Failure {
         message,
         source: "Temporalex".to_string(),
@@ -2414,7 +2492,7 @@ fn failure_from_term(term: Term, default_message: &str) -> Failure {
                 r#type: "ApplicationError".to_string(),
                 non_retryable: false,
                 details: Some(Payloads {
-                    payloads: vec![details_payload],
+                    payloads: vec![payload_from_term(term)],
                 }),
                 ..Default::default()
             },
@@ -2423,118 +2501,28 @@ fn failure_from_term(term: Term, default_message: &str) -> Failure {
     }
 }
 
-/// Convert a Temporalex error struct (ApplicationError, CancelledError,
-/// TimeoutError) into a Temporal Failure proto with the matching
-/// FailureInfo variant. Returns `None` for any other term.
-fn failure_from_error_struct(term: Term) -> Option<Failure> {
-    let module_atom = get_ex_struct_name(term).ok()?;
-    let env = term.get_env();
-    let module = module_atom.to_term(env).atom_to_string().ok()?;
-
-    match module.as_str() {
-        "Elixir.Temporalex.ApplicationError" => {
-            let message = decode_optional_string(term, message());
-            let type_name = decode_optional_string(term, type_atom());
-            let non_retryable = decode_optional_bool(term, non_retryable()).unwrap_or(false);
-            let details_payloads = optional_details_payloads(term);
-
-            Some(Failure {
-                message: message.unwrap_or_else(|| "ApplicationError".to_string()),
-                source: "Temporalex".to_string(),
-                failure_info: Some(failure::FailureInfo::ApplicationFailureInfo(
-                    ApplicationFailureInfo {
-                        r#type: type_name.unwrap_or_else(|| "ApplicationError".to_string()),
-                        non_retryable,
-                        details: details_payloads,
-                        ..Default::default()
-                    },
-                )),
-                ..Default::default()
-            })
-        }
-
-        "Elixir.Temporalex.CancelledError" => {
-            let message = decode_optional_string(term, message());
-            let details_payloads = optional_details_payloads(term);
-
-            Some(Failure {
-                message: message.unwrap_or_else(|| "cancelled".to_string()),
-                source: "Temporalex".to_string(),
-                failure_info: Some(failure::FailureInfo::CanceledFailureInfo(
-                    CanceledFailureInfo {
-                        details: details_payloads,
-                        ..Default::default()
-                    },
-                )),
-                ..Default::default()
-            })
-        }
-
-        "Elixir.Temporalex.TimeoutError" => {
-            let message = decode_optional_string(term, message());
-            let tt_atom_string = map_get(term, timeout_type())
-                .ok()
-                .and_then(|t| t.atom_to_string().ok());
-            let timeout_type = tt_atom_string
-                .as_deref()
-                .map(timeout_type_from_str)
-                .unwrap_or(TimeoutType::Unspecified);
-
-            Some(Failure {
-                message: message.unwrap_or_else(|| "timed out".to_string()),
-                source: "Temporalex".to_string(),
-                failure_info: Some(failure::FailureInfo::TimeoutFailureInfo(
-                    TimeoutFailureInfo {
-                        timeout_type: timeout_type as i32,
-                        ..Default::default()
-                    },
-                )),
-                ..Default::default()
-            })
-        }
-
-        _ => None,
-    }
-}
-
-fn decode_optional_string(term: Term, key: Atom) -> Option<String> {
-    let value = map_get(term, key).ok()?;
-    if value.decode::<Atom>().ok() == Some(nil()) {
-        return None;
-    }
-    value.decode::<String>().ok()
-}
-
-fn decode_optional_bool(term: Term, key: Atom) -> Option<bool> {
-    map_get(term, key).ok()?.decode::<bool>().ok()
-}
-
-fn optional_details_payloads(term: Term) -> Option<Payloads> {
-    let details = map_get(term, details()).ok()?;
-    if details.decode::<Atom>().ok() == Some(nil()) {
-        return None;
-    }
-    Some(Payloads {
-        payloads: vec![payload_from_term(details)],
-    })
-}
-
-fn timeout_type_from_str(name: &str) -> TimeoutType {
-    match name {
-        "start_to_close" => TimeoutType::StartToClose,
-        "schedule_to_close" => TimeoutType::ScheduleToClose,
-        "schedule_to_start" => TimeoutType::ScheduleToStart,
-        "heartbeat" => TimeoutType::Heartbeat,
-        _ => TimeoutType::Unspecified,
-    }
-}
-
-fn cancelled_failure_from_term(term: Term) -> Failure {
-    if let Some(failure) = failure_from_error_struct(term) {
-        return failure;
+fn cancelled_failure_from_term(term: Term) -> anyhow::Result<Failure> {
+    if let Some("Elixir.Temporalex.Failure.CancelledError") = struct_module_name(term).as_deref() {
+        return Ok(Failure {
+            message: map_get_optional_string(term, message())?
+                .unwrap_or_else(|| "Temporalex activity cancelled".to_string()),
+            source: map_get_optional_string(term, source())?
+                .unwrap_or_else(|| "Temporalex".to_string()),
+            stack_trace: map_get_optional_string(term, stack_trace())?.unwrap_or_default(),
+            failure_info: Some(failure::FailureInfo::CanceledFailureInfo(
+                CanceledFailureInfo {
+                    details: Some(Payloads {
+                        payloads: map_get_payloads_list(term, details())?,
+                    }),
+                    identity: map_get_optional_string(term, identity())?.unwrap_or_default(),
+                },
+            )),
+            cause: failure_cause_from_map(term)?,
+            ..Default::default()
+        });
     }
 
-    Failure {
+    Ok(Failure {
         message: "Temporalex activity cancelled".to_string(),
         source: "Temporalex".to_string(),
         failure_info: Some(failure::FailureInfo::CanceledFailureInfo(
@@ -2546,7 +2534,103 @@ fn cancelled_failure_from_term(term: Term) -> Failure {
             },
         )),
         ..Default::default()
-    }
+    })
+}
+
+fn timeout_failure_from_struct(term: Term, default_message: &str) -> anyhow::Result<Failure> {
+    Ok(Failure {
+        message: map_get_optional_string(term, message())?
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| default_message.to_string()),
+        source: map_get_optional_string(term, source())?
+            .unwrap_or_else(|| "Temporalex".to_string()),
+        stack_trace: map_get_optional_string(term, stack_trace())?.unwrap_or_default(),
+        failure_info: Some(failure::FailureInfo::TimeoutFailureInfo(
+            TimeoutFailureInfo {
+                timeout_type: timeout_type_from_atom(map_get_optional_atom(term, timeout_type())?)
+                    as i32,
+                last_heartbeat_details: Some(Payloads {
+                    payloads: map_get_payloads_list(term, last_heartbeat_details())?,
+                }),
+            },
+        )),
+        cause: failure_cause_from_map(term)?,
+        ..Default::default()
+    })
+}
+
+fn activity_failure_from_struct(term: Term, default_message: &str) -> anyhow::Result<Failure> {
+    let activity_type_name = map_get_optional_string(term, activity_type())?.unwrap_or_default();
+
+    Ok(Failure {
+        message: map_get_optional_string(term, message())?
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| default_message.to_string()),
+        source: map_get_optional_string(term, source())?
+            .unwrap_or_else(|| "Temporalex".to_string()),
+        stack_trace: map_get_optional_string(term, stack_trace())?.unwrap_or_default(),
+        failure_info: Some(failure::FailureInfo::ActivityFailureInfo(
+            ActivityFailureInfo {
+                identity: map_get_optional_string(term, identity())?.unwrap_or_default(),
+                activity_type: if activity_type_name.is_empty() {
+                    None
+                } else {
+                    Some(ActivityType {
+                        name: activity_type_name,
+                    })
+                },
+                activity_id: map_get_optional_string(term, activity_id())?.unwrap_or_default(),
+                retry_state: retry_state_from_atom(map_get_optional_atom(term, retry_state())?)
+                    as i32,
+                ..Default::default()
+            },
+        )),
+        cause: failure_cause_from_map(term)?,
+        ..Default::default()
+    })
+}
+
+fn child_workflow_failure_from_struct(
+    term: Term,
+    default_message: &str,
+) -> anyhow::Result<Failure> {
+    let workflow_id = map_get_optional_string(term, workflow_id())?.unwrap_or_default();
+    let run_id = map_get_optional_string(term, run_id())?.unwrap_or_default();
+    let workflow_type_name = map_get_optional_string(term, workflow_type())?.unwrap_or_default();
+
+    Ok(Failure {
+        message: map_get_optional_string(term, message())?
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| default_message.to_string()),
+        source: map_get_optional_string(term, source())?
+            .unwrap_or_else(|| "Temporalex".to_string()),
+        stack_trace: map_get_optional_string(term, stack_trace())?.unwrap_or_default(),
+        failure_info: Some(failure::FailureInfo::ChildWorkflowExecutionFailureInfo(
+            ChildWorkflowExecutionFailureInfo {
+                namespace: map_get_optional_string(term, namespace())?.unwrap_or_default(),
+                workflow_execution: if workflow_id.is_empty() && run_id.is_empty() {
+                    None
+                } else {
+                    Some(WorkflowExecution {
+                        workflow_id,
+                        run_id,
+                    })
+                },
+                workflow_type: if workflow_type_name.is_empty() {
+                    None
+                } else {
+                    Some(WorkflowType {
+                        name: workflow_type_name,
+                    })
+                },
+                retry_state: retry_state_from_atom(map_get_optional_atom(term, retry_state())?)
+                    as i32,
+                ..Default::default()
+            },
+        )),
+        cause: failure_cause_from_map(term)?,
+        ..Default::default()
+    })
 }
 
 fn failure_to_term<'a>(env: Env<'a>, failure: Option<&Failure>) -> anyhow::Result<Term<'a>> {
@@ -2554,127 +2638,197 @@ fn failure_to_term<'a>(env: Env<'a>, failure: Option<&Failure>) -> anyhow::Resul
         return Ok(nil().encode(env));
     };
 
-    let msg = failure.message.clone();
-    let cause_term = if let Some(cause) = failure.cause.as_deref() {
-        failure_to_term(env, Some(cause))?
-    } else {
-        nil().encode(env)
-    };
+    let cause_term = failure_to_term(env, failure.cause.as_deref())?;
 
     match &failure.failure_info {
-        Some(failure::FailureInfo::ApplicationFailureInfo(info)) => {
-            let details_term = first_payload_to_term(env, info.details.as_ref())?;
-            put_fields!(
-                make_struct(env, "Elixir.Temporalex.ApplicationError")?,
-                message() => msg,
-                type_atom() => info.r#type.clone(),
-                non_retryable() => info.non_retryable,
-                details() => details_term,
-            )
-        }
-
-        Some(failure::FailureInfo::CanceledFailureInfo(info)) => {
-            let details_term = first_payload_to_term(env, info.details.as_ref())?;
-            put_fields!(
-                make_struct(env, "Elixir.Temporalex.CancelledError")?,
-                message() => msg,
-                details() => details_term,
-            )
-        }
-
-        Some(failure::FailureInfo::TimeoutFailureInfo(info)) => {
-            let tt = TimeoutType::try_from(info.timeout_type).unwrap_or(TimeoutType::Unspecified);
-            put_fields!(
-                make_struct(env, "Elixir.Temporalex.TimeoutError")?,
-                message() => msg,
-                timeout_type() => timeout_type_atom(tt),
-                details() => nil(),
-            )
-        }
-
-        Some(failure::FailureInfo::ActivityFailureInfo(info)) => {
-            put_fields!(
-                make_struct(env, "Elixir.Temporalex.ActivityFailure")?,
-                message() => msg,
-                activity_id() => info.activity_id.clone(),
-                activity_type() => info
-                    .activity_type
-                    .as_ref()
-                    .map(|t| t.name.clone())
-                    .unwrap_or_default(),
-                attempt() => nil(),
-                retry_state() => retry_state_atom(info.retry_state),
-                cause() => cause_term,
-            )
-        }
-
+        Some(failure::FailureInfo::ApplicationFailureInfo(info)) => put_fields!(
+            make_struct(env, "Elixir.Temporalex.Failure.ApplicationError")?,
+            message() => failure.message.clone(),
+            source() => failure.source.clone(),
+            stack_trace() => failure.stack_trace.clone(),
+            type_atom() => info.r#type.clone(),
+            details() => payloads_to_terms_option(env, info.details.as_ref())?,
+            retryable_question() => !info.non_retryable,
+            cause() => cause_term,
+        ),
+        Some(failure::FailureInfo::CanceledFailureInfo(info)) => put_fields!(
+            make_struct(env, "Elixir.Temporalex.Failure.CancelledError")?,
+            message() => failure.message.clone(),
+            source() => failure.source.clone(),
+            stack_trace() => failure.stack_trace.clone(),
+            identity() => info.identity.clone(),
+            details() => payloads_to_terms_option(env, info.details.as_ref())?,
+            cause() => cause_term,
+        ),
+        Some(failure::FailureInfo::TimeoutFailureInfo(info)) => put_fields!(
+            make_struct(env, "Elixir.Temporalex.Failure.TimeoutError")?,
+            message() => failure.message.clone(),
+            source() => failure.source.clone(),
+            stack_trace() => failure.stack_trace.clone(),
+            timeout_type() => timeout_type_atom(info.timeout_type()),
+            last_heartbeat_details() => payloads_to_terms_option(env, info.last_heartbeat_details.as_ref())?,
+            cause() => cause_term,
+        ),
+        Some(failure::FailureInfo::ActivityFailureInfo(info)) => put_fields!(
+            make_struct(env, "Elixir.Temporalex.Failure.ActivityError")?,
+            message() => failure.message.clone(),
+            source() => failure.source.clone(),
+            stack_trace() => failure.stack_trace.clone(),
+            identity() => info.identity.clone(),
+            activity_id() => info.activity_id.clone(),
+            activity_type() => info.activity_type.as_ref().map(|activity_type| activity_type.name.clone()).unwrap_or_default(),
+            retry_state() => retry_state_atom(info.retry_state()),
+            cause() => cause_term,
+        ),
         Some(failure::FailureInfo::ChildWorkflowExecutionFailureInfo(info)) => {
+            let execution = info.workflow_execution.as_ref();
             put_fields!(
-                make_struct(env, "Elixir.Temporalex.ChildWorkflowFailure")?,
-                message() => msg,
-                workflow_id() => info
-                    .workflow_execution
-                    .as_ref()
-                    .map(|exec| exec.workflow_id.clone())
-                    .unwrap_or_default(),
-                run_id() => info
-                    .workflow_execution
-                    .as_ref()
-                    .map(|exec| exec.run_id.clone())
-                    .unwrap_or_default(),
-                workflow_type() => info
-                    .workflow_type
-                    .as_ref()
-                    .map(|t| t.name.clone())
-                    .unwrap_or_default(),
+                make_struct(env, "Elixir.Temporalex.Failure.WorkflowExecutionError")?,
+                message() => failure.message.clone(),
+                source() => failure.source.clone(),
+                stack_trace() => failure.stack_trace.clone(),
                 namespace() => info.namespace.clone(),
-                retry_state() => retry_state_atom(info.retry_state),
+                workflow_id() => execution.map(|execution| execution.workflow_id.clone()).unwrap_or_default(),
+                run_id() => execution.map(|execution| execution.run_id.clone()).unwrap_or_default(),
+                workflow_type() => info.workflow_type.as_ref().map(|workflow_type| workflow_type.name.clone()).unwrap_or_default(),
+                retry_state() => retry_state_atom(info.retry_state()),
                 cause() => cause_term,
             )
         }
-
-        // Unknown / server-side failure types collapse to ApplicationError so
-        // workflow code always sees a known struct it can pattern-match on.
-        _ => put_fields!(
-            make_struct(env, "Elixir.Temporalex.ApplicationError")?,
-            message() => msg,
-            type_atom() => failure.source.clone(),
-            non_retryable() => false,
-            details() => nil(),
+        other => put_fields!(
+            make_struct(env, "Elixir.Temporalex.Failure.UnknownError")?,
+            message() => failure.message.clone(),
+            source() => failure.source.clone(),
+            stack_trace() => failure.stack_trace.clone(),
+            failure_type() => failure_info_type_atom(other),
+            cause() => cause_term,
         ),
     }
 }
 
-fn first_payload_to_term<'a>(
-    env: Env<'a>,
-    payloads: Option<&Payloads>,
-) -> anyhow::Result<Term<'a>> {
-    match payloads.and_then(|p| p.payloads.first()) {
-        Some(payload) => payload_to_term(env, payload),
-        None => Ok(nil().encode(env)),
+fn struct_module_name(term: Term) -> Option<String> {
+    get_ex_struct_name(term)
+        .ok()?
+        .to_term(term.get_env())
+        .atom_to_string()
+        .ok()
+}
+
+fn map_get_optional_string(map: Term, key: Atom) -> anyhow::Result<Option<String>> {
+    match map_get(map, key) {
+        Ok(term) if term.decode::<Atom>().ok() == Some(nil()) => Ok(None),
+        Ok(term) => decode_term(term).map(Some),
+        Err(_) => Ok(None),
     }
 }
 
-fn timeout_type_atom(tt: TimeoutType) -> Atom {
-    match tt {
+fn map_get_optional_bool(map: Term, key: Atom) -> anyhow::Result<Option<bool>> {
+    match map_get(map, key) {
+        Ok(term) if term.decode::<Atom>().ok() == Some(nil()) => Ok(None),
+        Ok(term) => decode_term(term).map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+fn map_get_optional_atom(map: Term, key: Atom) -> anyhow::Result<Option<Atom>> {
+    match map_get(map, key) {
+        Ok(term) if term.decode::<Atom>().ok() == Some(nil()) => Ok(None),
+        Ok(term) => decode_term(term).map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+fn map_get_payloads_list(map: Term, key: Atom) -> anyhow::Result<Vec<Payload>> {
+    match map_get(map, key) {
+        Ok(term) if term.decode::<Atom>().ok() == Some(nil()) => Ok(vec![]),
+        Ok(term) => terms_list_to_payloads(term),
+        Err(_) => Ok(vec![]),
+    }
+}
+
+fn failure_cause_from_map(map: Term) -> anyhow::Result<Option<Box<Failure>>> {
+    match map_get(map, cause()) {
+        Ok(term) if term.decode::<Atom>().ok() == Some(nil()) => Ok(None),
+        Ok(term) => failure_from_term(term, "Temporalex caused failure")
+            .map(Box::new)
+            .map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+fn payloads_to_terms_option<'a>(
+    env: Env<'a>,
+    payloads: Option<&Payloads>,
+) -> anyhow::Result<Vec<Term<'a>>> {
+    payloads
+        .map(|payloads| payloads_to_terms(env, &payloads.payloads))
+        .transpose()
+        .map(|terms| terms.unwrap_or_default())
+}
+
+fn retry_state_atom(retry_state: RetryState) -> Atom {
+    match retry_state {
+        RetryState::InProgress => in_progress(),
+        RetryState::NonRetryableFailure => non_retryable_failure(),
+        RetryState::Timeout => timeout(),
+        RetryState::MaximumAttemptsReached => maximum_attempts_reached(),
+        RetryState::RetryPolicyNotSet => retry_policy_not_set(),
+        RetryState::InternalServerError => internal_server_error(),
+        RetryState::CancelRequested => cancel_requested(),
+        RetryState::Unspecified => unspecified(),
+    }
+}
+
+fn retry_state_from_atom(retry_state: Option<Atom>) -> RetryState {
+    match retry_state {
+        Some(atom) if atom == in_progress() => RetryState::InProgress,
+        Some(atom) if atom == non_retryable_failure() => RetryState::NonRetryableFailure,
+        Some(atom) if atom == timeout() => RetryState::Timeout,
+        Some(atom) if atom == maximum_attempts_reached() => RetryState::MaximumAttemptsReached,
+        Some(atom) if atom == retry_policy_not_set() => RetryState::RetryPolicyNotSet,
+        Some(atom) if atom == internal_server_error() => RetryState::InternalServerError,
+        Some(atom) if atom == cancel_requested() => RetryState::CancelRequested,
+        _ => RetryState::Unspecified,
+    }
+}
+
+fn timeout_type_atom(timeout_type: TimeoutType) -> Atom {
+    match timeout_type {
         TimeoutType::StartToClose => start_to_close(),
-        TimeoutType::ScheduleToClose => schedule_to_close(),
         TimeoutType::ScheduleToStart => schedule_to_start(),
+        TimeoutType::ScheduleToClose => schedule_to_close(),
         TimeoutType::Heartbeat => heartbeat(),
         TimeoutType::Unspecified => unspecified(),
     }
 }
 
-fn retry_state_atom(state: i32) -> Atom {
-    // Temporal RetryState enum: 0=Unspecified, 1=InProgress, 2=NonRetryableFailure,
-    // 3=Timeout, 4=MaximumAttemptsReached, 5=RetryPolicyNotSet, 6=InternalServerError,
-    // 7=CancelRequested
-    match state {
-        2 => non_retryable(),
-        3 => timed_out(),
-        4 => maximum_attempts(),
-        7 => cancelled(),
-        _ => unspecified(),
+fn timeout_type_from_atom(timeout_type: Option<Atom>) -> TimeoutType {
+    match timeout_type {
+        Some(atom) if atom == start_to_close() => TimeoutType::StartToClose,
+        Some(atom) if atom == schedule_to_start() => TimeoutType::ScheduleToStart,
+        Some(atom) if atom == schedule_to_close() => TimeoutType::ScheduleToClose,
+        Some(atom) if atom == heartbeat() => TimeoutType::Heartbeat,
+        _ => TimeoutType::Unspecified,
+    }
+}
+
+fn failure_info_type_atom(info: &Option<failure::FailureInfo>) -> Atom {
+    match info {
+        Some(failure::FailureInfo::TimeoutFailureInfo(_)) => timeout_failure(),
+        Some(failure::FailureInfo::CanceledFailureInfo(_)) => cancelled_failure(),
+        Some(failure::FailureInfo::TerminatedFailureInfo(_)) => terminated_failure(),
+        Some(failure::FailureInfo::ServerFailureInfo(_)) => server_failure(),
+        Some(failure::FailureInfo::ResetWorkflowFailureInfo(_)) => reset_workflow_failure(),
+        Some(failure::FailureInfo::ActivityFailureInfo(_)) => activity_failure(),
+        Some(failure::FailureInfo::ChildWorkflowExecutionFailureInfo(_)) => {
+            child_workflow_failure()
+        }
+        Some(failure::FailureInfo::NexusOperationExecutionFailureInfo(_)) => {
+            nexus_operation_failure()
+        }
+        Some(failure::FailureInfo::NexusHandlerFailureInfo(_)) => nexus_handler_failure(),
+        Some(failure::FailureInfo::ApplicationFailureInfo(_)) => failed(),
+        None => unknown_failure(),
     }
 }
 

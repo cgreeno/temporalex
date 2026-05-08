@@ -1187,7 +1187,7 @@ defmodule Temporalex.Core.Executor do
 
     case thread.kind do
       :root ->
-        append_command(state, %Command.FailWorkflow{reason: unwrapped})
+        append_command(state, %Command.FailWorkflow{reason: root_failure_reason(reason)})
 
       :parallel_branch ->
         complete_parallel_branch(state, thread, {:error, unwrapped})
@@ -1199,9 +1199,35 @@ defmodule Temporalex.Core.Executor do
         complete_async_signal(state, thread)
 
       :async_update_handler ->
-        complete_async_update(state, thread, {:rejected, unwrapped})
+        complete_async_update(state, thread, {:rejected, update_rejection_reason(reason)})
     end
   end
+
+  defp root_failure_reason(reason) do
+    case unwrap_structured_failure(reason) do
+      {:ok, failure} -> failure
+      :error -> {:exception, reason}
+    end
+  end
+
+  defp update_rejection_reason(reason) do
+    case unwrap_structured_failure(reason) do
+      {:ok, failure} -> failure
+      :error -> reason
+    end
+  end
+
+  defp unwrap_structured_failure(
+         {:exception, %Temporalex.Failure.ApplicationError{} = error, _stack}
+       ),
+       do: {:ok, error}
+
+  defp unwrap_structured_failure(
+         {:exception, %Temporalex.Failure.CancelledError{} = error, _stack}
+       ),
+       do: {:ok, error}
+
+  defp unwrap_structured_failure(_reason), do: :error
 
   defp complete_root_thread(state, {:ok, result}) do
     append_command(state, %Command.CompleteWorkflow{result: result})

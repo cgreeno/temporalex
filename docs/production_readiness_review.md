@@ -67,14 +67,22 @@ Needed:
 
 ### Failure Modeling Is Too Flat
 
-Status: open.
+Status: completed on May 8, 2026.
 
-Current concern:
+Original concern:
 
 - `failure_from_term/2` turns every workflow, query, and update failure into `Temporalex.ApplicationError`.
 - `non_retryable` is always false.
 - Failure details are a single ETF payload of the original term.
 - Retry policies using `non_retryable_error_types` cannot be expressed well by users.
+
+Implemented:
+
+- Added public `Temporalex.Failure` structs for application, cancellation, timeout, activity, child workflow, and unknown failures.
+- Exposed application failure retry control as `retryable?`, which maps to the inverse of Temporal's `ApplicationFailureInfo.non_retryable`.
+- Preserved failure `cause` recursively when decoding server/core failures and when encoding decoded wrappers back to Temporal.
+- Routed workflow, activity, query, and update rejection failures through the structured native encoder.
+- Added core, codec, and Temporal dev-server tests proving `retryable?`, `non_retryable_error_types`, and activity retry attempts are observed by Temporal.
 
 References:
 
@@ -82,12 +90,10 @@ References:
 - `../../temporal-api/temporal/api/common/v1/message.proto`: `RetryPolicy.non_retryable_error_types`.
 - `../../temporal-api/temporal/api/failure/v1/message.proto`: Temporal failure variants.
 
-Needed:
+Remaining follow-up:
 
-- Add public error/failure structs for application failures, cancellation, timeouts, activity failures, child workflow failures when added, and update rejection.
-- Allow users to set application error type, message, details, and non-retryable flag.
-- Decode server/core failures into stable Elixir terms or structs instead of lossy maps/strings.
-- Add tests proving workflow and activity retry policies respect non-retryable error types.
+- Decide whether update-specific rejected/completed errors need a dedicated public wrapper once update ergonomics are revisited.
+- Decide whether raised non-Temporalex exceptions should default `ApplicationError.type` to the exception module name.
 
 ### Continue-As-New Is Under-Modeled
 

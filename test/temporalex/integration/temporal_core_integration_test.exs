@@ -16,6 +16,30 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
       :ok = Temporalex.Activity.Context.heartbeat(ctx, {:heartbeat, value})
       {:ok, {:heartbeat, value}}
     end
+
+    defactivity fail_retryable(ctx),
+      start_to_close_timeout: 1_000,
+      schedule_to_close_timeout: 10_000,
+      retry_policy: [initial_interval: 10, maximum_attempts: 2] do
+      {:error,
+       Temporalex.Failure.application("retryable activity failure",
+         type: "RetryableActivityFailure",
+         details: [ctx.attempt],
+         retryable?: true
+       )}
+    end
+
+    defactivity fail_non_retryable(ctx),
+      start_to_close_timeout: 1_000,
+      schedule_to_close_timeout: 10_000,
+      retry_policy: [initial_interval: 10, maximum_attempts: 2] do
+      {:error,
+       Temporalex.Failure.application("non-retryable activity failure",
+         type: "NonRetryableActivityFailure",
+         details: [ctx.attempt],
+         retryable?: false
+       )}
+    end
   end
 
   defmodule Workflow do
@@ -102,6 +126,46 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
     end
   end
 
+  defmodule FailureWorkflow do
+    use Temporalex.Workflow
+
+    alias Temporalex.Failure
+    alias Temporalex.Workflow.API
+
+    def run(retryable?) do
+      attempt = API.workflow_info().attempt
+
+      {:error,
+       Failure.application("workflow failed",
+         type: "PlannedWorkflowFailure",
+         details: [attempt],
+         retryable?: retryable?
+       )}
+    end
+  end
+
+  defmodule ActivityFailureWorkflow do
+    use Temporalex.Workflow
+
+    def run(:retryable) do
+      fail_with_activity_result(Activities.fail_retryable())
+    end
+
+    def run(:non_retryable) do
+      fail_with_activity_result(Activities.fail_non_retryable())
+    end
+
+    defp fail_with_activity_result({:ok, value}), do: {:ok, value}
+
+    defp fail_with_activity_result({:error, %Temporalex.Failure.ActivityError{} = failure}),
+      do: {:error, failure}
+
+    defp fail_with_activity_result({:error, %Temporalex.Failure.ApplicationError{} = failure}),
+      do: {:error, failure}
+
+    defp fail_with_activity_result({:error, other}), do: {:error, other}
+  end
+
   test "TemporalCore worker runs workflow tasks, activities, and client operations against dev server" do
     temporal =
       System.find_executable("temporal") || flunk("temporal CLI executable was not found")
@@ -127,7 +191,14 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
           target: "http://127.0.0.1:#{port}",
           namespace: "default",
           task_queue: task_queue,
-          workflows: [Workflow, InteractiveWorkflow, WaitingWorkflow, SearchAttributeWorkflow],
+          workflows: [
+            Workflow,
+            InteractiveWorkflow,
+            WaitingWorkflow,
+            SearchAttributeWorkflow,
+            FailureWorkflow,
+            ActivityFailureWorkflow
+          ],
           activities: [Activities],
           max_workflow_pollers: 2,
           max_activity_pollers: 2,
@@ -267,6 +338,103 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    reason: "integration test complete",
                    timeout: 10_000
                  )
+
+        non_retryable_workflow_id =
+          "temporalex-non-retryable-workflow-#{System.unique_integer([:positive])}"
+
+        assert {:ok, non_retryable_workflow} =
+                 Temporalex.Client.start_workflow(worker_name, FailureWorkflow, false,
+                   workflow_id: non_retryable_workflow_id,
+                   retry_policy: [initial_interval: 10, maximum_attempts: 2],
+                   timeout: 10_000
+                 )
+
+        assert {:error, {:failed, %Temporalex.Failure.ApplicationError{} = failure}} =
+                 Temporalex.Client.get_result(non_retryable_workflow, timeout: 30_000)
+
+        assert failure.type == "PlannedWorkflowFailure"
+        assert failure.details == [1]
+        assert failure.retryable? == false
+
+        typed_non_retryable_workflow_id =
+          "temporalex-typed-non-retryable-workflow-#{System.unique_integer([:positive])}"
+
+        assert {:ok, typed_non_retryable_workflow} =
+                 Temporalex.Client.start_workflow(worker_name, FailureWorkflow, true,
+                   workflow_id: typed_non_retryable_workflow_id,
+                   retry_policy: [
+                     initial_interval: 10,
+                     maximum_attempts: 2,
+                     non_retryable_error_types: ["PlannedWorkflowFailure"]
+                   ],
+                   timeout: 10_000
+                 )
+
+        assert {:error, {:failed, %Temporalex.Failure.ApplicationError{} = failure}} =
+                 Temporalex.Client.get_result(typed_non_retryable_workflow, timeout: 30_000)
+
+        assert failure.type == "PlannedWorkflowFailure"
+        assert failure.details == [1]
+        assert failure.retryable? == true
+
+        retryable_workflow_id =
+          "temporalex-retryable-workflow-#{System.unique_integer([:positive])}"
+
+        assert {:ok, retryable_workflow} =
+                 Temporalex.Client.start_workflow(worker_name, FailureWorkflow, true,
+                   workflow_id: retryable_workflow_id,
+                   retry_policy: [initial_interval: 10, maximum_attempts: 2],
+                   timeout: 10_000
+                 )
+
+        assert {:error, {:failed, %Temporalex.Failure.ApplicationError{} = failure}} =
+                 Temporalex.Client.get_result(retryable_workflow, timeout: 30_000)
+
+        assert failure.type == "PlannedWorkflowFailure"
+        assert failure.details == [2]
+        assert failure.retryable? == true
+
+        non_retryable_activity_id =
+          "temporalex-non-retryable-activity-#{System.unique_integer([:positive])}"
+
+        assert {:ok, non_retryable_activity} =
+                 Temporalex.Client.start_workflow(
+                   worker_name,
+                   ActivityFailureWorkflow,
+                   :non_retryable,
+                   workflow_id: non_retryable_activity_id,
+                   timeout: 10_000
+                 )
+
+        assert {:error, {:failed, %Temporalex.Failure.ActivityError{} = failure}} =
+                 Temporalex.Client.get_result(non_retryable_activity, timeout: 30_000)
+
+        assert failure.retry_state == :non_retryable_failure
+        assert %Temporalex.Failure.ApplicationError{} = cause = failure.cause
+        assert cause.type == "NonRetryableActivityFailure"
+        assert cause.details == [1]
+        assert cause.retryable? == false
+
+        retryable_activity_id =
+          "temporalex-retryable-activity-#{System.unique_integer([:positive])}"
+
+        assert {:ok, retryable_activity} =
+                 Temporalex.Client.start_workflow(
+                   worker_name,
+                   ActivityFailureWorkflow,
+                   :retryable,
+                   workflow_id: retryable_activity_id,
+                   timeout: 10_000
+                 )
+
+        assert {:error, {:failed, %Temporalex.Failure.ActivityError{} = failure}} =
+                 Temporalex.Client.get_result(retryable_activity, timeout: 30_000)
+
+        assert failure.retry_state == :maximum_attempts_reached
+        assert %Temporalex.Failure.ApplicationError{} = cause = failure.cause
+        assert cause.type == "RetryableActivityFailure"
+        assert cause.details == [2]
+        assert cause.retryable? == true
       after
         if Process.alive?(worker_pid) do
           Supervisor.stop(worker_pid, :normal, 15_000)

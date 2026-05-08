@@ -5,6 +5,7 @@ defmodule Temporalex.CoreExecutorTest do
   alias Temporalex.Core.Job
   alias Temporalex.Core.Nondeterminism
   alias Temporalex.Core.TestHarness
+  alias Temporalex.Failure.ApplicationError
   alias Temporalex.SearchAttribute
   alias Temporalex.Workflow.API
 
@@ -26,6 +27,23 @@ defmodule Temporalex.CoreExecutorTest do
     use Temporalex.Workflow
 
     def run(reason), do: {:error, reason}
+  end
+
+  defmodule StructuredErrorWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      {:error,
+       Temporalex.Failure.application("planned", type: "PlannedFailure", retryable?: false)}
+    end
+  end
+
+  defmodule RaisedStructuredErrorWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      Temporalex.Failure.application!("raised", type: "RaisedFailure", retryable?: false)
+    end
   end
 
   defmodule ContinueWorkflow do
@@ -366,6 +384,22 @@ defmodule Temporalex.CoreExecutorTest do
 
       assert {:ok, exec} = TestHarness.start_workflow(ErrorWorkflow, :bad)
       assert {:complete, {:error, :bad}} = TestHarness.next(exec)
+
+      assert {:ok, exec} = TestHarness.start_workflow(StructuredErrorWorkflow, nil)
+
+      assert {:complete, {:error, %ApplicationError{} = error}} = TestHarness.next(exec)
+
+      assert error.message == "planned"
+      assert error.type == "PlannedFailure"
+      assert error.retryable? == false
+
+      assert {:ok, exec} = TestHarness.start_workflow(RaisedStructuredErrorWorkflow, nil)
+
+      assert {:complete, {:error, %ApplicationError{} = error}} = TestHarness.next(exec)
+
+      assert error.message == "raised"
+      assert error.type == "RaisedFailure"
+      assert error.retryable? == false
 
       assert {:ok, exec} = TestHarness.start_workflow(ContinueWorkflow, [:next])
       assert {:continue_as_new, [:next]} = TestHarness.next(exec)
