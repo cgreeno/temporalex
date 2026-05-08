@@ -13,7 +13,12 @@ defmodule Temporalex.Core.TestHarness do
   def start_workflow(workflow_module, input, opts \\ []) do
     run_id = Keyword.get(opts, :run_id, "run-#{System.unique_integer([:positive])}")
 
-    with {:ok, pid} <- Executor.start_link(workflow_module: workflow_module, run_id: run_id) do
+    with {:ok, pid} <-
+           Executor.start_link(
+             workflow_module: workflow_module,
+             run_id: run_id,
+             safe_mode: Keyword.get(opts, :safe_mode, :fail)
+           ) do
       {:ok,
        %__MODULE__{
          pid: pid,

@@ -25,6 +25,7 @@ defmodule Temporalex.Server do
               backend_state: nil,
               namespace: "default",
               task_queue: "default",
+              workflow_safe_mode: :off,
               workflow_map: %{},
               activity_map: %{},
               executor_supervisor: nil,
@@ -64,6 +65,7 @@ defmodule Temporalex.Server do
       backend: backend,
       namespace: Keyword.get(opts, :namespace, "default"),
       task_queue: Keyword.get(opts, :task_queue, "default"),
+      workflow_safe_mode: Keyword.get(opts, :workflow_safe_mode, :off),
       workflow_map: workflow_map(Keyword.get(opts, :workflows, [])),
       activity_map: activity_map(Keyword.get(opts, :activities, [])),
       executor_supervisor: Keyword.fetch!(opts, :executor_supervisor),
@@ -239,7 +241,10 @@ defmodule Temporalex.Server do
   end
 
   defp start_executor(state, run_id, workflow_type, workflow_module) do
-    child = {Executor, workflow_module: workflow_module, run_id: run_id}
+    child = {
+      Executor,
+      workflow_module: workflow_module, run_id: run_id, safe_mode: state.workflow_safe_mode
+    }
 
     case DynamicSupervisor.start_child(state.executor_supervisor, child) do
       {:ok, pid} ->

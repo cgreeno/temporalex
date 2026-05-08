@@ -13,6 +13,7 @@ Scheduler rounds and replay matching are specified in [scheduler_and_replay.md](
 The core owns:
 
 - `Temporalex.Core.Executor`, one GenServer per workflow execution.
+- Optional workflow safe-mode tracing through `Temporalex.Core.TraceGuard`.
 - Runner process lifecycle.
 - The workflow operation protocol used by `Temporalex.Workflow.API` and activity dispatch functions.
 - Replay command matching against activation transcripts.
@@ -104,6 +105,20 @@ Common jobs:
 Completions are emitted by executors and submitted by the server through the configured backend.
 
 A successful completion contains workflow commands. A failed completion means the activation itself could not be processed, for example because of nondeterminism or an unhandled workflow-task failure. This is distinct from `%Temporalex.Core.Command.FailWorkflow{}`, which is a successful activation command that fails the workflow execution.
+
+## Workflow Safe Mode
+
+Executors can run with `safe_mode: :fail | :warn | :off`. Safe mode is hosted by a per-executor `Temporalex.Core.TraceGuard` process which owns an OTP trace session. Only workflow runner and handler processes are traced; trace traffic is consumed by the guard and reduced to structured violations before the executor sees it.
+
+In `:fail` mode, a violation fails the current activation and tears down workflow-owned runner processes through the normal runtime abort path. The core test harness enables this mode by default. Worker/server execution defaults to `:off`; pass `workflow_safe_mode: :fail` or `:warn` to a worker to enable it for real worker executions.
+
+The first guard pass catches:
+
+- unexpected sends from workflow runner processes
+- unexpected receives by workflow runner processes
+- common unsafe calls for time, randomness, filesystem, environment/config, tasks/process spawning, ETS-like mutable stores, ports, OS access, and sleeps
+
+The guard allows the executor protocol, runner completion/failure messages, operation replies, runner start messages, and narrow code-server traffic needed for lazy module loading. Safe mode is a development and test guardrail, not a formal determinism proof.
 
 Common commands:
 

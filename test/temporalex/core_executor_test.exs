@@ -5,6 +5,7 @@ defmodule Temporalex.CoreExecutorTest do
   alias Temporalex.Core.Job
   alias Temporalex.Core.Nondeterminism
   alias Temporalex.Core.TestHarness
+  alias Temporalex.Core.TraceGuard.Violation, as: TraceViolation
   alias Temporalex.Failure.ApplicationError
   alias Temporalex.Failure.CancelledError
   alias Temporalex.SearchAttribute
@@ -552,6 +553,23 @@ defmodule Temporalex.CoreExecutorTest do
     end
   end
 
+  defmodule UnsafeTimeWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      {:ok, DateTime.utc_now()}
+    end
+  end
+
+  defmodule UnsafeSendWorkflow do
+    use Temporalex.Workflow
+
+    def run(parent) do
+      send(parent, {:unsafe_workflow_message, self()})
+      {:ok, :sent}
+    end
+  end
+
   defp monitor_thread(exec, thread_id \\ []) do
     thread = Temporalex.Core.Executor.inspect_state(exec.pid).threads[thread_id]
 
@@ -731,6 +749,38 @@ defmodule Temporalex.CoreExecutorTest do
       state = Temporalex.Core.Executor.inspect_state(exec.pid)
       assert state.threads == %{}
       assert state.signal_waiters == %{}
+    end
+
+    test "safe mode catches common unsafe time calls by default" do
+      assert {:ok, exec} = TestHarness.start_workflow(UnsafeTimeWorkflow, nil)
+
+      assert {:failed,
+              %TraceViolation{
+                kind: :unsafe_call,
+                thread_id: [],
+                detail: {DateTime, :utc_now, 0}
+              }} = TestHarness.next(exec)
+    end
+
+    test "safe mode catches unexpected sends from workflow runners" do
+      parent = self()
+      assert {:ok, exec} = TestHarness.start_workflow(UnsafeSendWorkflow, parent)
+
+      assert {:failed,
+              %TraceViolation{
+                kind: :unexpected_send,
+                thread_id: [],
+                detail: %{destination: ^parent}
+              }} = TestHarness.next(exec)
+
+      assert_receive {:unsafe_workflow_message, _pid}, 1_000
+    end
+
+    test "safe mode can be disabled explicitly" do
+      assert {:ok, exec} =
+               TestHarness.start_workflow(UnsafeTimeWorkflow, nil, safe_mode: :off)
+
+      assert {:complete, {:ok, %DateTime{}}} = TestHarness.next(exec)
     end
 
     test "executor shutdown tears down linked blocked runner" do

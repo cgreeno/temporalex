@@ -12,6 +12,8 @@ defmodule Temporalex.Core.Executor do
 
   import Bitwise
 
+  require Logger
+
   alias Temporalex.Core.Activation
   alias Temporalex.Core.Command
   alias Temporalex.Core.Completion
@@ -24,6 +26,8 @@ defmodule Temporalex.Core.Executor do
   alias Temporalex.Core.Phase
   alias Temporalex.Core.SchedulerViolation
   alias Temporalex.Core.Thread
+  alias Temporalex.Core.TraceGuard
+  alias Temporalex.Core.TraceGuard.Violation, as: TraceViolation
   alias Temporalex.Workflow.API
 
   @op_reply :temporalex_op_reply
@@ -63,6 +67,8 @@ defmodule Temporalex.Core.Executor do
               expected_commands: nil,
               expected_index: 0,
               activation_failed: nil,
+              safe_mode: :off,
+              trace_guard: nil,
               pending: %{},
               threads: %{},
               running: nil,
@@ -92,11 +98,21 @@ defmodule Temporalex.Core.Executor do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
-    {:ok,
-     %State{
-       run_id: Keyword.get(opts, :run_id),
-       workflow_module: Keyword.fetch!(opts, :workflow_module)
-     }}
+    safe_mode = normalize_safe_mode(Keyword.get(opts, :safe_mode, :off))
+
+    case start_trace_guard(safe_mode) do
+      {:ok, trace_guard} ->
+        {:ok,
+         %State{
+           run_id: Keyword.get(opts, :run_id),
+           workflow_module: Keyword.fetch!(opts, :workflow_module),
+           safe_mode: safe_mode,
+           trace_guard: trace_guard
+         }}
+
+      {:error, reason} ->
+        {:stop, {:trace_guard_start_failed, reason}}
+    end
   end
 
   @impl GenServer
@@ -170,8 +186,25 @@ defmodule Temporalex.Core.Executor do
   defp input_job?(_), do: true
 
   @impl GenServer
+  def handle_info({:trace_guard_violation, %TraceViolation{} = violation}, state) do
+    {:noreply, apply_trace_violation(state, violation)}
+  end
+
   def handle_info({:EXIT, pid, reason}, state) do
-    {:noreply, handle_thread_exit(state, pid, reason)}
+    cond do
+      pid == state.trace_guard and reason in [:normal, :shutdown] ->
+        {:noreply, %{state | trace_guard: nil}}
+
+      pid == state.trace_guard ->
+        {:noreply,
+         runtime_abort(
+           state,
+           %RuntimeError{message: "workflow trace guard exited: #{inspect(reason)}"}
+         )}
+
+      true ->
+        {:noreply, handle_thread_exit(state, pid, reason)}
+    end
   end
 
   def handle_info(_message, state) do
@@ -388,7 +421,13 @@ defmodule Temporalex.Core.Executor do
       {:"$gen_call", from, {:workflow_op, caller_thread_id, op}} ->
         state =
           if caller_thread_id == thread_id and state.running == thread_id do
-            handle_workflow_op(state, from, caller_thread_id, op)
+            state = checkpoint_trace_guard(state, thread_id)
+
+            if state.activation_failed do
+              state
+            else
+              handle_workflow_op(state, from, caller_thread_id, op)
+            end
           else
             violation =
               SchedulerViolation.exception(thread_id: caller_thread_id, running: state.running)
@@ -404,15 +443,36 @@ defmodule Temporalex.Core.Executor do
             %{state | running: nil}
         end
 
+      {:trace_guard_violation, %TraceViolation{} = violation} ->
+        state = apply_trace_violation(state, violation)
+
+        if state.activation_failed do
+          %{state | running: nil}
+        else
+          wait_for_thread_event(state, thread_id)
+        end
+
       {:temporalex_thread_completed, ^thread_id, result} ->
-        state
-        |> complete_thread(thread_id, result)
-        |> Map.put(:running, nil)
+        state = checkpoint_trace_guard(state, thread_id)
+
+        if state.activation_failed do
+          %{state | running: nil}
+        else
+          state
+          |> complete_thread(thread_id, result)
+          |> Map.put(:running, nil)
+        end
 
       {:temporalex_thread_failed, ^thread_id, reason} ->
-        state
-        |> fail_thread(thread_id, reason)
-        |> Map.put(:running, nil)
+        state = checkpoint_trace_guard(state, thread_id)
+
+        if state.activation_failed do
+          %{state | running: nil}
+        else
+          state
+          |> fail_thread(thread_id, reason)
+          |> Map.put(:running, nil)
+        end
 
       {:EXIT, pid, reason} ->
         state = handle_thread_exit(state, pid, reason)
@@ -1854,7 +1914,9 @@ defmodule Temporalex.Core.Executor do
       non_cancellable_depth: Keyword.get(opts, :non_cancellable_depth, 0)
     }
 
-    put_thread(state, thread)
+    state
+    |> put_thread(thread)
+    |> trace_thread(thread)
   end
 
   defp run_thread_fun(executor, thread_id, fun) do
@@ -2020,6 +2082,28 @@ defmodule Temporalex.Core.Executor do
   defp failure_cause(%SchedulerViolation{}), do: :workflow_task_failed
   defp failure_cause(_reason), do: :workflow_task_failed
 
+  defp checkpoint_trace_guard(%State{trace_guard: nil} = state, _thread_id), do: state
+
+  defp checkpoint_trace_guard(state, thread_id) do
+    with {:ok, %Thread{pid: pid}} <- Map.fetch(state.threads, thread_id),
+         %TraceViolation{} = violation <- TraceGuard.checkpoint(state.trace_guard, pid) do
+      apply_trace_violation(state, violation)
+    else
+      _ -> state
+    end
+  end
+
+  defp apply_trace_violation(%State{safe_mode: :warn} = state, %TraceViolation{} = violation) do
+    Logger.warning(Exception.message(violation))
+    state
+  end
+
+  defp apply_trace_violation(%State{safe_mode: :fail} = state, %TraceViolation{} = violation) do
+    runtime_abort(state, violation)
+  end
+
+  defp apply_trace_violation(state, _violation), do: state
+
   defp handle_thread_exit(%State{activation_failed: reason} = state, _pid, _reason)
        when not is_nil(reason),
        do: state
@@ -2050,6 +2134,8 @@ defmodule Temporalex.Core.Executor do
   end
 
   defp teardown_threads(state) do
+    untrace_all(state.trace_guard)
+
     Enum.each(state.threads, fn {_id, thread} ->
       if is_pid(thread.pid) and Process.alive?(thread.pid) do
         Process.exit(thread.pid, :kill)
@@ -2068,6 +2154,61 @@ defmodule Temporalex.Core.Executor do
         next_round: [],
         in_round?: false
     }
+  end
+
+  defp trace_thread(%State{trace_guard: nil} = state, _thread), do: state
+
+  defp trace_thread(state, %Thread{} = thread) do
+    try do
+      case TraceGuard.trace_thread(state.trace_guard, thread.pid, thread.id) do
+        :ok ->
+          state
+
+        {:error, reason} ->
+          runtime_abort(
+            state,
+            %RuntimeError{
+              message: "failed to trace workflow thread #{inspect(thread.id)}: #{inspect(reason)}"
+            }
+          )
+      end
+    catch
+      :exit, reason ->
+        runtime_abort(
+          state,
+          %RuntimeError{
+            message: "failed to trace workflow thread #{inspect(thread.id)}: #{inspect(reason)}"
+          }
+        )
+    end
+  end
+
+  defp untrace_all(nil), do: :ok
+
+  defp untrace_all(trace_guard) do
+    try do
+      TraceGuard.untrace_all(trace_guard)
+    catch
+      :exit, _reason -> :ok
+    end
+  end
+
+  defp normalize_safe_mode(value) when value in [nil, false, :off], do: :off
+  defp normalize_safe_mode(value) when value in [true, :fail, :safe], do: :fail
+  defp normalize_safe_mode(:warn), do: :warn
+
+  defp normalize_safe_mode(other) do
+    raise ArgumentError, "invalid workflow safe mode #{inspect(other)}"
+  end
+
+  defp start_trace_guard(:off), do: {:ok, nil}
+
+  defp start_trace_guard(_safe_mode) do
+    if TraceGuard.available?() do
+      TraceGuard.start_link(executor: self())
+    else
+      {:error, :trace_sessions_unavailable}
+    end
   end
 
   @u64_mask 0xFFFFFFFFFFFFFFFF

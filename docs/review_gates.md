@@ -96,6 +96,30 @@ Test evidence:
 - `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
 - `cargo fmt --manifest-path native/temporalex_nif/Cargo.toml --check`: success.
 
+## Workflow Safe Mode Review
+
+Status: completed.
+
+Review date: May 8, 2026.
+
+Findings:
+
+- Workflow safe mode is hosted in `Temporalex.Core.TraceGuard`, a per-executor process with its own OTP trace session.
+- Only executor-owned workflow runner and handler pids are traced. Trace messages are consumed by the guard and converted to `%Temporalex.Core.TraceGuard.Violation{}` before reaching the executor.
+- The executor checks the guard before accepting workflow operations and terminal runner events, so unsafe calls made immediately before a yield or completion fail the same activation.
+- Safe-mode violations use the existing runtime abort path in `:fail` mode. Worker/server execution defaults to `:off`; the core test harness defaults to `:fail`.
+- Message tracing allows only the executor protocol, runner result messages, operation replies, runner start messages, and code-server traffic needed for lazy module loading.
+- Call tracing catches common nondeterminism hazards for time, randomness, filesystem, environment/config access, mutable external stores, process/task spawning, sleeps, ports, and OS access.
+
+Test evidence:
+
+- `mix test test/temporalex/core_executor_test.exs`: 56 tests, 0 failures.
+- `mix test`: 80 tests, 0 failures, 2 external tests excluded.
+- `mix test --only external`: 2 tests, 0 failures.
+- `mix format --check-formatted`: success.
+- `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
+- `cargo fmt --manifest-path native/temporalex_nif/Cargo.toml --check`: success.
+
 ## Native Integration Review
 
 Status: completed.
