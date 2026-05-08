@@ -190,11 +190,12 @@ Findings:
 - Activity/timer completions resolve exact handles, allowing out-of-order completion after all emitted commands have been consumed.
 - Signals, updates, queries, and workflow cancellation are explicit workflow inputs. Update responses remain observable commands; query responses are returned as `{:ok, value}` or `{:error, reason}`.
 - `assert_replay/1` replays the recorded activation transcript against the same workflow module and checks command decisions.
+- Consumer-style workflow behavior tests now cover signal waits, continue-as-new, non-cancellable cleanup, blocked cancellable cleanup, activity cancellation modes, parallel cancellation, async signal handlers, async update handlers, update rejection, and safe-mode failures through the public testing API.
 
 Test evidence:
 
-- `mix test test/temporalex/testing_test.exs`: 8 tests, 0 failures.
-- `mix test`: 92 tests, 0 failures, 2 external tests excluded.
+- `mix test test/temporalex/testing_test.exs test/temporalex/testing_workflow_behavior_test.exs`: 20 tests, 0 failures.
+- `mix test`: 104 tests, 0 failures, 2 external tests excluded.
 - `mix test --only external`: 2 tests, 0 failures.
 - `mix compile --warnings-as-errors`: success.
 - `mix format --check-formatted`: success.
