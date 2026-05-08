@@ -8,6 +8,7 @@ This document is the architecture map. Detailed contracts live in focused docs:
 |---|---|
 | [programming_model.md](programming_model.md) | Public workflow programming model: activities, workflow API, signals, updates, queries, `phase`, `parallel`, and determinism guidance. |
 | [public_api.md](public_api.md) | Public module-level API: workflow DSL, activity DSL, client API shape, retry policy, and error structs. |
+| [testing.md](testing.md) | Public workflow testing helpers for fast local workflow tests without a Temporal server. |
 | [implementation_principles.md](implementation_principles.md) | Internal implementation rules, invariants, API admission criteria, and review checklist. |
 | [implementation_slice.md](implementation_slice.md) | Core implementation slices: sequential core first, then structured concurrency with `parallel`, `phase`, signals, updates, and queries. |
 | [review_gates.md](review_gates.md) | Completed Slice 1, Slice 2, and native integration review-gate notes, evidence, outcomes, and beta limits. |

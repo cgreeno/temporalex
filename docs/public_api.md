@@ -228,6 +228,35 @@ static_summary: "Checkout workflow"
 
 Signal/update/query options accept `:headers`. Signal and cancel also accept `:request_id`; update accepts `:update_id`.
 
+## Workflow Testing
+
+Most application workflow tests should use `Temporalex.Testing` rather than a
+Temporal dev server. The testing helpers run workflow code through the real
+Temporalex executor, expose emitted commands in deterministic order, and let the
+test decide when activities and timers complete.
+
+```elixir
+import Temporalex.Testing
+
+{:ok, run} = start_workflow(MyApp.Workflows.Checkout, %{order_id: "ord_123"})
+
+charge =
+  assert_next_activity(run,
+    type: {MyApp.Activities.Payment, :charge},
+    input: [%{order_id: "ord_123"}]
+  )
+
+complete_activity(run, charge, {:ok, %{charge_id: "ch_123"}})
+
+assert_completed(run, :complete)
+assert_replay(run)
+```
+
+Temporalex does not provide an ExUnit case-template macro. Users can import the
+helpers directly or wrap them in their own case templates.
+
+See [testing.md](testing.md) for the testing model.
+
 ## Retry Policy
 
 ```elixir

@@ -174,6 +174,33 @@ Test evidence:
 - `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
 - `cargo fmt --manifest-path native/temporalex_nif/Cargo.toml --check`: success.
 
+## Workflow Testing Surface Review
+
+Status: completed.
+
+Review date: May 8, 2026.
+
+Findings:
+
+- `Temporalex.Testing` is a public, explicit helper API rather than an ExUnit case-template macro.
+- Workflow tests run through the real core executor with safe mode defaulting to `:fail`.
+- `start_workflow/3` returns a process-backed run handle that owns the executor, queued commands, unresolved operation handles, terminal state, and replay transcript.
+- Activity and timer assertions consume commands in deterministic emission order and return handles containing sequence, thread id, and Temporal-visible identity.
+- New activations and operation resolutions are rejected while prior emitted commands remain unconsumed, so tests must acknowledge the full side-effect set from each activation.
+- Activity/timer completions resolve exact handles, allowing out-of-order completion after all emitted commands have been consumed.
+- Signals, updates, queries, and workflow cancellation are explicit workflow inputs. Update responses remain observable commands; query responses are returned as `{:ok, value}` or `{:error, reason}`.
+- `assert_replay/1` replays the recorded activation transcript against the same workflow module and checks command decisions.
+
+Test evidence:
+
+- `mix test test/temporalex/testing_test.exs`: 8 tests, 0 failures.
+- `mix test`: 92 tests, 0 failures, 2 external tests excluded.
+- `mix test --only external`: 2 tests, 0 failures.
+- `mix compile --warnings-as-errors`: success.
+- `mix format --check-formatted`: success.
+- `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
+- `cargo fmt --manifest-path native/temporalex_nif/Cargo.toml --check`: success.
+
 ## Native Integration Review
 
 Status: completed.

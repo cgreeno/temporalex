@@ -255,11 +255,13 @@ Status: open.
 
 Current coverage:
 
+- `Temporalex.Testing` provides a public, local workflow testing surface that runs workflows through the real executor, exposes emitted activity/timer/update commands in deterministic order, lets tests resolve operation handles manually, and replays recorded activation transcripts.
 - The real Temporal dev-server integration test covers standalone client startup, worker startup from an explicit client, workflow start/result, timers, activities, heartbeats, signal/query/update/describe, termination, continue-as-new chains, activity retry/non-retryable behavior, Search Attribute visibility, and one invalid start option path.
 - Core tests cover deterministic command emission, replay mismatch, phase/update/query behavior, patch markers, and process teardown for the implemented surface.
 
 Missing production-confidence tests:
 
+- More consumer-style workflow tests for cancellation cleanup, async handlers, and update handlers using `Temporalex.Testing`.
 - Additional Search Attribute visibility cases beyond the current start/upsert smoke path, if needed.
 - Additional real-server cancellation permutations beyond the current timer and activity cases, if needed.
 - Workflow ID reuse/conflict policies against running and closed workflows.

@@ -17,7 +17,9 @@ The tests should prove:
 - runner and executor process lifecycle behaves correctly
 - signals, updates, phases, and parallel branches obey the programming model
 
-The test harness should become the foundation for `Temporalex.Testing`, not throwaway test code.
+The test harness is the foundation for `Temporalex.Testing`, the public local
+workflow testing API. The core harness remains lower-level so internal tests can
+assert exact activation/completion structs directly.
 
 ## Harness Shape
 
