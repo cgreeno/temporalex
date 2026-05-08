@@ -4,6 +4,7 @@ use rustler::types::elixir_struct::{get_ex_struct_name, make_ex_struct};
 use rustler::types::list::ListIterator;
 use rustler::{Atom, Binary, Env, LocalPid, MapIterator, Monitor, NewBinary, OwnedEnv};
 use rustler::{Decoder, Encoder, Resource, ResourceArc, Term};
+use serde_json::{Number as JsonNumber, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use temporalio_client::{
@@ -141,6 +142,7 @@ rustler::atoms! {
     source,
     details,
     type_atom = "type",
+    value,
     force_cause,
     timeout,
     start_to_close_timeout,
@@ -191,6 +193,13 @@ rustler::atoms! {
     try_cancel,
     wait_cancellation_completed,
     abandon,
+    bool_atom = "bool",
+    datetime,
+    double,
+    int,
+    keyword,
+    keyword_list,
+    text,
     allow_duplicate,
     allow_duplicate_failed_only,
     reject_duplicate,
@@ -1552,6 +1561,14 @@ fn term_to_json_value(term: Term) -> serde_json::Value {
     serde_json::Value::String(format!("<unsupported term: {:?}>", term))
 }
 
+fn json_payload_from_value(value: JsonValue) -> anyhow::Result<Payload> {
+    Ok(Payload {
+        metadata: HashMap::from([("encoding".to_string(), JSON_ENCODING.to_vec())]),
+        data: serde_json::to_vec(&value)?,
+        external_payloads: vec![],
+    })
+}
+
 fn payload_to_term<'a>(env: Env<'a>, payload: &Payload) -> anyhow::Result<Term<'a>> {
     let data = payload.data.as_slice();
     let encoding = payload
@@ -2269,7 +2286,7 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
             workflow_command::Variant::UpsertWorkflowSearchAttributes(
                 UpsertWorkflowSearchAttributes {
                     search_attributes: Some(SearchAttributes {
-                        indexed_fields: term_to_payload_map(map_get(command, attrs())?)?,
+                        indexed_fields: term_to_search_attributes_map(map_get(command, attrs())?)?,
                     }),
                 },
             )
@@ -2742,6 +2759,102 @@ fn term_to_payload_map(term: Term) -> anyhow::Result<HashMap<String, Payload>> {
     Ok(headers)
 }
 
+fn term_to_search_attributes_map(term: Term) -> anyhow::Result<HashMap<String, Payload>> {
+    let iterator =
+        MapIterator::new(term).ok_or_else(|| anyhow!("search_attributes option must be a map"))?;
+    let mut attrs = HashMap::new();
+
+    for (key, value) in iterator {
+        attrs.insert(
+            decode_term::<String>(key)?,
+            search_attribute_payload_from_term(value)?,
+        );
+    }
+
+    Ok(attrs)
+}
+
+fn search_attribute_payload_from_term(term: Term) -> anyhow::Result<Payload> {
+    json_payload_from_value(search_attribute_json_from_term(term)?)
+}
+
+fn search_attribute_json_from_term(term: Term) -> anyhow::Result<JsonValue> {
+    if term.is_map() {
+        if let Ok(type_term) = map_get(term, type_atom()) {
+            let value_term = map_get(term, value())
+                .map_err(|_| anyhow!("typed Search Attribute values must include :value"))?;
+            return typed_search_attribute_json(type_term, value_term);
+        }
+    }
+
+    if let Ok(value) = term.decode::<bool>() {
+        return Ok(JsonValue::Bool(value));
+    }
+
+    if let Ok(value) = term.decode::<i64>() {
+        return Ok(JsonValue::Number(JsonNumber::from(value)));
+    }
+
+    if let Ok(value) = term.decode::<f64>() {
+        return json_number_from_f64(value);
+    }
+
+    if let Ok(value) = term.decode::<String>() {
+        return Ok(JsonValue::String(value));
+    }
+
+    if let Ok(iter) = term.decode::<ListIterator>() {
+        let values = iter
+            .map(decode_term::<String>)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        return Ok(JsonValue::Array(
+            values.into_iter().map(JsonValue::String).collect(),
+        ));
+    }
+
+    Err(anyhow!(
+        "search attribute values must be typed values or JSON-compatible bool, integer, float, string, or string list"
+    ))
+}
+
+fn typed_search_attribute_json(type_term: Term, value_term: Term) -> anyhow::Result<JsonValue> {
+    let type_atom_value: Atom = decode_term(type_term)?;
+
+    if type_atom_value == bool_atom() {
+        Ok(JsonValue::Bool(decode_term(value_term)?))
+    } else if type_atom_value == datetime() {
+        Ok(JsonValue::String(decode_term(value_term)?))
+    } else if type_atom_value == double() {
+        if let Ok(value) = value_term.decode::<f64>() {
+            json_number_from_f64(value)
+        } else {
+            let value: i64 = decode_term(value_term)?;
+            json_number_from_f64(value as f64)
+        }
+    } else if type_atom_value == int() {
+        let value: i64 = decode_term(value_term)?;
+        Ok(JsonValue::Number(JsonNumber::from(value)))
+    } else if type_atom_value == keyword() || type_atom_value == text() {
+        Ok(JsonValue::String(decode_term(value_term)?))
+    } else if type_atom_value == keyword_list() {
+        let iter: ListIterator = decode_term(value_term)?;
+        let values = iter
+            .map(decode_term::<String>)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(JsonValue::Array(
+            values.into_iter().map(JsonValue::String).collect(),
+        ))
+    } else {
+        Err(anyhow!("unsupported Search Attribute type"))
+    }
+}
+
+fn json_number_from_f64(value: f64) -> anyhow::Result<JsonValue> {
+    JsonNumber::from_f64(value)
+        .map(JsonValue::Number)
+        .ok_or_else(|| anyhow!("search attribute double values must be finite"))
+}
+
 fn workflow_start_options(
     task_queue: String,
     workflow_id: String,
@@ -2757,7 +2870,7 @@ fn workflow_start_options(
     options.task_timeout =
         duration_option_from_opts(opts, &[task_timeout(), workflow_task_timeout()])?;
     options.cron_schedule = keyword_get_string(opts, cron_schedule())?;
-    options.search_attributes = payload_map_option_from_opts(opts, search_attributes())?;
+    options.search_attributes = search_attributes_option_from_opts(opts)?;
     options.retry_policy = retry_policy_from_opts(opts)?;
     options.header = header_from_opts(opts)?;
     options.static_summary = keyword_get_string(opts, static_summary())?;
@@ -2794,18 +2907,17 @@ fn header_from_opts(opts: Term) -> anyhow::Result<Option<Header>> {
     }
 }
 
-fn payload_map_option_from_opts(
+fn search_attributes_option_from_opts(
     opts: Term,
-    key: Atom,
 ) -> anyhow::Result<Option<HashMap<String, Payload>>> {
-    let Some(term) = keyword_get(opts, key)? else {
+    let Some(term) = keyword_get(opts, search_attributes())? else {
         return Ok(None);
     };
 
     if term.decode::<Atom>().ok() == Some(nil()) {
         Ok(None)
     } else {
-        Ok(Some(term_to_payload_map(term)?))
+        Ok(Some(term_to_search_attributes_map(term)?))
     }
 }
 
@@ -2822,12 +2934,15 @@ fn retry_policy_from_opts(opts: Term) -> anyhow::Result<Option<RetryPolicy>> {
 }
 
 fn retry_policy_from_term(term: Term) -> anyhow::Result<RetryPolicy> {
-    let backoff_coefficient = keyword_get_f64(term, backoff_coefficient())?.unwrap_or(0.0);
-    if backoff_coefficient < 0.0 {
+    let backoff_coefficient = keyword_get_f64(term, backoff_coefficient())?;
+    if let Some(value) = backoff_coefficient
+        && value < 1.0
+    {
         return Err(anyhow!(
-            "retry_policy.backoff_coefficient must be non-negative"
+            "retry_policy.backoff_coefficient must be 1.0 or larger"
         ));
     }
+    let backoff_coefficient = backoff_coefficient.unwrap_or(0.0);
 
     let maximum_attempts = keyword_get_i64(term, maximum_attempts())?.unwrap_or(0);
     if maximum_attempts < 0 || maximum_attempts > i32::MAX as i64 {

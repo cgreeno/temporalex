@@ -8,6 +8,7 @@ defmodule Temporalex.BackendConformanceTest do
   alias Temporalex.Core.ActivityTask
   alias Temporalex.Core.Command
   alias Temporalex.Core.Completion
+  alias Temporalex.SearchAttribute
 
   defmodule Workflow do
     use Temporalex.Workflow
@@ -87,7 +88,12 @@ defmodule Temporalex.BackendConformanceTest do
                    {:ok,
                     [
                       %Command.StartTimer{seq: 0, duration_ms: 10},
-                      %Command.UpsertSearchAttributes{attrs: %{"CustomKeywordField" => "alpha"}}
+                      %Command.UpsertSearchAttributes{
+                        attrs: %{
+                          "CustomKeywordField" => SearchAttribute.keyword("alpha"),
+                          "CustomIntField" => SearchAttribute.int(7)
+                        }
+                      }
                     ]}
                },
                task_queue: "temporalex-test"
@@ -142,5 +148,74 @@ defmodule Temporalex.BackendConformanceTest do
              )
 
     assert activity_reason =~ "retry_policy.initial_interval must be non-negative"
+
+    assert {:error, backoff_reason} =
+             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+               %Completion{
+                 run_id: "run-invalid-backoff",
+                 status:
+                   {:ok,
+                    [
+                      %Command.ScheduleActivity{
+                        seq: 0,
+                        thread_id: [],
+                        activity_id: "activity",
+                        type: "Example.activity",
+                        input: [],
+                        opts: [
+                          start_to_close_timeout: 10,
+                          retry_policy: [backoff_coefficient: 0.5]
+                        ]
+                      }
+                    ]}
+               },
+               task_queue: "temporalex-test"
+             )
+
+    assert backoff_reason =~ "retry_policy.backoff_coefficient must be 1.0 or larger"
+
+    assert {:error, zero_backoff_reason} =
+             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+               %Completion{
+                 run_id: "run-invalid-zero-backoff",
+                 status:
+                   {:ok,
+                    [
+                      %Command.ScheduleActivity{
+                        seq: 0,
+                        thread_id: [],
+                        activity_id: "activity",
+                        type: "Example.activity",
+                        input: [],
+                        opts: [
+                          start_to_close_timeout: 10,
+                          retry_policy: [backoff_coefficient: 0.0]
+                        ]
+                      }
+                    ]}
+               },
+               task_queue: "temporalex-test"
+             )
+
+    assert zero_backoff_reason =~ "retry_policy.backoff_coefficient must be 1.0 or larger"
+  end
+
+  test "TemporalCore codec rejects invalid search attribute values" do
+    assert {:error, reason} =
+             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+               %Completion{
+                 run_id: "run-invalid-search-attrs",
+                 status:
+                   {:ok,
+                    [
+                      %Command.UpsertSearchAttributes{
+                        attrs: %{"CustomKeywordField" => %{unsupported: :map}}
+                      }
+                    ]}
+               },
+               task_queue: "temporalex-test"
+             )
+
+    assert reason =~ "search attribute values must be typed values"
   end
 end

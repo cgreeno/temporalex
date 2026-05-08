@@ -81,6 +81,27 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
     end
   end
 
+  defmodule SearchAttributeWorkflow do
+    use Temporalex.Workflow
+
+    alias Temporalex.SearchAttribute
+    alias Temporalex.Workflow.API
+
+    def handle_query("state", _args, state), do: {:reply, state}
+
+    def run(label) do
+      :ok =
+        API.upsert_search_attributes(%{
+          "CustomKeywordField" => SearchAttribute.keyword("upserted-#{label}"),
+          "CustomIntField" => SearchAttribute.int(8)
+        })
+
+      API.publish_state(:upserted)
+      API.sleep(60_000)
+      {:ok, :done}
+    end
+  end
+
   test "TemporalCore worker runs workflow tasks, activities, and client operations against dev server" do
     temporal =
       System.find_executable("temporal") || flunk("temporal CLI executable was not found")
@@ -106,7 +127,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
           target: "http://127.0.0.1:#{port}",
           namespace: "default",
           task_queue: task_queue,
-          workflows: [Workflow, InteractiveWorkflow, WaitingWorkflow],
+          workflows: [Workflow, InteractiveWorkflow, WaitingWorkflow, SearchAttributeWorkflow],
           activities: [Activities],
           max_workflow_pollers: 2,
           max_activity_pollers: 2,
@@ -203,6 +224,49 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
         assert {:error, {:terminated, [:terminated_by_test]}} =
                  Temporalex.Client.get_result(terminated, timeout: 30_000)
+
+        search_id = "temporalex-search-attrs-#{System.unique_integer([:positive])}"
+        search_label = "search-#{System.unique_integer([:positive])}"
+
+        search_attributes = %{
+          "CustomKeywordField" => Temporalex.SearchAttribute.keyword("started-#{search_label}"),
+          "CustomTextField" => Temporalex.SearchAttribute.text("temporalex search text"),
+          "CustomIntField" => Temporalex.SearchAttribute.int(7),
+          "CustomDoubleField" => Temporalex.SearchAttribute.double(2.5),
+          "CustomBoolField" => Temporalex.SearchAttribute.bool(true),
+          "CustomDatetimeField" => Temporalex.SearchAttribute.datetime(~U[2026-05-08 12:00:00Z]),
+          "CustomKeywordListField" => Temporalex.SearchAttribute.keyword_list(["alpha", "beta"])
+        }
+
+        assert {:ok, search_handle} =
+                 Temporalex.Client.start_workflow(
+                   worker_name,
+                   SearchAttributeWorkflow,
+                   search_label,
+                   workflow_id: search_id,
+                   search_attributes: search_attributes,
+                   timeout: 10_000
+                 )
+
+        assert eventually(fn ->
+                 Temporalex.Client.query_workflow(search_handle, "state", [], timeout: 10_000) ==
+                   {:ok, :upserted}
+               end)
+
+        assert eventually(fn ->
+                 workflow_visible?(
+                   temporal,
+                   port,
+                   "CustomKeywordField = 'upserted-#{search_label}' and CustomIntField = 8",
+                   search_id
+                 )
+               end)
+
+        assert :ok =
+                 Temporalex.Client.terminate_workflow(search_handle,
+                   reason: "integration test complete",
+                   timeout: 10_000
+                 )
       after
         if Process.alive?(worker_pid) do
           Supervisor.stop(worker_pid, :normal, 15_000)
@@ -235,7 +299,21 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
           "--metrics-port",
           Integer.to_string(metrics_port),
           "--log-level",
-          "error"
+          "error",
+          "--search-attribute",
+          "CustomKeywordField=Keyword",
+          "--search-attribute",
+          "CustomTextField=Text",
+          "--search-attribute",
+          "CustomIntField=Int",
+          "--search-attribute",
+          "CustomDoubleField=Double",
+          "--search-attribute",
+          "CustomBoolField=Bool",
+          "--search-attribute",
+          "CustomDatetimeField=Datetime",
+          "--search-attribute",
+          "CustomKeywordListField=KeywordList"
         ]
       ]
     )
@@ -290,6 +368,28 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
       {_port, {:exit_status, _status}} -> drain_port_messages()
     after
       100 -> :ok
+    end
+  end
+
+  defp workflow_visible?(temporal, port, query, workflow_id) do
+    case System.cmd(
+           temporal,
+           [
+             "workflow",
+             "list",
+             "--address",
+             "127.0.0.1:#{port}",
+             "--namespace",
+             "default",
+             "--query",
+             query,
+             "--limit",
+             "10"
+           ],
+           stderr_to_stdout: true
+         ) do
+      {output, 0} -> output =~ workflow_id
+      {_output, _status} -> false
     end
   end
 

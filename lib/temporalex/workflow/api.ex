@@ -187,7 +187,7 @@ defmodule Temporalex.Workflow.API do
   end
 
   def upsert_search_attributes(attrs) when is_map(attrs) do
-    call(%Op.UpsertSearchAttributes{attrs: attrs})
+    call(%Op.UpsertSearchAttributes{attrs: Temporalex.SearchAttribute.validate_map!(attrs)})
   end
 
   def parallel(funs) when is_list(funs) do
