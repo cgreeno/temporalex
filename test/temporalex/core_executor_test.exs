@@ -51,7 +51,48 @@ defmodule Temporalex.CoreExecutorTest do
   defmodule ContinueWorkflow do
     use Temporalex.Workflow
 
-    def run(args), do: {:continue_as_new, args}
+    def run(input) do
+      API.continue_as_new!(input)
+      {:ok, :unreachable}
+    end
+  end
+
+  defmodule ContinueWithOptionsWorkflow do
+    use Temporalex.Workflow
+
+    def run(input) do
+      API.continue_as_new!(%{next: input},
+        workflow_type: CompleteWorkflow,
+        task_queue: "next-task-queue",
+        run_timeout: 20_000,
+        task_timeout: 3_000,
+        memo: %{generation: input},
+        headers: %{trace: "continue"},
+        search_attributes: %{
+          "CustomKeywordField" => SearchAttribute.keyword("continued"),
+          "CustomIntField" => SearchAttribute.int(9)
+        },
+        retry_policy: [initial_interval: 10, maximum_attempts: 3],
+        versioning_intent: :compatible,
+        initial_versioning_behavior: :auto_upgrade
+      )
+
+      {:ok, :unreachable}
+    end
+  end
+
+  defmodule ContinueFromParallelWorkflow do
+    use Temporalex.Workflow
+
+    def run(input) do
+      {:error,
+       API.parallel!([
+         fn ->
+           API.continue_as_new!(input)
+           :unreachable
+         end
+       ])}
+    end
   end
 
   defmodule CancelledWorkflow do
@@ -632,6 +673,7 @@ defmodule Temporalex.CoreExecutorTest do
 
       assert {:ok, exec} = TestHarness.start_workflow(ContinueWorkflow, [:next])
       assert {:continue_as_new, [:next]} = TestHarness.next(exec)
+      assert TestHarness.thread_states(exec) == %{}
 
       assert {:ok, exec} = TestHarness.start_workflow(CancelledWorkflow, nil)
       assert {:yield, [%Command.CancelWorkflow{}]} = TestHarness.next(exec)
@@ -647,6 +689,75 @@ defmodule Temporalex.CoreExecutorTest do
       # the Rust encoder can map them to the right Temporal Failure variant.
       assert {:complete, {:error, %RuntimeError{message: "boom"}}} =
                TestHarness.next(exec)
+    end
+
+    test "continue_as_new! emits a terminal command with explicit options" do
+      assert {:ok, exec} = TestHarness.start_workflow(ContinueWithOptionsWorkflow, 1)
+
+      completion =
+        TestHarness.activate_raw(exec, [
+          %Job.InitializeWorkflow{
+            workflow_type: inspect(ContinueWithOptionsWorkflow),
+            workflow_id: "wf-continue-options",
+            arguments: [1],
+            workflow_info: %{},
+            randomness_seed: 0
+          }
+        ])
+
+      assert {:ok, [%Command.ContinueAsNew{} = command]} = completion.status
+      assert command.input == %{next: 1}
+      assert command.workflow_type == CompleteWorkflow.__workflow_type__()
+      assert command.task_queue == "next-task-queue"
+
+      assert command.opts[:memo] == %{"generation" => 1}
+      assert command.opts[:headers] == %{"trace" => "continue"}
+
+      assert command.opts[:search_attributes] == %{
+               "CustomKeywordField" => SearchAttribute.keyword("continued"),
+               "CustomIntField" => SearchAttribute.int(9)
+             }
+
+      assert command.opts[:retry_policy] == [initial_interval: 10, maximum_attempts: 3]
+      assert command.opts[:versioning_intent] == :compatible
+      assert command.opts[:initial_versioning_behavior] == :auto_upgrade
+      assert TestHarness.thread_states(exec) == %{}
+    end
+
+    test "continue_as_new! replay identity includes options" do
+      expected = %Command.ContinueAsNew{
+        input: %{next: 1},
+        workflow_type: CompleteWorkflow.__workflow_type__(),
+        task_queue: "next-task-queue",
+        opts: [
+          workflow_type: CompleteWorkflow.__workflow_type__(),
+          task_queue: "other-task-queue",
+          run_timeout: 20_000,
+          task_timeout: 3_000,
+          memo: %{"generation" => 1},
+          headers: %{"trace" => "continue"},
+          search_attributes: %{
+            "CustomKeywordField" => SearchAttribute.keyword("continued"),
+            "CustomIntField" => SearchAttribute.int(9)
+          },
+          retry_policy: [initial_interval: 10, maximum_attempts: 3],
+          versioning_intent: :compatible,
+          initial_versioning_behavior: :auto_upgrade
+        ]
+      }
+
+      assert {:ok, exec} = TestHarness.start_workflow(ContinueWithOptionsWorkflow, 1)
+
+      assert {:failed, %Nondeterminism{}} =
+               TestHarness.next(exec, replay: true, expected_commands: [expected])
+    end
+
+    test "continue_as_new! is rejected outside the root workflow thread" do
+      assert {:ok, exec} = TestHarness.start_workflow(ContinueFromParallelWorkflow, :next)
+
+      assert {:complete, {:error, results}} = TestHarness.next(exec)
+      assert [{:error, {:exception, %RuntimeError{} = error, _stack}}] = results
+      assert error.message =~ "may only be called from the root workflow thread"
     end
 
     test "activity commands block and resume by sequence number" do
@@ -870,21 +981,31 @@ defmodule Temporalex.CoreExecutorTest do
                TestHarness.start_workflow(InfoWorkflow, nil, timestamp: ~U[2026-05-07 12:00:00Z])
 
       assert {:complete, {:ok, result}} =
-               TestHarness.activate(exec, [
-                 %Job.InitializeWorkflow{
-                   workflow_type: inspect(InfoWorkflow),
-                   workflow_id: "wf-info",
-                   arguments: [nil],
-                   workflow_info: %{task_queue: "test"},
-                   randomness_seed: 0
-                 },
-                 %Job.CancelWorkflow{reason: :requested}
-               ])
+               TestHarness.activate(
+                 exec,
+                 [
+                   %Job.InitializeWorkflow{
+                     workflow_type: inspect(InfoWorkflow),
+                     workflow_id: "wf-info",
+                     arguments: [nil],
+                     workflow_info: %{task_queue: "test"},
+                     randomness_seed: 0
+                   },
+                   %Job.CancelWorkflow{reason: :requested}
+                 ],
+                 history_length: 42,
+                 history_size_bytes: 4_200,
+                 continue_as_new_suggested: true
+               )
 
       assert result.cancelled? == true
       assert result.now == ~U[2026-05-07 12:00:00Z]
       assert result.info.workflow_id == "wf-info"
       assert result.info.task_queue == "test"
+      assert result.info.history_length == 42
+      assert result.info.history_size_bytes == 4_200
+      assert result.info.continue_as_new_suggested == true
+      assert result.info.timestamp == ~U[2026-05-07 12:00:00Z]
     end
 
     test "deterministic random and UUID derive from replayed seed" do

@@ -85,7 +85,8 @@ end
 `run/1` receives the decoded workflow input and returns:
 - `{:ok, result}` — Workflow completes successfully.
 - `{:error, reason}` — Workflow fails.
-- `{:continue_as_new, args}` — Workflow restarts with fresh history and the provided arguments.
+
+Use `API.continue_as_new!/2` to continue as new. It is a terminal operation: once the executor accepts it, workflow-owned processes are torn down and user code after the call does not run.
 
 Any other return shape is invalid and fails the workflow with a clear error.
 
@@ -400,7 +401,9 @@ run/1 (sequential, not a concurrency host)
 Return values from run/1:
   {:ok, result}             → CompleteWorkflowExecution
   {:error, reason}          → FailWorkflowExecution
-  {:continue_as_new, args}  → ContinueAsNewWorkflowExecution
+
+Terminal workflow operation:
+  API.continue_as_new!(input, opts) → ContinueAsNewWorkflowExecution
 ```
 
 ---
@@ -615,7 +618,7 @@ defmodule MyApp.Workflows.EventCollector do
       {:ok, _} = Activities.EventStore.batch_insert(state.events)
 
       # Continue with fresh state
-      {:continue_as_new, %{state: %{events: [], generation: state.generation + 1}}}
+      API.continue_as_new!(%{state: %{events: [], generation: state.generation + 1}})
     end)
   end
 end
@@ -721,7 +724,7 @@ The programming model maps to the Temporal Core SDK's activation/command protoco
 | `API.parallel(fns)` / `API.parallel!(fns)` | Multiple commands in one activation (e.g. multiple `ScheduleActivity`) |
 | `API.publish_state` | No command (executor state for query serving) |
 | `API.update_state` | No command (executor-internal state transformation) |
-| `{:continue_as_new, args}` | `ContinueAsNewWorkflowExecution` |
+| `API.continue_as_new!(input, opts)` | `ContinueAsNewWorkflowExecution` |
 | `API.patched?(id)` | `SetPatchMarker` (or reads `NotifyHasPatch` from activation) |
 | `API.deprecate_patch(id)` | `SetPatchMarker` with deprecated flag |
 

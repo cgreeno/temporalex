@@ -95,6 +95,8 @@ defmodule Temporalex.Core.TestHarness do
       timestamp: Keyword.get(opts, :timestamp, harness.timestamp),
       is_replaying: Keyword.get(opts, :replay, false),
       history_length: Keyword.get(opts, :history_length, 0),
+      history_size_bytes: Keyword.get(opts, :history_size_bytes),
+      continue_as_new_suggested: Keyword.get(opts, :continue_as_new_suggested, false),
       jobs: jobs
     }
 
@@ -133,7 +135,7 @@ defmodule Temporalex.Core.TestHarness do
         case activate(harness, jobs, replay: true, expected_commands: commands) do
           {:failed, reason} -> {:halt, {:failed, reason}}
           {:complete, result} -> {:cont, {:ok, result}}
-          {:continue_as_new, args} -> {:cont, {:continue_as_new, args}}
+          {:continue_as_new, input} -> {:cont, {:continue_as_new, input}}
           other -> {:cont, other}
         end
       end)
@@ -178,8 +180,8 @@ defmodule Temporalex.Core.TestHarness do
       {:complete, {:error, reason}} ->
         {:ok, transcript, {:error, reason}}
 
-      {:continue_as_new, args} ->
-        {:ok, transcript, {:continue_as_new, args}}
+      {:continue_as_new, input} ->
+        {:ok, transcript, {:continue_as_new, input}}
 
       {:failed, reason} ->
         {:failed, reason, transcript}
@@ -217,8 +219,8 @@ defmodule Temporalex.Core.TestHarness do
       %Command.FailWorkflow{reason: reason} ->
         {:complete, {:error, reason}}
 
-      %Command.ContinueAsNew{args: args} ->
-        {:continue_as_new, args}
+      %Command.ContinueAsNew{input: input} ->
+        {:continue_as_new, input}
 
       nil when commands != [] ->
         {:yield, commands}

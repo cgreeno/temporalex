@@ -691,13 +691,26 @@ defmodule Temporalex.Core.Executor do
     end
   end
 
+  defp handle_workflow_op(state, from, thread_id, %Op.ContinueAsNew{} = op) do
+    case validate_continue_as_new_call(state, thread_id) do
+      :ok ->
+        state
+        |> append_command(continue_as_new_command(state, op))
+        |> teardown_threads()
+
+      {:error, reason} ->
+        reply_error(from, reason)
+        state
+    end
+  end
+
   defp handle_workflow_op(state, from, _thread_id, %Op.PublishState{state: published_state}) do
     reply_ok(from, :ok)
     %{state | published_state: published_state}
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.WorkflowInfo{}) do
-    reply_ok(from, state.workflow_info)
+    reply_ok(from, workflow_info(state))
     state
   end
 
@@ -894,6 +907,77 @@ defmodule Temporalex.Core.Executor do
       {:ok, %Thread{non_cancellable_depth: depth}} -> depth == 0
       :error -> true
     end
+  end
+
+  defp workflow_info(state) do
+    Map.merge(state.workflow_info || %{}, %{
+      workflow_id: state.workflow_id,
+      workflow_type: state.workflow_type,
+      run_id: state.run_id,
+      timestamp: state.timestamp,
+      is_replaying: state.is_replaying,
+      history_length: state.history_length,
+      history_size_bytes: state.history_size_bytes,
+      continue_as_new_suggested: state.continue_as_new_suggested
+    })
+  end
+
+  defp validate_continue_as_new_call(state, thread_id) do
+    cond do
+      thread_id != [] ->
+        {:error,
+         %RuntimeError{
+           message: "continue_as_new!/2 may only be called from the root workflow thread"
+         }}
+
+      state.running != [] ->
+        {:error,
+         %RuntimeError{
+           message: "continue_as_new!/2 may only be called by the running root workflow thread"
+         }}
+
+      live_thread_ids(state) != [[]] ->
+        {:error,
+         %RuntimeError{
+           message:
+             "continue_as_new!/2 requires the root workflow thread to be the only live workflow thread"
+         }}
+
+      map_size(state.pending) != 0 ->
+        {:error,
+         %RuntimeError{
+           message: "continue_as_new!/2 cannot run while workflow operations are pending"
+         }}
+
+      map_size(state.parallel_scopes) != 0 ->
+        {:error,
+         %RuntimeError{
+           message: "continue_as_new!/2 cannot run while parallel branches are active"
+         }}
+
+      state.phase != nil ->
+        {:error,
+         %RuntimeError{message: "continue_as_new!/2 cannot run while a workflow phase is active"}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp live_thread_ids(state) do
+    state.threads
+    |> Enum.filter(fn {_id, thread} -> thread.status in [:ready, :running, :blocked] end)
+    |> Enum.map(fn {id, _thread} -> id end)
+    |> Enum.sort()
+  end
+
+  defp continue_as_new_command(state, %Op.ContinueAsNew{input: input, opts: opts}) do
+    %Command.ContinueAsNew{
+      input: input,
+      workflow_type: Keyword.get(opts, :workflow_type, state.workflow_type),
+      task_queue: Keyword.get(opts, :task_queue),
+      opts: opts
+    }
   end
 
   defp put_pending(%State{activation_failed: reason} = state, _seq, _thread_id, _from, _op)
@@ -1637,10 +1721,6 @@ defmodule Temporalex.Core.Executor do
     append_command(state, %Command.FailWorkflow{reason: reason})
   end
 
-  defp complete_root_thread(state, {:continue_as_new, args}) do
-    append_command(state, %Command.ContinueAsNew{args: args, workflow_type: state.workflow_type})
-  end
-
   defp complete_root_thread(state, {:cancelled, reason}) do
     append_command(state, %Command.CancelWorkflow{reason: cancellation_from_reason(reason)})
   end
@@ -2015,7 +2095,10 @@ defmodule Temporalex.Core.Executor do
     do: {:complete_workflow, command.result}
 
   defp command_identity(%Command.FailWorkflow{} = command), do: {:fail_workflow, command.reason}
-  defp command_identity(%Command.ContinueAsNew{} = command), do: {:continue_as_new, command.args}
+
+  defp command_identity(%Command.ContinueAsNew{} = command) do
+    {:continue_as_new, command.input, command.workflow_type, command.task_queue, command.opts}
+  end
 
   defp command_identity(%Command.CancelWorkflow{} = command),
     do: {:cancel_workflow, command.reason}

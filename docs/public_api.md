@@ -31,9 +31,10 @@ __workflow_defaults__/0
 ```elixir
 {:ok, result}
 {:error, reason}
-{:continue_as_new, args}
 {:cancelled, reason}
 ```
+
+Use `API.continue_as_new!/2` to continue as new. It is a terminal operation and does not return to workflow code after the executor accepts it.
 
 `handle_query/3` is optional. It receives query name, query args, and the last state published by `API.publish_state/1`.
 
@@ -147,6 +148,7 @@ API.phase!(initial_state, opts)
 API.parallel(funs)
 API.parallel!(funs)
 API.update_state(fun)
+API.continue_as_new!(input, opts)
 API.workflow_info()
 API.cancelled?()
 API.cancellation()

@@ -89,8 +89,9 @@ defmodule Temporalex.Core.TraceGuard do
     {:erlang, :unique_integer, 1},
     {:erlang, :universaltime, 0},
     {:crypto, :strong_rand_bytes, 1},
+    # OTP/Elixir internals can read specific persistent terms during normal code execution.
+    # Trace sessions do not expose enough caller context to distinguish those from user reads.
     {:persistent_term, :get, 0},
-    {:persistent_term, :get, 1},
     {Application, :fetch_env, 2},
     {Application, :fetch_env!, 2},
     {Application, :get_all_env, 1},

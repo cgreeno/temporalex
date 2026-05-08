@@ -159,6 +159,36 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
     end
   end
 
+  defmodule ContinueAsNewWorkflow do
+    use Temporalex.Workflow
+
+    alias Temporalex.SearchAttribute
+    alias Temporalex.Workflow.API
+
+    def run(%{count: count, target: target, label: label, task_queue: task_queue} = input)
+        when count < target do
+      API.continue_as_new!(%{input | count: count + 1},
+        task_queue: task_queue,
+        run_timeout: 60_000,
+        task_timeout: 10_000,
+        memo: %{label: label, count: count + 1},
+        headers: %{source: "continue-as-new"},
+        search_attributes: %{
+          "CustomKeywordField" => SearchAttribute.keyword("continued-#{label}"),
+          "CustomIntField" => SearchAttribute.int(count + 1)
+        },
+        retry_policy: [initial_interval: 10, maximum_attempts: 2]
+      )
+
+      {:ok, :unreachable}
+    end
+
+    def run(%{count: count}) do
+      info = API.workflow_info()
+      {:ok, {:continued, count, info.continue_as_new_suggested}}
+    end
+  end
+
   defmodule FailureWorkflow do
     use Temporalex.Workflow
 
@@ -230,6 +260,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
             WaitingWorkflow,
             ActivityCancellationWorkflow,
             SearchAttributeWorkflow,
+            ContinueAsNewWorkflow,
             FailureWorkflow,
             ActivityFailureWorkflow
           ],
@@ -419,6 +450,30 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    reason: "integration test complete",
                    timeout: 10_000
                  )
+
+        continue_id = "temporalex-continue-as-new-#{System.unique_integer([:positive])}"
+        continue_label = "continue-#{System.unique_integer([:positive])}"
+
+        assert {:ok, continue_handle} =
+                 Temporalex.Client.start_workflow(
+                   worker_name,
+                   ContinueAsNewWorkflow,
+                   %{count: 0, target: 2, label: continue_label, task_queue: task_queue},
+                   workflow_id: continue_id,
+                   timeout: 10_000
+                 )
+
+        assert {:ok, {:continued, 2, false}} =
+                 Temporalex.Client.get_result(continue_handle, timeout: 30_000)
+
+        assert eventually(fn ->
+                 workflow_visible?(
+                   temporal,
+                   port,
+                   "CustomKeywordField = 'continued-#{continue_label}' and CustomIntField = 2",
+                   continue_id
+                 )
+               end)
 
         non_retryable_workflow_id =
           "temporalex-non-retryable-workflow-#{System.unique_integer([:positive])}"

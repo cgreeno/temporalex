@@ -10,6 +10,20 @@ defmodule Temporalex.Workflow.API do
 
   @context_key :__temporal_context__
   @op_reply :temporalex_op_reply
+  @continue_as_new_opts [
+    :workflow_type,
+    :task_queue,
+    :run_timeout,
+    :workflow_run_timeout,
+    :task_timeout,
+    :workflow_task_timeout,
+    :memo,
+    :headers,
+    :search_attributes,
+    :retry_policy,
+    :versioning_intent,
+    :initial_versioning_behavior
+  ]
 
   def execute_activity(type, input, opts \\ []) when is_binary(type) and is_list(input) do
     case call(%Op.ExecuteActivity{type: type, input: input, opts: opts}) do
@@ -186,6 +200,22 @@ defmodule Temporalex.Workflow.API do
     call!(%Op.WaitForSignal{name: name})
   end
 
+  @spec continue_as_new!(term(), keyword()) :: no_return()
+  def continue_as_new!(input, opts \\ []) when is_list(opts) do
+    opts = normalize_continue_as_new_opts!(opts)
+
+    case call(%Op.ContinueAsNew{input: input, opts: opts}) do
+      {:ok, value} ->
+        raise "Temporalex continue_as_new!/2 returned unexpectedly: #{inspect(value)}"
+
+      {:cancelled, error} ->
+        raise cancellation_error(error)
+
+      {:error, reason} ->
+        raise_error(reason)
+    end
+  end
+
   def publish_state(state) do
     call!(%Op.PublishState{state: state})
   end
@@ -299,6 +329,60 @@ defmodule Temporalex.Workflow.API do
   end
 
   def context_key, do: @context_key
+
+  defp normalize_continue_as_new_opts!(opts) do
+    unknown = Keyword.keys(opts) -- @continue_as_new_opts
+
+    if unknown != [] do
+      raise ArgumentError, "unknown continue_as_new! option(s): #{inspect(unknown)}"
+    end
+
+    opts
+    |> maybe_update(:workflow_type, &normalize_workflow_type!/1)
+    |> maybe_update(:headers, &normalize_payload_map_option!/1)
+    |> maybe_update(:memo, &normalize_payload_map_option!/1)
+    |> maybe_update(:search_attributes, &normalize_search_attributes_option!/1)
+  end
+
+  defp normalize_workflow_type!(workflow_type) when is_binary(workflow_type), do: workflow_type
+
+  defp normalize_workflow_type!(workflow_module) when is_atom(workflow_module) do
+    if function_exported?(workflow_module, :__workflow_type__, 0) do
+      workflow_module.__workflow_type__()
+    else
+      inspect(workflow_module)
+    end
+  end
+
+  defp normalize_payload_map_option!(nil), do: %{}
+
+  defp normalize_payload_map_option!(map) when is_map(map) do
+    Map.new(map, fn {key, value} -> {to_string(key), value} end)
+  end
+
+  defp normalize_payload_map_option!(other) do
+    raise ArgumentError,
+          "continue_as_new! payload map options must be maps, got: #{inspect(other)}"
+  end
+
+  defp normalize_search_attributes_option!(nil), do: nil
+
+  defp normalize_search_attributes_option!(attrs) when is_map(attrs) do
+    Temporalex.SearchAttribute.validate_map!(attrs)
+  end
+
+  defp normalize_search_attributes_option!(other) do
+    raise ArgumentError,
+          "continue_as_new! search_attributes option must be a map, got: #{inspect(other)}"
+  end
+
+  defp maybe_update(opts, key, fun) do
+    if Keyword.has_key?(opts, key) do
+      Keyword.update!(opts, key, fun)
+    else
+      opts
+    end
+  end
 
   defp call(op) do
     %Context{executor: executor, thread_id: thread_id} = context!()

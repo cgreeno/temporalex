@@ -110,11 +110,38 @@ Findings:
 - Safe-mode violations use the existing runtime abort path in `:fail` mode. Worker/server execution defaults to `:off`; the core test harness defaults to `:fail`.
 - Message tracing allows only the executor protocol, runner result messages, operation replies, runner start messages, and code-server traffic needed for lazy module loading.
 - Call tracing catches common nondeterminism hazards for time, randomness, filesystem, environment/config access, mutable external stores, process/task spawning, sleeps, ports, and OS access.
+- `:persistent_term.get/1` is not call-traced because OTP/Elixir internals can use it during normal traced workflow execution; trace sessions do not expose enough caller context to distinguish those runtime reads from user reads.
 
 Test evidence:
 
-- `mix test test/temporalex/core_executor_test.exs`: 56 tests, 0 failures.
-- `mix test`: 80 tests, 0 failures, 2 external tests excluded.
+- `mix test test/temporalex/core_executor_test.exs`: 59 tests, 0 failures.
+- `mix test`: 83 tests, 0 failures, 2 external tests excluded.
+- `mix test --only external`: 2 tests, 0 failures.
+- `mix format --check-formatted`: success.
+- `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
+- `cargo fmt --manifest-path native/temporalex_nif/Cargo.toml --check`: success.
+
+## Continue-As-New Review
+
+Status: completed.
+
+Review date: May 8, 2026.
+
+Findings:
+
+- Continue-as-new is now an explicit terminal workflow operation, `Temporalex.Workflow.API.continue_as_new!/2`, rather than a workflow return tuple.
+- The executor accepts continue-as-new only from the running root workflow thread when it is the only live workflow thread and no phase, parallel scope, or workflow operation is pending.
+- After accepting the terminal command, the executor tears down workflow-owned processes without replying to the blocked caller, so user code after `continue_as_new!/2` does not run.
+- The core command carries input, workflow type, task queue, and options. Replay identity includes all of those fields.
+- Native command encoding covers the Temporal Core continue-as-new fields currently exposed locally: run timeout, task timeout, memo, headers, typed Search Attributes, retry policy, versioning intent, and initial versioning behavior.
+- Workflow info now exposes activation timestamp, replay flag, history length, history size, and `continue_as_new_suggested`.
+- Temporal API's `backoff_start_interval` is not exposed by the local Temporal Core command proto, so Temporalex does not expose that option yet.
+
+Test evidence:
+
+- `mix test test/temporalex/core_executor_test.exs`: 59 tests, 0 failures.
+- `mix test test/temporalex/backend_conformance_test.exs`: 6 tests, 0 failures.
+- `mix test`: 83 tests, 0 failures, 2 external tests excluded.
 - `mix test --only external`: 2 tests, 0 failures.
 - `mix format --check-formatted`: success.
 - `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.

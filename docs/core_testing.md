@@ -158,7 +158,7 @@ Lifecycle tests should exercise real processes:
 
 - runner success becomes `CompleteWorkflow`
 - runner `{:error, reason}` becomes `FailWorkflow`
-- runner `{:continue_as_new, args}` becomes `ContinueAsNew`
+- `API.continue_as_new!/2` becomes terminal `ContinueAsNew`
 - unsupported runner return values become `FailWorkflow`
 - runner crash becomes workflow failure
 - executor crash tears down linked runner

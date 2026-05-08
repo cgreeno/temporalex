@@ -130,7 +130,7 @@ Common commands:
 %Temporalex.Core.Command.SetPatchMarker{id: String.t(), deprecated: boolean()}
 %Temporalex.Core.Command.CompleteWorkflow{result: term()}
 %Temporalex.Core.Command.FailWorkflow{reason: term()}
-%Temporalex.Core.Command.ContinueAsNew{args: term()}
+%Temporalex.Core.Command.ContinueAsNew{input: term(), workflow_type: String.t(), task_queue: String.t() | nil, opts: keyword()}
 %Temporalex.Core.Command.CancelWorkflow{reason: term()}
 %Temporalex.Core.Command.RespondToUpdate{protocol_instance_id: String.t(), response: :accepted | {:completed, term()} | {:rejected, term()}}
 %Temporalex.Core.Command.RespondToQuery{query_id: String.t(), result: {:ok, term()} | {:error, term()}}
@@ -319,8 +319,9 @@ The runner wrapper calls `run/1` and exits with:
 ```elixir
 {:workflow_result, {:ok, result}}
 {:workflow_result, {:error, reason}}
-{:workflow_result, {:continue_as_new, args}}
 ```
+
+Continue-as-new is not a return shape. Workflow code calls `Temporalex.Workflow.API.continue_as_new!/2`, which emits a terminal command and tears down workflow-owned processes without returning to user code.
 
 Any other return shape is an invalid workflow return and becomes a workflow failure command.
 

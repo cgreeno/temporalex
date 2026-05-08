@@ -104,28 +104,35 @@ Remaining follow-up:
 
 ### Continue-As-New Is Under-Modeled
 
-Status: open.
+Status: completed on May 8, 2026.
 
-Current concern:
+Original concern:
 
 - Workflow code can only return `{:continue_as_new, args}`.
 - The NIF encodes only workflow type, task queue, and arguments.
 - Temporal supports run timeout, task timeout, retry policy, header, memo, search attributes, start backoff, and versioning behavior on continue-as-new.
 
+Implemented:
+
+- Added `Workflow.API.continue_as_new!/2` as a terminal workflow operation that does not return to user code after the executor accepts it.
+- Removed the return-tuple path from the executor; continue-as-new now flows through an explicit executor op.
+- Restricted continue-as-new to the running root workflow thread when it is the only live workflow thread, with no active phase, parallel scope, or pending workflow operation.
+- Added continue-as-new options for workflow type, task queue, run timeout, task timeout, memo, headers, typed Search Attributes, retry policy, versioning intent, and initial versioning behavior.
+- Extended workflow info with activation timestamp, replay flag, history length/size, and `continue_as_new_suggested`.
+- Added core tests for terminal behavior, option propagation, replay identity, root-thread enforcement, and workflow info exposure.
+- Added native codec coverage and a Temporal dev-server test for a chained continue-as-new run whose final result is retrieved across runs and whose Search Attributes are visible.
+
 References:
 
-- `../lib/temporalex/core/executor.ex`: root `{:continue_as_new, args}` handling.
+- `../lib/temporalex/workflow/api.ex`: `continue_as_new!/2`.
+- `../lib/temporalex/core/executor.ex`: `Op.ContinueAsNew` handling.
 - `../native/temporalex_nif/src/lib.rs`: `ContinueAsNewWorkflowExecution` command encoding.
 - `../../temporal-api/temporal/api/command/v1/message.proto`: `ContinueAsNewWorkflowExecutionCommandAttributes`.
 - `../../documentation/docs/develop/rust/workflows/continue-as-new.mdx`: continue-as-new usage and suggestion API.
 
-Needed:
+Remaining follow-up:
 
-- Add a workflow API helper for continue-as-new with options.
-- Support continue-as-new options that Temporal Core exposes and that fit deterministic workflow semantics.
-- Carry typed Search Attributes through the new Search Attribute encoder.
-- Expose `continue_as_new_suggested` and history length/size through workflow info if not already complete.
-- Add core tests and real-server tests for chained runs and option propagation.
+- Temporal API exposes `backoff_start_interval`, but the Temporal Core `ContinueAsNewWorkflowExecution` command currently does not expose that field through the local Core command proto. Add it if/when Core exposes it.
 
 ## Medium Priority
 
@@ -236,15 +243,13 @@ Status: open.
 
 Current coverage:
 
-- The real Temporal dev-server integration test covers worker startup, workflow start/result, timers, activities, heartbeats, signal/query/update/describe, termination, and one invalid start option path.
+- The real Temporal dev-server integration test covers worker startup, workflow start/result, timers, activities, heartbeats, signal/query/update/describe, termination, continue-as-new chains, activity retry/non-retryable behavior, Search Attribute visibility, and one invalid start option path.
 - Core tests cover deterministic command emission, replay mismatch, phase/update/query behavior, patch markers, and process teardown for the implemented surface.
 
 Missing production-confidence tests:
 
 - Additional Search Attribute visibility cases beyond the current start/upsert smoke path, if needed.
 - Additional real-server cancellation permutations beyond the current timer and activity cases, if needed.
-- Activity retry and non-retryable error behavior against the server.
-- Continue-as-new chains, including result retrieval across runs and option propagation.
 - Workflow ID reuse/conflict policies against running and closed workflows.
 - Query reject condition behavior.
 - Update rejection, async update completion, and update handles when implemented.

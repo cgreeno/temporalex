@@ -95,6 +95,23 @@ defmodule Temporalex.BackendConformanceTest do
                           "CustomKeywordField" => SearchAttribute.keyword("alpha"),
                           "CustomIntField" => SearchAttribute.int(7)
                         }
+                      },
+                      %Command.ContinueAsNew{
+                        input: %{generation: 2},
+                        workflow_type: "NextWorkflow",
+                        task_queue: "temporalex-next",
+                        opts: [
+                          run_timeout: 20_000,
+                          task_timeout: 3_000,
+                          memo: %{"generation" => 2},
+                          headers: %{"trace" => "continue"},
+                          search_attributes: %{
+                            "CustomKeywordField" => SearchAttribute.keyword("continued")
+                          },
+                          retry_policy: [initial_interval: 10, maximum_attempts: 3],
+                          versioning_intent: :compatible,
+                          initial_versioning_behavior: :auto_upgrade
+                        ]
                       }
                     ]}
                },
@@ -258,6 +275,25 @@ defmodule Temporalex.BackendConformanceTest do
              )
 
     assert zero_backoff_reason =~ "retry_policy.backoff_coefficient must be 1.0 or larger"
+
+    assert {:error, continue_reason} =
+             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+               %Completion{
+                 run_id: "run-invalid-continue-as-new",
+                 status:
+                   {:ok,
+                    [
+                      %Command.ContinueAsNew{
+                        input: :next,
+                        workflow_type: "NextWorkflow",
+                        opts: [run_timeout: -1]
+                      }
+                    ]}
+               },
+               task_queue: "temporalex-test"
+             )
+
+    assert continue_reason =~ "duration option must be non-negative"
   end
 
   test "TemporalCore codec rejects invalid search attribute values" do

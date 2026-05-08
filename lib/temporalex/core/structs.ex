@@ -277,7 +277,7 @@ end
 
 defmodule Temporalex.Core.Command.ContinueAsNew do
   @moduledoc false
-  defstruct [:args, :workflow_type, :task_queue]
+  defstruct [:input, :workflow_type, :task_queue, opts: []]
 end
 
 defmodule Temporalex.Core.Command.CancelWorkflow do
@@ -380,6 +380,11 @@ end
 defmodule Temporalex.Core.Op.WaitForSignal do
   @moduledoc false
   defstruct [:name]
+end
+
+defmodule Temporalex.Core.Op.ContinueAsNew do
+  @moduledoc false
+  defstruct [:input, opts: []]
 end
 
 defmodule Temporalex.Core.Op.PublishState do

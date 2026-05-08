@@ -21,6 +21,7 @@ use temporalio_common::protos::coresdk::activity_result::{
     Success as ActivitySuccess, activity_execution_result, activity_resolution,
 };
 use temporalio_common::protos::coresdk::activity_task::{ActivityTask, activity_task};
+use temporalio_common::protos::coresdk::common::VersioningIntent;
 use temporalio_common::protos::coresdk::workflow_activation::{
     WorkflowActivation, WorkflowActivationJob, remove_from_cache::EvictionReason,
     workflow_activation_job,
@@ -46,8 +47,9 @@ use temporalio_common::protos::temporal::api::common::v1::{
     WorkflowType,
 };
 use temporalio_common::protos::temporal::api::enums::v1::{
-    RetryState, TimeoutType, VersioningBehavior, WorkflowExecutionStatus, WorkflowIdConflictPolicy,
-    WorkflowIdReusePolicy, WorkflowTaskFailedCause,
+    ContinueAsNewVersioningBehavior, RetryState, TimeoutType, VersioningBehavior,
+    WorkflowExecutionStatus, WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
+    WorkflowTaskFailedCause,
 };
 use temporalio_common::protos::temporal::api::enums::v1::TimeoutType;
 use temporalio_common::protos::temporal::api::failure::v1::{
@@ -115,6 +117,7 @@ rustler::atoms! {
     workflow_id,
     arguments,
     headers,
+    memo,
     attrs,
     workflow_info,
     randomness_seed,
@@ -240,6 +243,12 @@ rustler::atoms! {
     terminate_existing,
     static_summary,
     static_details,
+    versioning_intent,
+    compatible,
+    default_atom = "default",
+    initial_versioning_behavior,
+    auto_upgrade,
+    use_ramping_version,
     start_time_ms,
     execution_time_ms,
     close_time_ms,
@@ -2280,21 +2289,33 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
             })
         }
         "Elixir.Temporalex.Core.Command.ContinueAsNew" => {
-            let opts_or_command = command.map_get(opts_atom()).unwrap_or(command);
-            let workflow_type = keyword_get_string(opts_or_command, workflow_type())
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let task_queue = keyword_get_string(opts_or_command, task_queue())
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| default_task_queue.to_string());
+            let opts = map_get(command, opts_atom())?;
+            let workflow_type =
+                map_get_optional_string(command, workflow_type())?.unwrap_or_default();
+            let task_queue = map_get_optional_string(command, task_queue())?.unwrap_or_default();
 
             workflow_command::Variant::ContinueAsNewWorkflowExecution(
                 ContinueAsNewWorkflowExecution {
                     workflow_type,
                     task_queue,
-                    arguments: vec![payload_from_term(map_get(command, args())?)],
+                    arguments: vec![payload_from_term(map_get(command, input())?)],
+                    workflow_run_timeout: proto_duration_option_from_opts(
+                        opts,
+                        &[run_timeout(), workflow_run_timeout()],
+                    )?,
+                    workflow_task_timeout: proto_duration_option_from_opts(
+                        opts,
+                        &[task_timeout(), workflow_task_timeout()],
+                    )?,
+                    memo: keyword_get_payload_map(opts, memo())?,
+                    headers: keyword_get_payload_map(opts, headers())?,
+                    search_attributes: search_attributes_option_from_opts(opts)?
+                        .map(|indexed_fields| SearchAttributes { indexed_fields }),
+                    retry_policy: retry_policy_from_opts(opts)?,
+                    versioning_intent: versioning_intent_from_opts(opts)? as i32,
+                    initial_versioning_behavior: continue_as_new_versioning_behavior_from_opts(
+                        opts,
+                    )? as i32,
                     ..Default::default()
                 },
             )
@@ -2905,6 +2926,10 @@ fn keyword_get_payload_map(opts: Term, key: Atom) -> anyhow::Result<HashMap<Stri
         return Ok(HashMap::new());
     };
 
+    if term.decode::<Atom>().ok() == Some(nil()) {
+        return Ok(HashMap::new());
+    }
+
     term_to_payload_map(term)
 }
 
@@ -3131,6 +3156,52 @@ fn retry_policy_from_term(term: Term) -> anyhow::Result<RetryPolicy> {
     })
 }
 
+fn versioning_intent_from_opts(opts: Term) -> anyhow::Result<VersioningIntent> {
+    let Some(term) = keyword_get(opts, versioning_intent())? else {
+        return Ok(VersioningIntent::Unspecified);
+    };
+
+    if term.decode::<Atom>().ok() == Some(nil()) {
+        return Ok(VersioningIntent::Unspecified);
+    }
+
+    let atom: Atom = decode_term(term)?;
+    if atom == unspecified() {
+        Ok(VersioningIntent::Unspecified)
+    } else if atom == compatible() {
+        Ok(VersioningIntent::Compatible)
+    } else if atom == default_atom() {
+        Ok(VersioningIntent::Default)
+    } else {
+        Err(anyhow!("unsupported continue-as-new versioning_intent"))
+    }
+}
+
+fn continue_as_new_versioning_behavior_from_opts(
+    opts: Term,
+) -> anyhow::Result<ContinueAsNewVersioningBehavior> {
+    let Some(term) = keyword_get(opts, initial_versioning_behavior())? else {
+        return Ok(ContinueAsNewVersioningBehavior::Unspecified);
+    };
+
+    if term.decode::<Atom>().ok() == Some(nil()) {
+        return Ok(ContinueAsNewVersioningBehavior::Unspecified);
+    }
+
+    let atom: Atom = decode_term(term)?;
+    if atom == unspecified() {
+        Ok(ContinueAsNewVersioningBehavior::Unspecified)
+    } else if atom == auto_upgrade() {
+        Ok(ContinueAsNewVersioningBehavior::AutoUpgrade)
+    } else if atom == use_ramping_version() {
+        Ok(ContinueAsNewVersioningBehavior::UseRampingVersion)
+    } else {
+        Err(anyhow!(
+            "unsupported continue-as-new initial_versioning_behavior"
+        ))
+    }
+}
+
 fn activity_cancellation_type_from_opts(opts: Term) -> anyhow::Result<ActivityCancellationType> {
     let Some(term) = keyword_get(opts, cancellation_type())? else {
         return Ok(ActivityCancellationType::WaitCancellationCompleted);
@@ -3222,6 +3293,22 @@ fn duration_option_from_opts(
                 return Err(anyhow!("duration option must be non-negative"));
             }
             return Ok(Some(std::time::Duration::from_millis(ms as u64)));
+        }
+    }
+
+    Ok(None)
+}
+
+fn proto_duration_option_from_opts(
+    opts: Term,
+    keys: &[Atom],
+) -> anyhow::Result<Option<prost_types::Duration>> {
+    for key in keys {
+        if let Some(ms) = keyword_get_i64(opts, *key)? {
+            if ms < 0 {
+                return Err(anyhow!("duration option must be non-negative"));
+            }
+            return Ok(Some(duration_from_ms(ms as u64)));
         }
     }
 
