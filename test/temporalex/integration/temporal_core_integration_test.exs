@@ -3,6 +3,8 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
   @moduletag :external
 
+  alias Temporalex.TestSupport.TemporalDevServer
+
   defmodule Activities do
     use Temporalex.Activity
 
@@ -231,17 +233,19 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
   test "TemporalCore worker runs workflow tasks, activities, and client operations against dev server" do
     temporal =
-      System.find_executable("temporal") || flunk("temporal CLI executable was not found")
-
-    port = free_port()
-    http_port = free_port()
-    metrics_port = free_port()
-
-    temporal_port = start_temporal(temporal, port, http_port, metrics_port)
+      TemporalDevServer.start!(
+        search_attributes: [
+          {"CustomKeywordField", "Keyword"},
+          {"CustomTextField", "Text"},
+          {"CustomIntField", "Int"},
+          {"CustomDoubleField", "Double"},
+          {"CustomBoolField", "Bool"},
+          {"CustomDatetimeField", "Datetime"},
+          {"CustomKeywordListField", "KeywordList"}
+        ]
+      )
 
     try do
-      assert wait_for_health(temporal, port)
-
       worker_name =
         Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
 
@@ -254,7 +258,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         Temporalex.Client.start_link(
           name: client_name,
           backend: Temporalex.Backend.TemporalCore,
-          target: "http://127.0.0.1:#{port}",
+          target: temporal.target,
           namespace: "default",
           task_queue: task_queue,
           workflow_result_timeout: 30_000
@@ -318,7 +322,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert eventually(fn ->
+        assert TemporalDevServer.eventually(fn ->
                  Temporalex.Client.query_workflow(interactive, "state", [], timeout: 10_000) ==
                    {:ok, 0}
                end)
@@ -326,7 +330,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         assert :ok =
                  Temporalex.Client.signal_workflow(interactive, "add", [2], timeout: 10_000)
 
-        assert eventually(fn ->
+        assert TemporalDevServer.eventually(fn ->
                  Temporalex.Client.query_workflow(interactive, "state", [], timeout: 10_000) ==
                    {:ok, 2}
                end)
@@ -356,7 +360,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert eventually(fn ->
+        assert TemporalDevServer.eventually(fn ->
                  Temporalex.Client.query_workflow(terminated, "state", [], timeout: 10_000) ==
                    {:ok, {:waiting, :terminate}}
                end)
@@ -379,7 +383,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert eventually(fn ->
+        assert TemporalDevServer.eventually(fn ->
                  Temporalex.Client.query_workflow(cancelled_timer, "state", [], timeout: 10_000) ==
                    {:ok, {:waiting, :cancel_timer}}
                end)
@@ -441,15 +445,14 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert eventually(fn ->
+        assert TemporalDevServer.eventually(fn ->
                  Temporalex.Client.query_workflow(search_handle, "state", [], timeout: 10_000) ==
                    {:ok, :upserted}
                end)
 
-        assert eventually(fn ->
-                 workflow_visible?(
+        assert TemporalDevServer.eventually(fn ->
+                 TemporalDevServer.workflow_visible?(
                    temporal,
-                   port,
                    "CustomKeywordField = 'upserted-#{search_label}' and CustomIntField = 8",
                    search_id
                  )
@@ -476,10 +479,9 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         assert {:ok, {:continued, 2, false}} =
                  Temporalex.Client.get_result(continue_handle, timeout: 30_000)
 
-        assert eventually(fn ->
-                 workflow_visible?(
+        assert TemporalDevServer.eventually(fn ->
+                 TemporalDevServer.workflow_visible?(
                    temporal,
-                   port,
                    "CustomKeywordField = 'continued-#{continue_label}' and CustomIntField = 2",
                    continue_id
                  )
@@ -591,141 +593,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         end
       end
     after
-      Port.close(temporal_port)
-      drain_port_messages()
-    end
-  end
-
-  defp start_temporal(temporal, port, http_port, metrics_port) do
-    Port.open(
-      {:spawn_executable, temporal},
-      [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        {:line, 4096},
-        args: [
-          "server",
-          "start-dev",
-          "--headless",
-          "--ip",
-          "127.0.0.1",
-          "--port",
-          Integer.to_string(port),
-          "--http-port",
-          Integer.to_string(http_port),
-          "--metrics-port",
-          Integer.to_string(metrics_port),
-          "--log-level",
-          "error",
-          "--search-attribute",
-          "CustomKeywordField=Keyword",
-          "--search-attribute",
-          "CustomTextField=Text",
-          "--search-attribute",
-          "CustomIntField=Int",
-          "--search-attribute",
-          "CustomDoubleField=Double",
-          "--search-attribute",
-          "CustomBoolField=Bool",
-          "--search-attribute",
-          "CustomDatetimeField=Datetime",
-          "--search-attribute",
-          "CustomKeywordListField=KeywordList"
-        ]
-      ]
-    )
-  end
-
-  defp wait_for_health(temporal, port) do
-    deadline = System.monotonic_time(:millisecond) + 20_000
-    do_wait_for_health(temporal, port, deadline)
-  end
-
-  defp do_wait_for_health(temporal, port, deadline) do
-    address = "127.0.0.1:#{port}"
-
-    case System.cmd(
-           temporal,
-           [
-             "operator",
-             "cluster",
-             "health",
-             "--address",
-             address,
-             "--client-connect-timeout",
-             "1s",
-             "--command-timeout",
-             "2s"
-           ],
-           stderr_to_stdout: true
-         ) do
-      {_output, 0} ->
-        true
-
-      {_output, _status} ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          false
-        else
-          Process.sleep(250)
-          do_wait_for_health(temporal, port, deadline)
-        end
-    end
-  end
-
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
-
-  defp drain_port_messages do
-    receive do
-      {_port, {:data, _data}} -> drain_port_messages()
-      {_port, {:exit_status, _status}} -> drain_port_messages()
-    after
-      100 -> :ok
-    end
-  end
-
-  defp workflow_visible?(temporal, port, query, workflow_id) do
-    case System.cmd(
-           temporal,
-           [
-             "workflow",
-             "list",
-             "--address",
-             "127.0.0.1:#{port}",
-             "--namespace",
-             "default",
-             "--query",
-             query,
-             "--limit",
-             "10"
-           ],
-           stderr_to_stdout: true
-         ) do
-      {output, 0} -> output =~ workflow_id
-      {_output, _status} -> false
-    end
-  end
-
-  defp eventually(fun, timeout \\ 10_000) when is_function(fun, 0) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_eventually(fun, deadline)
-  end
-
-  defp do_eventually(fun, deadline) do
-    if fun.() do
-      true
-    else
-      if System.monotonic_time(:millisecond) >= deadline do
-        false
-      else
-        Process.sleep(250)
-        do_eventually(fun, deadline)
-      end
+      TemporalDevServer.stop(temporal)
     end
   end
 end

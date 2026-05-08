@@ -173,3 +173,4 @@ Current repository status:
 - `Temporalex.Backend.TemporalCore` is implemented through `Temporalex.Native`, Rustler resources, Temporal Core worker/client calls, native poll loops, protobuf conversion, and ETF payload conversion.
 - `Temporalex.Client` is implemented for Temporal Core-backed workers with workflow start/result, signal, query, update, cancel, terminate, and describe operations.
 - `test/temporalex/integration/temporal_core_integration_test.exs` starts a Temporal dev server and verifies workflow execution, activity execution, heartbeats, invalid client option handling, signal/query/update/describe, termination, and result decoding through the Rust NIF.
+- `test/temporalex/integration/temporal_worker_restart_test.exs` verifies worker restart and real-history replay with the Temporal dev server.

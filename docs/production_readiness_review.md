@@ -257,7 +257,7 @@ Current coverage:
 
 - `Temporalex.Testing` provides a public, local workflow testing surface that runs workflows through the real executor, exposes emitted activity/timer/update commands in deterministic order, lets tests resolve operation handles manually, and replays recorded activation transcripts.
 - Consumer-style workflow tests using `Temporalex.Testing` cover signal waits, continue-as-new, non-cancellable cleanup, blocked cancellable cleanup, activity cancellation modes, parallel cancellation, async signal handlers, async update handlers, update rejection, and safe-mode failures.
-- The real Temporal dev-server integration test covers standalone client startup, worker startup from an explicit client, workflow start/result, timers, activities, heartbeats, signal/query/update/describe, termination, continue-as-new chains, activity retry/non-retryable behavior, Search Attribute visibility, and one invalid start option path.
+- The real Temporal dev-server integration tests cover standalone client startup, worker startup from an explicit client, workflow start/result, timers, activities, heartbeats, signal/query/update/describe, termination, continue-as-new chains, activity retry/non-retryable behavior, Search Attribute visibility, one invalid start option path, and worker restart/replay against real history for timers, activities, signals, and continue-as-new.
 - Core tests cover deterministic command emission, replay mismatch, phase/update/query behavior, patch markers, and process teardown for the implemented surface.
 
 Missing production-confidence tests:
@@ -268,7 +268,6 @@ Missing production-confidence tests:
 - Workflow ID reuse/conflict policies against running and closed workflows.
 - Query reject condition behavior.
 - Update rejection, async update completion, and update handles when implemented.
-- Worker restart/replay against real history.
 - Backend conformance tests that compare fake backend and Temporal Core backend behavior for shared operations.
 - Payload/failure decoder tests for all public error surfaces.
 

@@ -195,8 +195,8 @@ Findings:
 Test evidence:
 
 - `mix test test/temporalex/testing_test.exs test/temporalex/testing_workflow_behavior_test.exs`: 20 tests, 0 failures.
-- `mix test`: 104 tests, 0 failures, 2 external tests excluded.
-- `mix test --only external`: 2 tests, 0 failures.
+- `mix test`: 104 tests, 0 failures, 3 external tests excluded.
+- `mix test --only external`: 3 tests, 0 failures.
 - `mix compile --warnings-as-errors`: success.
 - `mix format --check-formatted`: success.
 - `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
@@ -217,6 +217,7 @@ Findings:
 - The client path starts workflows, awaits workflow results, signals, queries, updates, cancels, terminates, and describes executions through the standalone `Temporalex.Client` owner process and its backend client state.
 - Workflow start options cover task queue selection, headers, search attributes, workflow timeouts, retry policy, id reuse/conflict policies, and static metadata. Activity command encoding covers retry policy and activity cancellation type. Invalid negative duration/retry values are rejected instead of cast into oversized native durations.
 - `test/temporalex/integration/temporal_core_integration_test.exs` verifies a real Temporal dev-server run covering client start, invalid start option handling, worker polling, timer command/resolution, activity task execution, heartbeat submission, activity completion, workflow completion, signal/query/update/describe, termination, and result decoding.
+- `test/temporalex/integration/temporal_worker_restart_test.exs` verifies worker restart and real-history replay against a Temporal dev server for timer completion while no worker is running, activity retry after worker shutdown, signal handling while the worker is down, continue-as-new after restart, explicit client survival across worker restarts, and reuse of the same task queue by restarted workers.
 
 Outcome:
 

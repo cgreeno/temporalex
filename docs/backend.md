@@ -174,6 +174,7 @@ Implementation status:
 - `Temporalex.Backend.TemporalCore` is implemented through Rustler and Temporal Core.
 - `test/temporalex/backend_conformance_test.exs` exercises the backend contract against the test backend and verifies native codec encoding for core completions.
 - `test/temporalex/integration/temporal_core_integration_test.exs` exercises the real backend against a Temporal dev server.
+- `test/temporalex/integration/temporal_worker_restart_test.exs` exercises worker restart and real-history replay against a Temporal dev server.
 
 ## Temporal Core Backend
 
