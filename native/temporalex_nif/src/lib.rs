@@ -50,8 +50,8 @@ use temporalio_common::protos::temporal::api::common::v1::{
     WorkflowType,
 };
 use temporalio_common::protos::temporal::api::enums::v1::{
-    ContinueAsNewVersioningBehavior, RetryState, TimeoutType, VersioningBehavior,
-    WorkflowExecutionStatus, WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
+    ContinueAsNewVersioningBehavior, QueryRejectCondition, RetryState, TimeoutType,
+    VersioningBehavior, WorkflowExecutionStatus, WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
     WorkflowTaskFailedCause,
 };
 use temporalio_common::protos::temporal::api::enums::v1::TimeoutType;
@@ -222,6 +222,8 @@ rustler::atoms! {
     workflow_id_reuse_policy,
     id_conflict_policy,
     workflow_id_conflict_policy,
+    query_reject_condition,
+    reject_condition,
     request_id,
     update_id,
     initial_interval,
@@ -247,6 +249,9 @@ rustler::atoms! {
     fail,
     use_existing,
     terminate_existing,
+    none,
+    not_open,
+    not_completed_cleanly,
     static_summary,
     static_details,
     versioning_intent,
@@ -3184,6 +3189,7 @@ fn signal_options(opts: Term) -> anyhow::Result<WorkflowSignalOptions> {
 
 fn query_options(opts: Term) -> anyhow::Result<WorkflowQueryOptions> {
     let mut options = WorkflowQueryOptions::default();
+    options.reject_condition = query_reject_condition_from_opts(opts)?;
     options.header = header_from_opts(opts)?;
     Ok(options)
 }
@@ -3392,6 +3398,27 @@ fn workflow_id_conflict_policy_from_opts(opts: Term) -> anyhow::Result<WorkflowI
         Ok(WorkflowIdConflictPolicy::Unspecified)
     } else {
         Err(anyhow!("unsupported workflow id conflict policy"))
+    }
+}
+
+fn query_reject_condition_from_opts(opts: Term) -> anyhow::Result<Option<QueryRejectCondition>> {
+    let Some(term) =
+        keyword_get(opts, query_reject_condition())?.or(keyword_get(opts, reject_condition())?)
+    else {
+        return Ok(None);
+    };
+
+    let atom: Atom = decode_term(term)?;
+    if atom == none() {
+        Ok(Some(QueryRejectCondition::None))
+    } else if atom == not_open() {
+        Ok(Some(QueryRejectCondition::NotOpen))
+    } else if atom == not_completed_cleanly() {
+        Ok(Some(QueryRejectCondition::NotCompletedCleanly))
+    } else if atom == unspecified() {
+        Ok(Some(QueryRejectCondition::Unspecified))
+    } else {
+        Err(anyhow!("unsupported query reject condition"))
     }
 }
 

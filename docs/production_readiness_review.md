@@ -181,9 +181,12 @@ The current client covers start, get result, signal, query, execute update, canc
 - Signal-with-start.
 - Start update/update handle, not only execute update.
 - Update-with-start.
-- Query reject condition.
 - Workflow list/count/history fetch.
 - Workflow start request id, memo, start delay, priority, links, callbacks, versioning override, on-conflict options, and eager execution controls where supported.
+
+Recently added:
+
+- Query reject condition is implemented for client queries and covered by real Temporal dev-server tests.
 
 References:
 
@@ -258,7 +261,7 @@ Current coverage:
 
 - `Temporalex.Testing` provides a public, local workflow testing surface that runs workflows through the real executor, exposes emitted activity/timer/update commands in deterministic order, lets tests resolve operation handles manually, and replays recorded activation transcripts.
 - Consumer-style workflow tests using `Temporalex.Testing` cover signal waits, continue-as-new, non-cancellable cleanup, blocked cancellable cleanup, activity cancellation modes, parallel cancellation, async signal handlers, async update handlers, update rejection, and safe-mode failures.
-- The real Temporal dev-server integration tests cover standalone client startup, worker startup from an explicit client, workflow start/result, timers, activities, heartbeats, signal/query/update/describe, termination, continue-as-new chains, activity retry/non-retryable behavior, Search Attribute visibility, one invalid start option path, and worker restart/replay against real history for timers, activities, signals, and continue-as-new.
+- The real Temporal dev-server integration tests cover standalone client startup, worker startup from an explicit client, workflow start/result, timers, activities, heartbeats, signal/query/update/describe, termination, continue-as-new chains, activity retry/non-retryable behavior, Search Attribute visibility, one invalid start option path, workflow ID conflict/reuse behavior, not-found errors across client operations, query reject condition behavior, update rejection, and worker restart/replay against real history for timers, activities, signals, and continue-as-new.
 - Core tests cover deterministic command emission, replay mismatch, phase/update/query behavior, patch markers, and process teardown for the implemented surface.
 
 Missing production-confidence tests:
@@ -266,9 +269,8 @@ Missing production-confidence tests:
 - More consumer-style workflow tests for larger realistic workflows and future primitives as they are added.
 - Additional Search Attribute visibility cases beyond the current start/upsert smoke path, if needed.
 - Additional real-server cancellation permutations beyond the current timer and activity cases, if needed.
-- Workflow ID reuse/conflict policies against running and closed workflows.
-- Query reject condition behavior.
-- Update rejection, async update completion, and update handles when implemented.
+- Additional workflow ID policy permutations if needed beyond running conflict, closed rejection, and closed allow-duplicate reuse.
+- Async update completion and update handles when implemented.
 - Backend conformance tests that compare fake backend and Temporal Core backend behavior for shared operations.
 - Additional payload/failure decoder tests for Temporal failure variants that are still represented as `Temporalex.Failure.UnknownError`.
 

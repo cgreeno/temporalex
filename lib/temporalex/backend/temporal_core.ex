@@ -398,7 +398,13 @@ def complete_activity_task(%WorkerState{} = state, %ActivityCompletion{} = compl
 
   defp native_headers_opts(opts) do
     opts
-    |> Keyword.take([:headers, :request_id, :update_id])
+    |> Keyword.take([
+      :headers,
+      :request_id,
+      :update_id,
+      :query_reject_condition,
+      :reject_condition
+    ])
     |> normalize_native_opts()
   end
 

@@ -215,7 +215,7 @@ Findings:
 - Activity heartbeats flow from `Temporalex.Activity.Context.heartbeat/2` through `Temporalex.Server.record_activity_heartbeat/3` to the backend, where details are encoded as ETF payload bytes and submitted through Temporal Core.
 - Worker shutdown is covered by explicit server termination, the Rustler resource monitor, and resource drop. Shutdown initiation is scheduled on the Temporal Core Tokio runtime handle rather than called directly from BEAM scheduler threads.
 - The client path starts workflows, awaits workflow results, signals, queries, updates, cancels, terminates, and describes executions through the standalone `Temporalex.Client` owner process and its backend client state.
-- Workflow start options cover task queue selection, headers, search attributes, workflow timeouts, retry policy, id reuse/conflict policies, and static metadata. Activity command encoding covers retry policy and activity cancellation type. Invalid negative duration/retry values are rejected instead of cast into oversized native durations.
+- Workflow start options cover task queue selection, headers, search attributes, workflow timeouts, retry policy, id reuse/conflict policies, and static metadata. Query options cover query reject condition. Activity command encoding covers retry policy and activity cancellation type. Invalid negative duration/retry values are rejected instead of cast into oversized native durations.
 - `test/temporalex/integration/temporal_core_integration_test.exs` verifies a real Temporal dev-server run covering client start, invalid start option handling, worker polling, timer command/resolution, activity task execution, heartbeat submission, activity completion, workflow completion, signal/query/update/describe, termination, and result decoding.
 - `test/temporalex/integration/temporal_worker_restart_test.exs` verifies worker restart and real-history replay against a Temporal dev server for timer completion while no worker is running, activity retry after worker shutdown, signal handling while the worker is down, continue-as-new after restart, explicit client survival across worker restarts, and reuse of the same task queue by restarted workers.
 
@@ -238,7 +238,7 @@ Findings:
 Validation:
 
 - `test/temporalex/client_error_test.exs` covers client-side normalization for start conflicts, workflow result outcomes, query rejection, update failure, not found, client unavailability, and transport errors.
-- Real-server integration tests assert the public error structs for invalid start options, workflow termination, cancellation, workflow failure, and activity failure.
+- Real-server integration tests assert the public error structs for invalid start options, workflow termination, cancellation, workflow failure, activity failure, workflow ID conflicts, not-found operations, query rejection, and update rejection.
 
 ## Beta Limits
 

@@ -173,7 +173,11 @@ defmodule Temporalex.ClientErrorTest do
 
     on_exit(fn ->
       if Process.alive?(pid) do
-        GenServer.stop(pid)
+        try do
+          GenServer.stop(pid)
+        catch
+          :exit, _reason -> :ok
+        end
       end
     end)
 

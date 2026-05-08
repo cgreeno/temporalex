@@ -226,7 +226,9 @@ id_conflict_policy: :fail,
 static_summary: "Checkout workflow"
 ```
 
-Signal/update/query options accept `:headers`. Signal and cancel also accept `:request_id`; update accepts `:update_id`.
+Signal/update/query options accept `:headers`. Signal and cancel also accept `:request_id`;
+update accepts `:update_id`. Query accepts `:reject_condition` or `:query_reject_condition`
+with `:none`, `:not_open`, or `:not_completed_cleanly`.
 
 Client operations return `{:ok, value}` or `:ok` on success and `{:error, error}` on failure.
 Client errors are public exception structs, so future bang variants can raise the same values
