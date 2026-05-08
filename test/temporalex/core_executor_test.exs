@@ -82,6 +82,14 @@ defmodule Temporalex.CoreExecutorTest do
     end
   end
 
+  defmodule ActivityBangWorkflow do
+    use Temporalex.Workflow
+
+    def run(value) do
+      {:ok, Activities.echo!(value)}
+    end
+  end
+
   defmodule SleepWorkflow do
     use Temporalex.Workflow
 
@@ -154,7 +162,7 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       results =
-        API.parallel([
+        API.parallel!([
           fn ->
             {:ok, :a1} = Activities.echo(:a1)
             {:ok, :a2} = Activities.echo(:a2)
@@ -176,9 +184,9 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       result =
-        API.parallel([
+        API.parallel!([
           fn ->
-            API.parallel([
+            API.parallel!([
               fn -> Activities.echo(:a_nested) end,
               fn -> Activities.echo(:b_nested) end
             ])
@@ -194,7 +202,7 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       state =
-        API.phase(0,
+        API.phase!(0,
           signal: %{
             "inc" => fn [amount], state -> {:noreply, state + amount} end,
             "done" => fn _args, state -> {:stop, state} end
@@ -209,8 +217,8 @@ defmodule Temporalex.CoreExecutorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      first = API.wait_for_signal("go")
-      second = API.wait_for_signal("go")
+      first = API.wait_for_signal!("go")
+      second = API.wait_for_signal!("go")
       {:ok, [first, second]}
     end
   end
@@ -220,7 +228,7 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       try do
-        API.wait_for_signal("go")
+        API.wait_for_signal!("go")
         {:ok, :not_cancelled}
       rescue
         error in CancelledError ->
@@ -234,10 +242,21 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       try do
-        API.sleep(60_000)
+        API.sleep!(60_000)
         {:ok, :slept}
       rescue
         error in CancelledError -> {:cancelled, error}
+      end
+    end
+  end
+
+  defmodule NonBangCancellableTimerWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      case API.sleep(60_000) do
+        :ok -> {:ok, :slept}
+        {:cancelled, error} -> {:ok, {:cancelled, error.message}}
       end
     end
   end
@@ -249,7 +268,7 @@ defmodule Temporalex.CoreExecutorTest do
       state = %{reserved: true}
 
       try do
-        API.sleep(60_000)
+        API.sleep!(60_000)
         {:ok, :slept}
       rescue
         error in CancelledError ->
@@ -269,11 +288,11 @@ defmodule Temporalex.CoreExecutorTest do
     def run(_) do
       try do
         try do
-          API.sleep(60_000)
+          API.sleep!(60_000)
           {:ok, :slept}
         rescue
           _error in CancelledError ->
-            API.sleep(1)
+            API.sleep!(1)
             {:ok, :cleanup_completed}
         end
       rescue
@@ -289,7 +308,7 @@ defmodule Temporalex.CoreExecutorTest do
     def run(_) do
       try do
         {:ok, _result} =
-          API.execute_activity("#{inspect(Activities)}.echo", [:work],
+          API.execute_activity!("#{inspect(Activities)}.echo", [:work],
             cancellation_type: :wait_cancellation_completed
           )
 
@@ -306,7 +325,7 @@ defmodule Temporalex.CoreExecutorTest do
     def run(_) do
       try do
         {:ok, _result} =
-          API.execute_activity("#{inspect(Activities)}.echo", [:work],
+          API.execute_activity!("#{inspect(Activities)}.echo", [:work],
             cancellation_type: :try_cancel
           )
 
@@ -317,18 +336,31 @@ defmodule Temporalex.CoreExecutorTest do
     end
   end
 
+  defmodule ActivityNonBangTryCancelWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      case API.execute_activity("#{inspect(Activities)}.echo", [:work],
+             cancellation_type: :try_cancel
+           ) do
+        {:ok, _result} -> {:ok, :activity_completed}
+        {:cancelled, error} -> {:ok, {:activity_cancelled, error.message}}
+      end
+    end
+  end
+
   defmodule ParallelCancellationWorkflow do
     use Temporalex.Workflow
 
     def run(_) do
       try do
-        API.parallel([
+        API.parallel!([
           fn ->
-            API.sleep(10_000)
+            API.sleep!(10_000)
             :a
           end,
           fn ->
-            API.sleep(20_000)
+            API.sleep!(20_000)
             :b
           end
         ])
@@ -345,7 +377,7 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       try do
-        API.phase(:open,
+        API.phase!(:open,
           timeout: 60_000,
           signal: %{"done" => fn _args, state -> {:stop, state} end}
         )
@@ -364,7 +396,7 @@ defmodule Temporalex.CoreExecutorTest do
       {:ok, :gate} = Activities.echo(:gate)
 
       state =
-        API.phase(0,
+        API.phase!(0,
           signal: %{
             "inc" => fn [amount], state -> {:noreply, state + amount} end,
             "done" => fn _args, state -> {:stop, state} end
@@ -380,7 +412,7 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       state =
-        API.phase([],
+        API.phase!([],
           signal: %{
             "work" => fn [name], state ->
               {:ok, result} = Activities.echo(name)
@@ -399,12 +431,12 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       state =
-        API.phase(0,
+        API.phase!(0,
           signal: %{
             "slow" => fn _args, state ->
               {:async,
                fn ->
-                 :ok = API.sleep(10)
+                 :ok = API.sleep!(10)
                  API.update_state(fn current -> {:updated, current + 1} end)
                  :done
                end, state}
@@ -422,7 +454,7 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       state =
-        API.phase(0,
+        API.phase!(0,
           update: %{
             "add" =>
               {fn [amount], state ->
@@ -453,12 +485,12 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       state =
-        API.phase(0,
+        API.phase!(0,
           update: %{
             "slow" => fn [amount], state ->
               {:async,
                fn ->
-                 :ok = API.sleep(10)
+                 :ok = API.sleep!(10)
                  API.update_state(fn current -> {current + amount, current + amount} end)
                end, state}
             end,
@@ -484,7 +516,7 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       result =
-        API.phase(:open,
+        API.phase!(:open,
           timeout: 50,
           signal: %{"done" => fn _args, state -> {:stop, state} end}
         )
@@ -572,6 +604,17 @@ defmodule Temporalex.CoreExecutorTest do
       assert command.activity_id == "activity-0"
       assert command.type == "#{inspect(Activities)}.echo"
       assert command.input == [:value]
+
+      assert {:complete, {:ok, :result}} =
+               TestHarness.resolve(exec, %Job.ActivityResolved{
+                 seq: command.seq,
+                 result: {:ok, :result}
+               })
+    end
+
+    test "activity bang dispatch unwraps successful results" do
+      assert {:ok, exec} = TestHarness.start_workflow(ActivityBangWorkflow, :value)
+      assert {:yield, [%Command.ScheduleActivity{} = command]} = TestHarness.next(exec)
 
       assert {:complete, {:ok, :result}} =
                TestHarness.resolve(exec, %Job.ActivityResolved{
@@ -866,6 +909,19 @@ defmodule Temporalex.CoreExecutorTest do
       assert {:yield, []} = TestHarness.resolve(exec, %Job.TimerFired{seq: timer_seq})
     end
 
+    test "non-bang timer cancellation returns cancellation as a value" do
+      assert {:ok, exec} = TestHarness.start_workflow(NonBangCancellableTimerWorkflow, nil)
+      assert {:yield, [%Command.StartTimer{seq: timer_seq}]} = TestHarness.next(exec)
+
+      completion = TestHarness.activate_raw(exec, [%Job.CancelWorkflow{reason: "requested"}])
+
+      assert {:ok,
+              [
+                %Command.CancelTimer{seq: ^timer_seq},
+                %Command.CompleteWorkflow{result: {:cancelled, "requested"}}
+              ]} = completion.status
+    end
+
     test "non_cancellable cleanup can schedule durable work after cancellation" do
       assert {:ok, exec} = TestHarness.start_workflow(NonCancellableCleanupWorkflow, nil)
       assert {:yield, [%Command.StartTimer{seq: timer_seq}]} = TestHarness.next(exec)
@@ -938,6 +994,19 @@ defmodule Temporalex.CoreExecutorTest do
                  seq: activity_seq,
                  result: {:ok, :late}
                })
+    end
+
+    test "non-bang try_cancel activity cancellation returns cancellation as a value" do
+      assert {:ok, exec} = TestHarness.start_workflow(ActivityNonBangTryCancelWorkflow, nil)
+      assert {:yield, [%Command.ScheduleActivity{seq: activity_seq}]} = TestHarness.next(exec)
+
+      completion = TestHarness.activate_raw(exec, [%Job.CancelWorkflow{reason: "requested"}])
+
+      assert {:ok,
+              [
+                %Command.RequestCancelActivity{seq: ^activity_seq},
+                %Command.CompleteWorkflow{result: {:activity_cancelled, "requested"}}
+              ]} = completion.status
     end
 
     test "parallel cancellation cancels branch timers before cancelling the workflow" do

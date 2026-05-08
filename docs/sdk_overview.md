@@ -133,7 +133,7 @@ The public workflow model is documented in [programming_model.md](programming_mo
 - Workflows are modules with `run/1`.
 - Activities are defined with `use Temporalex.Activity` and `defactivity`.
 - Workflow code calls activities, sleeps, waits for signals, reads workflow time, publishes query state, and uses deterministic random helpers through `Temporalex.Workflow.API`.
-- `API.parallel/1` and `API.phase/2` are the structured concurrency hosts.
+- `API.parallel/1`/`API.parallel!/1` and `API.phase/2`/`API.phase!/2` are the structured concurrency hosts.
 - Queries read only the last state explicitly published by `API.publish_state/1`.
 - Updates are accepted only while the workflow is inside a matching `API.phase/2`.
 

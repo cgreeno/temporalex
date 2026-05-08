@@ -202,7 +202,7 @@ Example workflow:
 
 ```elixir
 def run(_) do
-  API.parallel([
+  API.parallel!([
     fn -> Activities.Work.run(:a) end,
     fn -> Activities.Work.run(:b) end,
     fn -> Activities.Work.run(:c) end

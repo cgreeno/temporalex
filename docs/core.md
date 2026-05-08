@@ -184,6 +184,17 @@ All workflow API calls use one protocol shape:
 GenServer.call(executor, {:workflow_op, thread_id, op}, :infinity)
 ```
 
+Executor replies to workflow operation calls are always wrapped as an internal envelope:
+
+```elixir
+{:temporalex_op_reply, :ok, value}
+{:temporalex_op_reply, :cancelled, %Temporalex.Failure.CancelledError{}}
+{:temporalex_op_reply, :error, reason}
+```
+
+The public workflow API turns those envelopes into non-bang return values or bang-variant
+exceptions. User payloads are never used as control sentinels.
+
 ## Workflow Context
 
 Every process running workflow code carries exactly one process dictionary key:

@@ -2,9 +2,10 @@ defmodule Temporalex.Activity do
   @moduledoc """
   Minimal activity DSL.
 
-  The generated public function is a workflow-side dispatch function. The generated
-  `__name__/N` function is the implementation entry point intended for later server
-  integration.
+  The generated public functions are workflow-side dispatch functions. The generated
+  `name/N` function returns `{:ok, value}`, `{:error, reason}`, or `{:cancelled, error}`;
+  `name!/N` unwraps success and raises failures or cancellation. The generated `__name__/N`
+  function is the implementation entry point intended for later server integration.
   """
 
   defmacro __using__(_opts) do
@@ -34,6 +35,7 @@ defmodule Temporalex.Activity do
   defp build_activity({name, meta, args_ast}, opts, body) when is_atom(name) do
     args_ast = args_ast || []
     impl_name = :"__#{name}__"
+    bang_name = :"#{name}!"
     {dispatch_args, context?} = dispatch_args(args_ast)
     dispatch_head = {name, meta, dispatch_args}
     {local?, dispatch_opts} = Keyword.pop(opts, :local, false)
@@ -48,6 +50,8 @@ defmodule Temporalex.Activity do
           Temporalex.Workflow.API.execute_activity(type, input, unquote(dispatch_opts))
         end
       end
+
+    bang_head = {bang_name, meta, dispatch_args}
 
     quote do
       @temporalex_activities %{
@@ -65,6 +69,12 @@ defmodule Temporalex.Activity do
         type = "#{inspect(__MODULE__)}.#{unquote(name)}"
         input = [unquote_splicing(dispatch_args)]
         unquote(dispatch_call)
+      end
+
+      def unquote(bang_head) do
+        type = "#{inspect(__MODULE__)}.#{unquote(name)}"
+        input = [unquote_splicing(dispatch_args)]
+        Temporalex.Workflow.API.execute_activity!(type, input, unquote(opts))
       end
 
       def unquote(impl_name)(unquote_splicing(args_ast)) do

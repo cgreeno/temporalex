@@ -110,7 +110,7 @@ This provides durable concurrency without making BEAM scheduling part of workflo
 Example:
 
 ```elixir
-API.parallel([
+API.parallel!([
   fn -> API.execute_activity(A); API.execute_activity(C) end,
   fn -> API.execute_activity(B); API.execute_activity(D) end
 ])

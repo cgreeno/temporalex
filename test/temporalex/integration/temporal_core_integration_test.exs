@@ -86,7 +86,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
       API.publish_state(initial)
 
       state =
-        API.phase(initial,
+        API.phase!(initial,
           signal: %{
             "add" => fn [amount], state ->
               state = state + amount
@@ -120,7 +120,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
     def run(label) do
       API.publish_state({:waiting, label})
-      API.sleep(60_000)
+      API.sleep!(60_000)
       {:ok, {:completed, label}}
     end
   end
@@ -130,7 +130,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
     def run(parent) do
       try do
-        {:ok, _result} = Activities.long_cancellable(parent)
+        _result = Activities.long_cancellable!(parent)
         {:ok, :activity_completed}
       rescue
         error in Temporalex.Failure.CancelledError -> {:cancelled, error}
@@ -154,7 +154,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         })
 
       API.publish_state(:upserted)
-      API.sleep(60_000)
+      API.sleep!(60_000)
       {:ok, :done}
     end
   end

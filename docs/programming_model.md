@@ -22,11 +22,11 @@ The design principles:
 
 These calls are available anywhere in workflow code (in `run/1`, inside handlers, inside parallel branches):
 
-**`Activities.Module.function(args)`** — Execute an activity. Blocks until the activity completes or fails. This is the primary way workflows interact with the outside world.
+**`Activities.Module.function(args)`** — Execute an activity. Blocks until the activity completes, fails, or is cancelled. Returns `{:ok, value}`, `{:error, reason}`, or `{:cancelled, error}`. The generated `function!/N` variant unwraps `{:ok, value}` and raises failures or cancellation.
 
-**`API.sleep(duration_ms)`** — Durable timer. Blocks for the specified duration. Survives process restarts. The executor schedules a `StartTimer` command and the runner resumes when the timer fires.
+**`API.sleep(duration_ms)` / `API.sleep!(duration_ms)`** — Durable timer. Blocks for the specified duration. Survives process restarts. The executor schedules a `StartTimer` command and the runner resumes when the timer fires. The non-bang form returns `:ok` or `{:cancelled, error}`; the bang form raises on cancellation.
 
-**`API.wait_for_signal(name)`** — Blocks until a signal with the given name arrives. Consumes one signal from the buffer. If a matching signal is already buffered, returns immediately. Signals are a queue — multiple signals with the same name accumulate and are consumed one at a time.
+**`API.wait_for_signal(name)` / `API.wait_for_signal!(name)`** — Blocks until a signal with the given name arrives. Consumes one signal from the buffer. If a matching signal is already buffered, returns immediately. Signals are a queue — multiple signals with the same name accumulate and are consumed one at a time. The non-bang form returns `{:ok, args}` or `{:cancelled, error}`; the bang form returns `args` or raises on cancellation.
 
 **`API.publish_state(state)`** — Publishes a state snapshot that queries can read. Non-blocking. Can be called from anywhere. This is the only way to make state visible to queries. Calling it replaces the previously published state entirely.
 
@@ -52,9 +52,9 @@ end
 
 These are blocking calls that can host durable concurrent work within their scope:
 
-**`API.phase(state, handlers)`** — Enters a message-driven workflow phase. Blocks the caller. Dispatches incoming updates and signals to the provided handlers. Returns when a handler signals completion via `{:stop, ...}` or the timeout expires. All async handlers spawned within this scope must complete before the phase returns.
+**`API.phase(state, handlers)` / `API.phase!(state, handlers)`** — Enters a message-driven workflow phase. Blocks the caller. Dispatches incoming updates and signals to the provided handlers. Returns when a handler signals completion via `{:stop, ...}` or the timeout expires. All async handlers spawned within this scope must complete before the phase returns. The non-bang form returns `{:ok, state}`, `{:timeout, state}`, or `{:cancelled, error}`; the bang form returns `state`, `{:timeout, state}`, or raises on cancellation.
 
-**`API.parallel(fns)`** — Executes a list of functions as cooperatively scheduled workflow branches. Each branch has its own workflow process and can call activities, sleep, or use other sequential primitives. Blocks until all branches complete. Returns a list of results in the same order as the input functions.
+**`API.parallel(fns)` / `API.parallel!(fns)`** — Executes a list of functions as cooperatively scheduled workflow branches. Each branch has its own workflow process and can call activities, sleep, or use other sequential primitives. Blocks until all branches complete. The non-bang form returns `{:ok, results}` or `{:cancelled, error}`; the bang form returns `results` or raises on cancellation.
 
 ### Async-Only Primitives
 
@@ -101,7 +101,7 @@ Signals are asynchronous, fire-and-forget messages. They are buffered by the exe
 
 **Inside a phase:** When a signal with a matching handler arrives, the handler is called. Multiple signals with the same name each invoke the handler separately.
 
-**Outside a phase:** Signals accumulate in the executor's buffer. They can be consumed with `API.wait_for_signal(name)`, which pops one signal from the buffer and returns its payload. If no matching signal exists, it blocks until one arrives.
+**Outside a phase:** Signals accumulate in the executor's buffer. They can be consumed with `API.wait_for_signal!/1`, which pops one signal from the buffer and returns its payload. The non-bang `API.wait_for_signal/1` returns `{:ok, payload}` instead. If no matching signal exists, either form blocks until one arrives.
 
 Signals arriving during linear execution (while the workflow is calling an activity, sleeping, etc.) are always buffered. They are never rejected or lost.
 
@@ -128,7 +128,7 @@ Queries are synchronous, read-only requests. They operate on the last state publ
 ### Signature
 
 ```elixir
-result = API.phase(initial_state, opts)
+result = API.phase!(initial_state, opts)
 ```
 
 - `initial_state` — The starting value for the reducer. Can be any term: a map, integer, list, etc.
@@ -179,7 +179,7 @@ Validators are always synchronous and always run inline in the executor process 
 ### Timeout
 
 ```elixir
-case API.phase(state, signal: %{...}, timeout: :timer.hours(24)) do
+case API.phase!(state, signal: %{...}, timeout: :timer.hours(24)) do
   {:timeout, state} -> # timed out
   state -> # a handler returned {:stop, state}
 end
@@ -279,7 +279,7 @@ count = API.update_state(fn state -> {length(state.items), state} end)
 ### Signature
 
 ```elixir
-results = API.parallel([fn1, fn2, fn3])
+results = API.parallel!([fn1, fn2, fn3])
 ```
 
 Each function has its own workflow process with access to the executor. Branches are cooperatively scheduled in deterministic rounds, so activity and timer waits can overlap without BEAM process timing affecting command order. Functions can call activities, sleep, use `API.publish_state`, and nest further `API.parallel` calls.
@@ -291,7 +291,7 @@ Returns a list of results in the same order as the input functions.
 If a branch raises an exception, the other branches continue running until they reach a terminal state (completion or failure). Every branch runs to completion. The result list contains each branch's return value on success, or `{:error, reason}` if the branch raised:
 
 ```elixir
-results = API.parallel([
+results = API.parallel!([
   fn -> Activities.StepA.run(x) end,   # returns {:ok, "a"}
   fn -> Activities.StepB.run(y) end,   # raises RuntimeError
   fn -> Activities.StepC.run(z) end,   # returns {:ok, "c"}
@@ -303,7 +303,7 @@ results = API.parallel([
 
 ```elixir
 def run(args) do
-  [{:ok, user}, {:ok, config}] = API.parallel([
+  [{:ok, user}, {:ok, config}] = API.parallel!([
     fn -> Activities.Users.fetch(args.user_id) end,
     fn -> Activities.Config.load(args.tenant) end,
   ])
@@ -343,7 +343,7 @@ end
 The state managed by a `phase` block. Passed to handlers, updated by handler return values and `API.update_state` calls. Scoped to the lifetime of one `phase` call. Returned to the caller when `phase` exits:
 
 ```elixir
-result = API.phase(%{items: [], count: 0}, ...)
+result = API.phase!(%{items: [], count: 0}, ...)
 # result is the final accumulator value
 ```
 
@@ -443,7 +443,7 @@ defmodule MyApp.Workflows.Counter do
   def run(_args) do
     API.publish_state(0)
 
-    result = API.phase(0,
+    result = API.phase!(0,
       signal: %{
         "increment" => fn _args, count -> {:noreply, count + 1} end,
         "decrement" => fn _args, count -> {:noreply, count - 1} end,
@@ -471,7 +471,7 @@ defmodule MyApp.Workflows.ShoppingCart do
     API.publish_state(%{phase: :open, item_count: 0})
 
     # Phase 1: Collect items
-    cart = API.phase(%{items: []},
+    cart = API.phase!(%{items: []},
       update: %{
         "add_item"    => {&do_add_item/2, validator: &validate_sku/2},
         "remove_item" => &do_remove_item/2,
@@ -488,7 +488,7 @@ defmodule MyApp.Workflows.ShoppingCart do
     # Phase 3: Confirm or cancel
     API.publish_state(%{phase: :confirming, total: total})
 
-    outcome = API.phase(%{confirmed: nil},
+    outcome = API.phase!(%{confirmed: nil},
       update: %{
         "confirm" => fn _args, state -> {:stop, :ok, %{state | confirmed: true}} end,
         "cancel"  => fn _args, state -> {:stop, :ok, %{state | confirmed: false}} end,
@@ -531,7 +531,7 @@ defmodule MyApp.Workflows.BatchProcess do
 
   def run(%{"items" => items}) do
     # Process all items with concurrent durable activity waits
-    results = API.parallel(Enum.map(items, fn item ->
+    results = API.parallel!(Enum.map(items, fn item ->
       fn -> Activities.Processor.run(item) end
     end))
 
@@ -557,7 +557,7 @@ defmodule MyApp.Workflows.Inventory do
   def run(_args) do
     API.publish_state(%{})
 
-    result = API.phase(%{stock: %{}},
+    result = API.phase!(%{stock: %{}},
       update: %{
         "restock" => fn [item], state ->
           # Async: needs to call an activity to get the price
@@ -598,7 +598,7 @@ defmodule MyApp.Workflows.EventCollector do
     state = args[:state] || %{events: [], generation: 0}
     API.publish_state(length(state.events))
 
-    case API.phase(state,
+    case API.phase!(state,
       signal: %{
         "event" => fn [event], state ->
           {:noreply, %{state | events: [event | state.events]}}
@@ -668,12 +668,13 @@ API.non_cancellable(fn -> ... end)
 `API.cancelled?/0` returns a boolean. `API.cancellation/0` returns the current
 `%Temporalex.Failure.CancelledError{}` or `nil`.
 
-After cancellation, new cancellable blocking work raises immediately unless it is inside
-`API.non_cancellable/1`. This makes cleanup explicit:
+After cancellation, new cancellable blocking work returns `{:cancelled, error}` immediately, or
+raises from the corresponding bang variant, unless it is inside `API.non_cancellable/1`. This makes
+cleanup explicit:
 
 ```elixir
 try do
-  API.sleep(60_000)
+  API.sleep!(60_000)
 rescue
   error in Temporalex.Failure.CancelledError ->
     API.non_cancellable(fn ->
@@ -691,11 +692,11 @@ Cancellation effects:
 
 | Primitive | Cancellation behavior |
 |---|---|
-| `API.sleep/1` | Emits `CancelTimer` and raises `CancelledError` |
-| `API.wait_for_signal/1` | Removes the waiter and raises `CancelledError` |
-| Activity dispatch | Emits `RequestCancelActivity` unless `cancellation_type: :abandon`; `:wait_cancellation_completed` waits for the activity cancellation resolution, `:try_cancel` raises immediately |
-| `API.parallel/1` | Cancels cancellable branches in deterministic branch order and raises to the parent scope |
-| `API.phase/2` | Stops accepting messages, rejects queued/new updates as cancelled, cancels the phase timer, cancels cancellable handlers, then raises to the owner |
+| `API.sleep/1` / `API.sleep!/1` | Emits `CancelTimer`; non-bang returns `{:cancelled, error}`, bang raises |
+| `API.wait_for_signal/1` / `API.wait_for_signal!/1` | Removes the waiter; non-bang returns `{:cancelled, error}`, bang raises |
+| Activity dispatch / bang dispatch | Emits `RequestCancelActivity` unless `cancellation_type: :abandon`; `:wait_cancellation_completed` waits for the activity cancellation resolution, `:try_cancel` resolves immediately |
+| `API.parallel/1` / `API.parallel!/1` | Cancels cancellable branches in deterministic branch order; non-bang returns `{:cancelled, error}`, bang raises |
+| `API.phase/2` / `API.phase!/2` | Stops accepting messages, rejects queued/new updates as cancelled, cancels the phase timer, cancels cancellable handlers, then returns/raises cancellation to the owner |
 
 ---
 
@@ -707,17 +708,17 @@ The programming model maps to the Temporal Core SDK's activation/command protoco
 |---|---|
 | `Activities.Foo.bar()` | `ScheduleActivity` → `ResolveActivity` |
 | cancelled activity | `RequestCancelActivity` → `ResolveActivity(cancelled)` |
-| `API.sleep(ms)` | `StartTimer` → `FireTimer` |
+| `API.sleep(ms)` / `API.sleep!(ms)` | `StartTimer` → `FireTimer` |
 | cancelled sleep | `CancelTimer` |
-| `API.wait_for_signal(name)` | No command (executor buffers `SignalWorkflow` jobs) |
+| `API.wait_for_signal(name)` / `API.wait_for_signal!(name)` | No command (executor buffers `SignalWorkflow` jobs) |
 | `API.now` | No command; workflow time is provided by activation timestamp |
 | `API.random` / `API.uuid4` | No command; deterministic random seed is provided by activation jobs |
 | `API.phase` | No command unless a timeout is configured; executor dispatches `SignalWorkflow` and `DoUpdate` jobs to handlers |
-| `API.phase(..., timeout: ms)` | `StartTimer`; `CancelTimer` if the phase exits before timeout |
+| `API.phase(..., timeout: ms)` / `API.phase!(..., timeout: ms)` | `StartTimer`; `CancelTimer` if the phase exits before timeout |
 | sync update handler | `UpdateResponse{accepted}` immediately, then handler's commands, then `UpdateResponse{completed}` |
 | `{:async, fn, state}` (update) | `UpdateResponse{accepted}` immediately, then handler's commands, then `UpdateResponse{completed}` |
 | `{:async, fn, state}` (signal) | No protocol-level tracking — handler's commands are regular commands |
-| `API.parallel(fns)` | Multiple commands in one activation (e.g. multiple `ScheduleActivity`) |
+| `API.parallel(fns)` / `API.parallel!(fns)` | Multiple commands in one activation (e.g. multiple `ScheduleActivity`) |
 | `API.publish_state` | No command (executor state for query serving) |
 | `API.update_state` | No command (executor-internal state transformation) |
 | `{:continue_as_new, args}` | `ContinueAsNewWorkflowExecution` |

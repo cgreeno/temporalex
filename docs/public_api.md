@@ -54,8 +54,9 @@ end
 Each `defactivity` generates:
 
 1. A dispatch function with the declared name, for workflow code.
-2. An implementation function named `__<activity_name>__/N`, for server-side activity execution.
-3. Module metadata through `__temporal_activities__/0`.
+2. A bang dispatch function named `<activity_name>!/N`, for workflow code that should unwrap success and raise failures or cancellation.
+3. An implementation function named `__<activity_name>__/N`, for server-side activity execution.
+4. Module metadata through `__temporal_activities__/0`.
 
 The dispatch function reads `:__temporal_context__` and calls the executor:
 
@@ -135,12 +136,16 @@ Workflow code uses `Temporalex.Workflow.API` for workflow primitives:
 
 ```elixir
 API.sleep(duration_ms)
+API.sleep!(duration_ms)
 API.wait_for_signal(name)
+API.wait_for_signal!(name)
 API.publish_state(state)
 API.patched?(patch_id)
 API.deprecate_patch(patch_id)
 API.phase(initial_state, opts)
+API.phase!(initial_state, opts)
 API.parallel(funs)
+API.parallel!(funs)
 API.update_state(fun)
 API.workflow_info()
 API.cancelled?()
@@ -154,9 +159,9 @@ API.uuid4()
 
 `API.update_state/1` is only valid inside async phase handlers.
 
-Workflow cancellation is cooperative. When a cancel request reaches the workflow, cancellable
-blocking primitives raise `%Temporalex.Failure.CancelledError{}`. Cleanup that must perform
-durable work after cancellation should be wrapped in `API.non_cancellable/1`.
+Workflow cancellation is cooperative. Non-bang cancellable primitives return cancellation as
+`{:cancelled, %Temporalex.Failure.CancelledError{}}`; bang variants raise the same error. Cleanup
+that must perform durable work after cancellation should be wrapped in `API.non_cancellable/1`.
 
 The detailed semantics are in [programming_model.md](programming_model.md).
 

@@ -56,7 +56,7 @@ defmodule Temporalex.ServerIntegrationTest do
     use Temporalex.Workflow
 
     def run(_) do
-      value = API.wait_for_signal("go")
+      value = API.wait_for_signal!("go")
       {:ok, value}
     end
   end

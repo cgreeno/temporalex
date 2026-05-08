@@ -26,7 +26,7 @@ defmodule Temporalex.Core.Executor do
   alias Temporalex.Core.Thread
   alias Temporalex.Workflow.API
 
-  @raise_reply :__temporalex_raise__
+  @op_reply :temporalex_op_reply
 
   defmodule State do
     @moduledoc false
@@ -387,7 +387,7 @@ defmodule Temporalex.Core.Executor do
             violation =
               SchedulerViolation.exception(thread_id: caller_thread_id, running: state.running)
 
-            GenServer.reply(from, {:error, violation})
+            reply_error(from, violation)
             fail_activation(state, violation)
           end
 
@@ -429,7 +429,7 @@ defmodule Temporalex.Core.Executor do
 
   defp handle_workflow_op(state, from, thread_id, %Op.ExecuteActivity{} = op) do
     if cancellable_blocked_by_workflow_cancellation?(state, thread_id) do
-      reply_raise(from, state.cancellation)
+      reply_cancelled(from, state.cancellation)
       state
     else
       seq = state.next_seq
@@ -584,7 +584,7 @@ defmodule Temporalex.Core.Executor do
 
   defp handle_workflow_op(state, from, thread_id, %Op.Sleep{} = op) do
     if cancellable_blocked_by_workflow_cancellation?(state, thread_id) do
-      reply_raise(from, state.cancellation)
+      reply_cancelled(from, state.cancellation)
       state
     else
       seq = state.next_seq
@@ -600,12 +600,12 @@ defmodule Temporalex.Core.Executor do
 
   defp handle_workflow_op(state, from, thread_id, %Op.WaitForSignal{name: name} = op) do
     if cancellable_blocked_by_workflow_cancellation?(state, thread_id) do
-      reply_raise(from, state.cancellation)
+      reply_cancelled(from, state.cancellation)
       state
     else
       case pop_buffered_signal(state.signal_buffer, name) do
         {:ok, args, signal_buffer} ->
-          GenServer.reply(from, args)
+          reply_ok(from, args)
           %{state | signal_buffer: signal_buffer}
 
         :error ->
@@ -627,29 +627,29 @@ defmodule Temporalex.Core.Executor do
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.PublishState{state: published_state}) do
-    GenServer.reply(from, :ok)
+    reply_ok(from, :ok)
     %{state | published_state: published_state}
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.WorkflowInfo{}) do
-    GenServer.reply(from, state.workflow_info)
+    reply_ok(from, state.workflow_info)
     state
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.Cancelled{}) do
-    GenServer.reply(from, state.cancelled?)
+    reply_ok(from, state.cancelled?)
     state
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.Cancellation{}) do
-    GenServer.reply(from, state.cancellation)
+    reply_ok(from, state.cancellation)
     state
   end
 
   defp handle_workflow_op(state, from, thread_id, %Op.EnterNonCancellable{}) do
     thread = Map.fetch!(state.threads, thread_id)
     state = put_thread(state, %{thread | non_cancellable_depth: thread.non_cancellable_depth + 1})
-    GenServer.reply(from, :ok)
+    reply_ok(from, :ok)
     state
   end
 
@@ -657,58 +657,58 @@ defmodule Temporalex.Core.Executor do
     thread = Map.fetch!(state.threads, thread_id)
     depth = max(thread.non_cancellable_depth - 1, 0)
     state = put_thread(state, %{thread | non_cancellable_depth: depth})
-    GenServer.reply(from, :ok)
+    reply_ok(from, :ok)
     state
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.Now{}) do
-    GenServer.reply(from, state.timestamp)
+    reply_ok(from, state.timestamp)
     state
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.Random{}) do
     {value, seed} = next_random_float(state.randomness_seed)
-    GenServer.reply(from, value)
+    reply_ok(from, value)
     %{state | randomness_seed: seed}
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.UUID4{}) do
     {uuid, seed} = next_uuid4(state.randomness_seed)
-    GenServer.reply(from, uuid)
+    reply_ok(from, uuid)
     %{state | randomness_seed: seed}
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.Patched{id: id}) do
     {patched?, state} = apply_patch_check(state, id)
-    GenServer.reply(from, patched?)
+    reply_ok(from, patched?)
     state
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.DeprecatePatch{id: id}) do
     state = apply_patch_deprecation(state, id)
-    GenServer.reply(from, :ok)
+    reply_ok(from, :ok)
     state
   end
 
   defp handle_workflow_op(state, from, _thread_id, %Op.UpsertSearchAttributes{attrs: attrs}) do
     state = append_command(state, %Command.UpsertSearchAttributes{attrs: attrs})
-    GenServer.reply(from, :ok)
+    reply_ok(from, :ok)
     state
   end
 
   defp handle_workflow_op(state, from, thread_id, %Op.Parallel{funs: []}) do
     if cancellable_blocked_by_workflow_cancellation?(state, thread_id) do
-      reply_raise(from, state.cancellation)
+      reply_cancelled(from, state.cancellation)
       state
     else
-      GenServer.reply(from, [])
+      reply_ok(from, [])
       put_thread(state, %{Map.fetch!(state.threads, thread_id) | status: :running})
     end
   end
 
   defp handle_workflow_op(state, from, thread_id, %Op.Parallel{funs: funs}) do
     if cancellable_blocked_by_workflow_cancellation?(state, thread_id) do
-      reply_raise(from, state.cancellation)
+      reply_cancelled(from, state.cancellation)
       state
     else
       scope_id = state.next_scope_id
@@ -750,12 +750,12 @@ defmodule Temporalex.Core.Executor do
        }) do
     cond do
       cancellable_blocked_by_workflow_cancellation?(state, thread_id) ->
-        reply_raise(from, state.cancellation)
+        reply_cancelled(from, state.cancellation)
         state
 
       state.phase ->
         error = %RuntimeError{message: "nested phases are not supported by the Slice 2 core"}
-        GenServer.reply(from, {:error, error})
+        reply_error(from, error)
         fail_activation(state, error)
 
       true ->
@@ -779,11 +779,11 @@ defmodule Temporalex.Core.Executor do
 
     cond do
       thread.kind not in [:async_signal_handler, :async_update_handler] ->
-        GenServer.reply(from, {:error, :not_async_phase_handler})
+        reply_error(from, :not_async_phase_handler)
         state
 
       state.phase == nil ->
-        GenServer.reply(from, {:error, :no_active_phase})
+        reply_error(from, :no_active_phase)
         state
 
       true ->
@@ -791,30 +791,32 @@ defmodule Temporalex.Core.Executor do
           case fun.(state.phase.state) do
             {result, new_state} ->
               phase = %{state.phase | state: new_state}
-              GenServer.reply(from, result)
+              reply_ok(from, result)
               %{state | phase: phase}
 
             other ->
-              GenServer.reply(from, {:error, {:invalid_update_state_return, other}})
+              reply_error(from, {:invalid_update_state_return, other})
               state
           end
         rescue
           error ->
-            GenServer.reply(from, {:error, error})
+            reply_error(from, error)
             state
         catch
           kind, reason ->
-            GenServer.reply(from, {:error, {kind, reason}})
+            reply_error(from, {kind, reason})
             state
         end
     end
   end
 
-  defp reply_raise(from, error) do
-    GenServer.reply(from, raise_reply(error))
-  end
+  defp reply_ok(from, value), do: GenServer.reply(from, op_ok(value))
+  defp reply_error(from, reason), do: GenServer.reply(from, op_error(reason))
+  defp reply_cancelled(from, error), do: GenServer.reply(from, op_cancelled(error))
 
-  defp raise_reply(error), do: {@raise_reply, error}
+  defp op_ok(value), do: {@op_reply, :ok, value}
+  defp op_error(reason), do: {@op_reply, :error, reason}
+  defp op_cancelled(error), do: {@op_reply, :cancelled, error}
 
   defp cancellable_blocked_by_workflow_cancellation?(%State{cancelled?: false}, _thread_id),
     do: false
@@ -861,7 +863,7 @@ defmodule Temporalex.Core.Executor do
       {%Pending{op: %Op.ExecuteActivity{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)
-        |> ready_thread(thread_id, {from, result})
+        |> ready_thread(thread_id, {from, op_ok(result)})
 
       {%Pending{op: %Op.ExecuteLocalActivity{}, thread_id: thread_id, from: from}, pending} ->
         state
@@ -895,7 +897,7 @@ defmodule Temporalex.Core.Executor do
       {%Pending{op: %Op.Sleep{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)
-        |> ready_thread(thread_id, {from, :ok})
+        |> ready_thread(thread_id, {from, op_ok(:ok)})
 
       {%Pending{op: {:phase_timeout, phase_id}}, pending} ->
         state
@@ -1074,7 +1076,7 @@ defmodule Temporalex.Core.Executor do
 
     state =
       Enum.reduce(waiters, state, fn waiter, acc ->
-        ready_thread(acc, waiter.thread_id, {waiter.from, raise_reply(cancellation)})
+        ready_thread(acc, waiter.thread_id, {waiter.from, op_cancelled(cancellation)})
       end)
 
     signal_waiters =
@@ -1121,7 +1123,7 @@ defmodule Temporalex.Core.Executor do
     |> delete_pending(pending.seq)
     |> tombstone_sequence(pending.seq)
     |> append_command(%Command.CancelTimer{seq: pending.seq})
-    |> ready_thread(pending.thread_id, {pending.from, raise_reply(cancellation)})
+    |> ready_thread(pending.thread_id, {pending.from, op_cancelled(cancellation)})
   end
 
   defp do_cancel_pending_operation(
@@ -1139,13 +1141,13 @@ defmodule Temporalex.Core.Executor do
         |> delete_pending(pending.seq)
         |> tombstone_sequence(pending.seq)
         |> append_command(%Command.RequestCancelActivity{seq: pending.seq})
-        |> ready_thread(pending.thread_id, {pending.from, raise_reply(cancellation)})
+        |> ready_thread(pending.thread_id, {pending.from, op_cancelled(cancellation)})
 
       :abandon ->
         state
         |> delete_pending(pending.seq)
         |> tombstone_sequence(pending.seq)
-        |> ready_thread(pending.thread_id, {pending.from, raise_reply(cancellation)})
+        |> ready_thread(pending.thread_id, {pending.from, op_cancelled(cancellation)})
     end
   end
 
@@ -1231,7 +1233,7 @@ defmodule Temporalex.Core.Executor do
 
     state
     |> Map.put(:signal_waiters, signal_waiters)
-    |> ready_thread(waiter.thread_id, {waiter.from, args})
+    |> ready_thread(waiter.thread_id, {waiter.from, op_ok(args)})
   end
 
   defp pop_buffered_signal(buffer, name) do
@@ -1587,11 +1589,14 @@ defmodule Temporalex.Core.Executor do
       result =
         case scope.cancellation do
           %Temporalex.Failure.CancelledError{} = cancellation ->
-            raise_reply(cancellation)
+            op_cancelled(cancellation)
 
           nil ->
-            0..(scope.size - 1)
-            |> Enum.map(&Map.fetch!(results, &1))
+            results =
+              0..(scope.size - 1)
+              |> Enum.map(&Map.fetch!(results, &1))
+
+            op_ok(results)
         end
 
       state
@@ -1794,12 +1799,13 @@ defmodule Temporalex.Core.Executor do
     end
   end
 
-  defp phase_completion_result(%Phase{result: :timeout, state: state}), do: {:timeout, state}
-
   defp phase_completion_result(%Phase{result: {:cancelled, cancellation}}),
-    do: raise_reply(cancellation)
+    do: op_cancelled(cancellation)
 
-  defp phase_completion_result(%Phase{state: state}), do: state
+  defp phase_completion_result(%Phase{result: :timeout, state: state}),
+    do: op_ok({:timeout, state})
+
+  defp phase_completion_result(%Phase{state: state}), do: op_ok(state)
 
   defp spawn_thread(state, thread_id, kind, fun, opts \\ []) do
     executor = self()
