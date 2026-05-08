@@ -73,6 +73,29 @@ Outcome:
 - No scheduler, replay, phase, update, or query ambiguity is known that blocks native backend integration.
 - Server/backend integration can proceed without changing executor scheduling semantics. The server implementation already routes, supervises, and submits without owning deterministic workflow state.
 
+## Runtime Abort Follow-Up Review
+
+Status: completed.
+
+Review date: May 8, 2026.
+
+Findings:
+
+- Scheduler violations, replay nondeterminism, unknown command resolutions, missing replay commands, thread-yield timeouts, unexpected runner exits, and executor-only invariant failures now share the same runtime abort path.
+- Runtime aborts fail the activation and tear down executor-owned workflow processes instead of replying to blocked workflow API calls with ordinary values.
+- Eviction-only activations continue to use normal teardown and return successful empty completions.
+- Blocked operations, signal waiters, phase state, parallel scopes, scheduler rounds, and running-thread state are cleared when runtime abort or eviction teardown runs.
+- Pending runtime failures detected outside an activation are preserved until the next non-eviction activation reports the failure.
+
+Test evidence:
+
+- `mix test test/temporalex/core_executor_test.exs`: 53 tests, 0 failures.
+- `mix test`: 77 tests, 0 failures, 2 external tests excluded.
+- `mix test --only external`: 2 tests, 0 failures.
+- `mix format --check-formatted`: success.
+- `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
+- `cargo fmt --manifest-path native/temporalex_nif/Cargo.toml --check`: success.
+
 ## Native Integration Review
 
 Status: completed.

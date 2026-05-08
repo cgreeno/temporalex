@@ -552,6 +552,42 @@ defmodule Temporalex.CoreExecutorTest do
     end
   end
 
+  defp monitor_thread(exec, thread_id \\ []) do
+    thread = Temporalex.Core.Executor.inspect_state(exec.pid).threads[thread_id]
+
+    assert thread != nil
+    {thread.pid, Process.monitor(thread.pid)}
+  end
+
+  defp assert_runtime_teardown(exec, runner_pid, runner_ref) do
+    assert_receive {:DOWN, ^runner_ref, :process, ^runner_pid, :killed}, 1_000
+
+    state = Temporalex.Core.Executor.inspect_state(exec.pid)
+    assert state.threads == %{}
+    assert state.pending == %{}
+    assert state.signal_waiters == %{}
+    assert state.phase == nil
+    assert state.parallel_scopes == %{}
+  end
+
+  defp wait_until(fun, timeout_ms \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_until(fun, deadline)
+  end
+
+  defp do_wait_until(fun, deadline) do
+    if fun.() do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        flunk("condition did not become true before timeout")
+      else
+        Process.sleep(10)
+        do_wait_until(fun, deadline)
+      end
+    end
+  end
+
   describe "Slice 1 sequential core" do
     test "terminal workflow return shapes become terminal commands" do
       assert {:ok, exec} = TestHarness.start_workflow(CompleteWorkflow, :input)
@@ -632,6 +668,69 @@ defmodule Temporalex.CoreExecutorTest do
 
       assert runner.status == :blocked
       assert Process.alive?(runner.pid)
+    end
+
+    test "runtime abort tears down blocked runner on unknown command resolution" do
+      assert {:ok, exec} = TestHarness.start_workflow(ActivityWorkflow, :value)
+      assert {:yield, [%Command.ScheduleActivity{}]} = TestHarness.next(exec)
+
+      {runner_pid, runner_ref} = monitor_thread(exec)
+
+      assert {:failed, %Nondeterminism{}} =
+               TestHarness.resolve(exec, %Job.ActivityResolved{
+                 seq: 999,
+                 result: {:ok, :late}
+               })
+
+      assert_runtime_teardown(exec, runner_pid, runner_ref)
+    end
+
+    test "runtime abort tears down blocked runner on replay mismatch" do
+      assert {:ok, exec} = TestHarness.start_workflow(ActivityThenTimerWorkflow, :value)
+      assert {:yield, [%Command.ScheduleActivity{seq: activity_seq}]} = TestHarness.next(exec)
+
+      {runner_pid, runner_ref} = monitor_thread(exec)
+
+      assert {:failed, %Nondeterminism{}} =
+               TestHarness.resolve(
+                 exec,
+                 %Job.ActivityResolved{seq: activity_seq, result: {:ok, :value}},
+                 replay: true,
+                 expected_commands: [%Command.StartTimer{seq: 99, thread_id: [], duration_ms: 10}]
+               )
+
+      assert_runtime_teardown(exec, runner_pid, runner_ref)
+    end
+
+    test "unexpected runner exit is reported as next activation failure" do
+      assert {:ok, exec} = TestHarness.start_workflow(ActivityWorkflow, :value)
+      assert {:yield, [%Command.ScheduleActivity{}]} = TestHarness.next(exec)
+
+      {runner_pid, runner_ref} = monitor_thread(exec)
+      Process.exit(runner_pid, :kill)
+      assert_receive {:DOWN, ^runner_ref, :process, ^runner_pid, :killed}, 1_000
+
+      wait_until(fn ->
+        state = Temporalex.Core.Executor.inspect_state(exec.pid)
+        state.threads == %{} and match?(%RuntimeError{}, state.activation_failed)
+      end)
+
+      assert {:failed, %RuntimeError{message: message}} = TestHarness.resolve(exec, [])
+      assert message =~ "workflow thread [] exited unexpectedly: :killed"
+    end
+
+    test "runtime abort tears down signal waiters on missing replay command" do
+      assert {:ok, exec} = TestHarness.start_workflow(WaitSignalWorkflow, nil)
+
+      assert {:failed, %Nondeterminism{}} =
+               TestHarness.next(exec,
+                 replay: true,
+                 expected_commands: [%Command.StartTimer{seq: 0, thread_id: [], duration_ms: 10}]
+               )
+
+      state = Temporalex.Core.Executor.inspect_state(exec.pid)
+      assert state.threads == %{}
+      assert state.signal_waiters == %{}
     end
 
     test "executor shutdown tears down linked blocked runner" do

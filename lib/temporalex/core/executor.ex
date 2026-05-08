@@ -108,51 +108,57 @@ defmodule Temporalex.Core.Executor do
     state = prepare_activation(state, activation, opts)
 
     {completion, state} =
-      if eviction_only?(activation.jobs) do
-        state = teardown_threads(%{state | evicted?: true})
-        {%Completion{run_id: activation.run_id, status: {:ok, []}}, finish_activation(state)}
-      else
-        # Two-phase job processing so that updates and signals see a fully
-        # set-up workflow state (phase, handlers, published state):
-        #
-        # 1. Apply "input" jobs (Initialize, ActivityResolved, TimerFired,
-        #    CancelWorkflow, NotifyPatch, UpdateRandomSeed, RemoveFromCache,
-        #    and child-workflow resolutions). Drive the scheduler so the
-        #    workflow runs to its next parked state.
-        # 2. Apply "message" jobs (SignalReceived, UpdateReceived,
-        #    QueryReceived). Drive the scheduler again to dispatch handlers.
-        #
-        # Single-pass processing would reject updates that arrive in the
-        # same activation as a replay-InitializeWorkflow, because the
-        # workflow runner hadn't yet entered API.phase to populate
-        # state.phase.
-        {input_jobs, message_jobs} = Enum.split_with(activation.jobs, &input_job?/1)
+      cond do
+        eviction_only?(activation.jobs) ->
+          state = teardown_threads(%{state | evicted?: true})
+          {%Completion{run_id: activation.run_id, status: {:ok, []}}, finish_activation(state)}
 
-        {_, state} = apply_jobs(input_jobs, [], state)
+        not is_nil(state.activation_failed) ->
+          {completion_from_state(state), finish_activation(state)}
 
-        state =
-          if query_only?(activation.jobs) do
-            state
-          else
-            state |> maybe_dispatch_phase() |> drain_scheduler()
-          end
+        true ->
+          # Two-phase job processing so that updates and signals see a fully
+          # set-up workflow state (phase, handlers, published state):
+          #
+          # 1. Apply "input" jobs (Initialize, ActivityResolved, TimerFired,
+          #    CancelWorkflow, NotifyPatch, UpdateRandomSeed, RemoveFromCache,
+          #    and child-workflow resolutions). Drive the scheduler so the
+          #    workflow runs to its next parked state.
+          # 2. Apply "message" jobs (SignalReceived, UpdateReceived,
+          #    QueryReceived). Drive the scheduler again to dispatch handlers.
+          #
+          # Single-pass processing would reject updates that arrive in the
+          # same activation as a replay-InitializeWorkflow, because the
+          # workflow runner hadn't yet entered API.phase to populate
+          # state.phase.
+          {input_jobs, message_jobs} = Enum.split_with(activation.jobs, &input_job?/1)
 
-        {query_jobs, state} = apply_jobs(message_jobs, [], state)
+          {_, state} = apply_jobs(input_jobs, [], state)
 
-        state =
-          query_jobs
-          |> Enum.reverse()
-          |> Enum.reduce(state, &respond_to_query/2)
+          state =
+            if query_only?(activation.jobs) do
+              state
+            else
+              state |> maybe_dispatch_phase() |> drain_scheduler()
+            end
 
-        state =
-          if query_only?(activation.jobs) do
-            state
-          else
-            state |> maybe_dispatch_phase() |> drain_scheduler()
-          end
+          {query_jobs, state} = apply_jobs(message_jobs, [], state)
 
-        completion = completion_from_state(state)
-        {completion, finish_activation(state)}
+          state =
+            query_jobs
+            |> Enum.reverse()
+            |> Enum.reduce(state, &respond_to_query/2)
+
+          state =
+            if query_only?(activation.jobs) do
+              state
+            else
+              state |> maybe_dispatch_phase() |> drain_scheduler()
+            end
+
+          state = maybe_abort_missing_replay_commands(state)
+          completion = completion_from_state(state)
+          {completion, finish_activation(state)}
       end
 
     {:reply, completion, state}
@@ -186,7 +192,7 @@ defmodule Temporalex.Core.Executor do
         commands: [],
         expected_commands: Keyword.get(opts, :expected_commands),
         expected_index: 0,
-        activation_failed: nil
+        activation_failed: state.activation_failed
     }
   end
 
@@ -387,8 +393,7 @@ defmodule Temporalex.Core.Executor do
             violation =
               SchedulerViolation.exception(thread_id: caller_thread_id, running: state.running)
 
-            reply_error(from, violation)
-            fail_activation(state, violation)
+            runtime_abort(state, violation)
           end
 
         case Map.get(state.threads, thread_id) do
@@ -421,7 +426,7 @@ defmodule Temporalex.Core.Executor do
         end
     after
       5_000 ->
-        fail_activation(state, %RuntimeError{
+        runtime_abort(state, %RuntimeError{
           message: "workflow thread #{inspect(thread_id)} did not yield"
         })
     end
@@ -755,8 +760,7 @@ defmodule Temporalex.Core.Executor do
 
       state.phase ->
         error = %RuntimeError{message: "nested phases are not supported by the Slice 2 core"}
-        reply_error(from, error)
-        fail_activation(state, error)
+        runtime_abort(state, error)
 
       true ->
         phase_id = state.next_phase_id
@@ -832,10 +836,18 @@ defmodule Temporalex.Core.Executor do
     end
   end
 
+  defp put_pending(%State{activation_failed: reason} = state, _seq, _thread_id, _from, _op)
+       when not is_nil(reason),
+       do: state
+
   defp put_pending(state, seq, thread_id, from, op) do
     pending = %Pending{seq: seq, thread_id: thread_id, from: from, op: op}
     put_in(state.pending[seq], pending)
   end
+
+  defp block_thread(%State{activation_failed: reason} = state, _thread_id)
+       when not is_nil(reason),
+       do: state
 
   defp block_thread(state, thread_id) do
     thread = Map.fetch!(state.threads, thread_id)
@@ -853,7 +865,7 @@ defmodule Temporalex.Core.Executor do
               cancelled_sequences: MapSet.delete(state.cancelled_sequences, seq)
           }
         else
-          fail_activation(%{state | pending: pending}, %Nondeterminism{
+          runtime_abort(%{state | pending: pending}, %Nondeterminism{
             message: "activation resolved unknown command sequence #{inspect(seq)}",
             expected: Map.keys(state.pending),
             actual: seq
@@ -1862,6 +1874,10 @@ defmodule Temporalex.Core.Executor do
     put_in(state.threads[thread.id], thread)
   end
 
+  defp ready_thread(%State{activation_failed: reason} = state, _thread_id, _resume)
+       when not is_nil(reason),
+       do: state
+
   defp ready_thread(state, thread_id, resume) do
     thread = Map.fetch!(state.threads, thread_id)
 
@@ -1894,7 +1910,7 @@ defmodule Temporalex.Core.Executor do
 
         cond do
           expected == nil ->
-            fail_activation(
+            runtime_abort(
               state,
               Nondeterminism.exception(
                 message: "extra replay command",
@@ -1907,7 +1923,7 @@ defmodule Temporalex.Core.Executor do
             %{state | expected_index: state.expected_index + 1}
 
           true ->
-            fail_activation(
+            runtime_abort(
               state,
               Nondeterminism.exception(
                 message: "replay command mismatch",
@@ -1953,6 +1969,34 @@ defmodule Temporalex.Core.Executor do
 
   defp command_identity(command), do: command
 
+  defp maybe_abort_missing_replay_commands(
+         %State{activation_failed: nil, expected_commands: expected_commands} = state
+       )
+       when is_list(expected_commands) do
+    if state.expected_index == length(expected_commands) do
+      state
+    else
+      expected = Enum.at(expected_commands, state.expected_index)
+
+      runtime_abort(
+        state,
+        Nondeterminism.exception(
+          message: "missing replay command",
+          expected: expected,
+          actual: nil
+        )
+      )
+    end
+  end
+
+  defp maybe_abort_missing_replay_commands(state), do: state
+
+  defp runtime_abort(state, reason) do
+    state
+    |> fail_activation(reason)
+    |> teardown_threads()
+  end
+
   defp fail_activation(state, reason) do
     %{state | activation_failed: reason}
   end
@@ -1968,27 +2012,6 @@ defmodule Temporalex.Core.Executor do
     }
   end
 
-  defp completion_from_state_open(%State{expected_commands: expected_commands} = state)
-       when is_list(expected_commands) do
-    if state.expected_index == length(expected_commands) do
-      %Completion{run_id: state.run_id, status: {:ok, state.commands}}
-    else
-      expected = Enum.at(expected_commands, state.expected_index)
-
-      reason =
-        Nondeterminism.exception(
-          message: "missing replay command",
-          expected: expected,
-          actual: nil
-        )
-
-      %Completion{
-        run_id: state.run_id,
-        status: {:failed, reason, force_cause: :non_deterministic_error}
-      }
-    end
-  end
-
   defp completion_from_state_open(state) do
     %Completion{run_id: state.run_id, status: {:ok, state.commands}}
   end
@@ -1996,6 +2019,10 @@ defmodule Temporalex.Core.Executor do
   defp failure_cause(%Nondeterminism{}), do: :non_deterministic_error
   defp failure_cause(%SchedulerViolation{}), do: :workflow_task_failed
   defp failure_cause(_reason), do: :workflow_task_failed
+
+  defp handle_thread_exit(%State{activation_failed: reason} = state, _pid, _reason)
+       when not is_nil(reason),
+       do: state
 
   defp handle_thread_exit(state, pid, reason) do
     case Enum.find(state.threads, fn {_id, thread} -> thread.pid == pid end) do
@@ -2005,12 +2032,20 @@ defmodule Temporalex.Core.Executor do
       {_id, %Thread{status: status}} when status in [:done, :failed] ->
         state
 
-      {thread_id, _thread} when reason in [:normal, :shutdown, :killed] ->
-        thread = Map.fetch!(state.threads, thread_id)
-        put_thread(state, %{thread | status: :done})
+      {thread_id, _thread} when reason == :normal ->
+        runtime_abort(
+          state,
+          %RuntimeError{message: "workflow thread #{inspect(thread_id)} exited before reporting"}
+        )
 
       {thread_id, _thread} ->
-        fail_thread(state, thread_id, {:exit, reason})
+        runtime_abort(
+          state,
+          %RuntimeError{
+            message:
+              "workflow thread #{inspect(thread_id)} exited unexpectedly: #{inspect(reason)}"
+          }
+        )
     end
   end
 
@@ -2021,7 +2056,18 @@ defmodule Temporalex.Core.Executor do
       end
     end)
 
-    %{state | threads: %{}, pending: %{}, signal_waiters: %{}, phase: nil, parallel_scopes: %{}}
+    %{
+      state
+      | threads: %{},
+        pending: %{},
+        signal_waiters: %{},
+        phase: nil,
+        parallel_scopes: %{},
+        running: nil,
+        current_round: [],
+        next_round: [],
+        in_round?: false
+    }
   end
 
   @u64_mask 0xFFFFFFFFFFFFFFFF
