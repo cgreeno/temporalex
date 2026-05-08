@@ -70,15 +70,18 @@ Decode Temporal failure protos into the public structs recursively:
 - `ActivityFailureInfo` -> `%ActivityError{activity_id, activity_type, retry_state, cause}`
 - `ChildWorkflowExecutionFailureInfo` -> `%WorkflowExecutionError{workflow_id, run_id, workflow_type, retry_state, cause}`
 
-Client workflow result APIs keep tuple status for now:
+Client workflow result APIs now return operation error structs:
 
 ```elixir
-{:error, {:failed, %Temporalex.Failure.ActivityError{}}}
-{:error, {:failed, %Temporalex.Failure.ApplicationError{}}}
-{:error, {:canceled, %Temporalex.Failure.CancelledError{}}}
+{:error, %Temporalex.WorkflowFailedError{cause: %Temporalex.Failure.ActivityError{}}}
+{:error, %Temporalex.WorkflowFailedError{cause: %Temporalex.Failure.ApplicationError{}}}
+{:error, %Temporalex.WorkflowCancelledError{}}
+{:error, %Temporalex.WorkflowTerminatedError{}}
+{:error, %Temporalex.WorkflowTimedOutError{}}
 ```
 
-This preserves the existing `{:ok, value} | {:error, reason}` style while giving callers structured causes.
+This preserves the `{:ok, value} | {:error, reason}` style while giving callers structured
+operation errors. Temporal failure trees are stored in `cause`.
 
 ## Retry Semantics
 
@@ -114,10 +117,9 @@ The helper module should return exception structs but not require users to raise
 3. Update native inbound failure decoding to build those structs recursively.
 4. Update executor tests for workflow, query, update, and activity failures.
 5. Add real-server retry tests proving `retryable?` and `non_retryable_error_types` interact correctly.
-6. Preserve legacy tagged terms temporarily only where tests or API ergonomics require them.
+6. Migrate client workflow result errors from native status tuples to public exception structs.
 
 ## Open Questions
 
 - Should raised non-Temporalex exceptions default to the exception module as `type`, or should they remain `"Temporalex.ApplicationError"` until users opt in?
-- Should client `get_result/2` preserve current tagged tuples for canceled/timed-out/terminated states, or migrate all of them to structs in one breaking change?
 - Should failure details be decoded eagerly, or should structs carry both decoded terms and raw payloads for forward compatibility?

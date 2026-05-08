@@ -89,6 +89,7 @@ Implemented:
 - Exposed application failure retry control as `retryable?`, which maps to the inverse of Temporal's `ApplicationFailureInfo.non_retryable`.
 - Preserved failure `cause` recursively when decoding server/core failures and when encoding decoded wrappers back to Temporal.
 - Routed workflow, activity, query, and update rejection failures through the structured native encoder.
+- Added public client operation error structs, including `Temporalex.UpdateFailedError` for update failures and rejections observed by the client.
 - Added core, codec, and Temporal dev-server tests proving `retryable?`, `non_retryable_error_types`, and activity retry attempts are observed by Temporal.
 
 References:
@@ -99,7 +100,6 @@ References:
 
 Remaining follow-up:
 
-- Decide whether update-specific rejected/completed errors need a dedicated public wrapper once update ergonomics are revisited.
 - Decide whether raised non-Temporalex exceptions should default `ApplicationError.type` to the exception module name.
 
 ### Continue-As-New Is Under-Modeled
@@ -155,7 +155,8 @@ Implemented:
 - Workflow handles carry a client reference instead of a worker reference.
 - Client operations resolve the backend handle and call the backend directly; the client process is not a request proxy.
 - The backend behaviour now names the client-operation callbacks used by `Temporalex.Client`, so the client/backend contract is explicit.
-- Long-running client operations monitor the client owner while waiting and return `{:error, {:client_down, reason}}` if it exits.
+- Long-running client operations monitor the client owner while waiting and return `{:error, %Temporalex.ClientUnavailableError{}}` if it exits.
+- Public client operation errors are stable exception structs, with Temporal failure trees stored under `cause` where applicable.
 - Added server/backend tests for explicit client wiring and worker shutdown on client exit, plus Temporal dev-server coverage with a standalone client and worker sharing the same native client resources.
 
 References:
@@ -269,7 +270,7 @@ Missing production-confidence tests:
 - Query reject condition behavior.
 - Update rejection, async update completion, and update handles when implemented.
 - Backend conformance tests that compare fake backend and Temporal Core backend behavior for shared operations.
-- Payload/failure decoder tests for all public error surfaces.
+- Additional payload/failure decoder tests for Temporal failure variants that are still represented as `Temporalex.Failure.UnknownError`.
 
 ## Lower Priority Or Explicitly Deferred
 

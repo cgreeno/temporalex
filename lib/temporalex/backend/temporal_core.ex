@@ -13,6 +13,7 @@ defmodule Temporalex.Backend.TemporalCore do
   alias Temporalex.Backend.TemporalCore.PayloadConverter
   alias Temporalex.Core.ActivityCompletion
   alias Temporalex.Core.Completion
+  alias Temporalex.Error
   alias Temporalex.Native
 
   defmodule ClientState do
@@ -85,6 +86,9 @@ defmodule Temporalex.Backend.TemporalCore do
            Keyword.get(opts, :workflow_result_timeout, @default_workflow_result_timeout),
          payload_codec: payload_codec_from_opts(opts)
        }}
+    else
+      {:error, reason} ->
+        {:error, Error.normalize_client_reason(reason, operation: :connect_client)}
     end
   end
 
@@ -119,6 +123,9 @@ defmodule Temporalex.Backend.TemporalCore do
          start_timeout: start_timeout,
          shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @default_shutdown_timeout)
        }}
+    else
+      {:error, reason} ->
+        {:error, Error.normalize_client_reason(reason, operation: :start_worker)}
     end
   end
 
@@ -159,7 +166,16 @@ def complete_activity_task(%WorkerState{} = state, %ActivityCompletion{} = compl
     Native.initiate_shutdown(state.worker)
 
     with :ok <- Native.shutdown_worker(state.worker, self()) do
-      await_shutdown(state.shutdown_timeout)
+      case await_shutdown(state.shutdown_timeout) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          {:error, Error.normalize_client_reason(reason, operation: :shutdown_worker)}
+      end
+    else
+      {:error, reason} ->
+        {:error, Error.normalize_client_reason(reason, operation: :shutdown_worker)}
     end
   end
 

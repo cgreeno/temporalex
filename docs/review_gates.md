@@ -223,10 +223,27 @@ Outcome:
 
 - No native/backend boundary shortcut is known that blocks beta evaluation of workflow start/result, signal/query/update/describe/terminate, worker polling, timers, activities, heartbeats, completions, shutdown, workflow/activity option encoding, and ETF payload conversion.
 
+## Public Client Error Surface Review
+
+Status: completed.
+
+Findings:
+
+- Public client operations now return `{:ok, value}`, `:ok`, or `{:error, exception_struct}`. They no longer expose native workflow-result tags such as `{:failed, failure}` or raw transport strings as their documented surface.
+- Workflow execution outcomes are represented by `Temporalex.WorkflowFailedError`, `Temporalex.WorkflowCancelledError`, `Temporalex.WorkflowTerminatedError`, `Temporalex.WorkflowTimedOutError`, and `Temporalex.WorkflowContinuedAsNewError`.
+- Start conflicts, missing executions, query rejections, update failures, client-owner loss, and transport/payload/option/RPC failures have stable structs with operation context.
+- Temporal failure protos still decode into `Temporalex.Failure.*` trees. Client operation errors that wrap Temporal failures store those trees in `cause`.
+- The Rust NIF now sends structured low-level reasons for known client errors, including `:not_found`, `{:already_started, run_id}`, `{:payload_conversion, message}`, `{:invalid_options, message}`, and `{:rpc, message}`. Elixir owns the public error shaping.
+
+Validation:
+
+- `test/temporalex/client_error_test.exs` covers client-side normalization for start conflicts, workflow result outcomes, query rejection, update failure, not found, client unavailability, and transport errors.
+- Real-server integration tests assert the public error structs for invalid start options, workflow termination, cancellation, workflow failure, and activity failure.
+
 ## Beta Limits
 
 These are known beta limits, not review-gate blockers for the implemented native execution path:
 
 - Workflow cancellation propagation is implemented for the current workflow primitives. Temporal Core's local terminal cancel command does not yet expose cancellation details, so real-server canceled results may have empty details.
-- Public error structs are still planned. Client/native errors currently return stable tagged terms for common workflow states plus strings for lower-level transport failures.
+- Some less common Temporal failure proto variants still decode as `Temporalex.Failure.UnknownError` until the corresponding SDK primitives exist.
 - Child workflows, local activities, and Nexus operations are outside the implemented beta scope.

@@ -228,6 +228,25 @@ static_summary: "Checkout workflow"
 
 Signal/update/query options accept `:headers`. Signal and cancel also accept `:request_id`; update accepts `:update_id`.
 
+Client operations return `{:ok, value}` or `:ok` on success and `{:error, error}` on failure.
+Client errors are public exception structs, so future bang variants can raise the same values
+that non-bang variants return.
+
+Common client error structs:
+
+| Type | Meaning |
+|---|---|
+| `Temporalex.WorkflowAlreadyStartedError` | Start conflicted with an existing workflow execution. |
+| `Temporalex.WorkflowNotFoundError` | The target workflow execution was not found. |
+| `Temporalex.WorkflowFailedError` | `get_result/2` observed a failed workflow. The Temporal failure tree is in `cause`. |
+| `Temporalex.WorkflowCancelledError` | `get_result/2` observed a cancelled workflow. |
+| `Temporalex.WorkflowTerminatedError` | `get_result/2` observed a terminated workflow. |
+| `Temporalex.WorkflowTimedOutError` | `get_result/2` observed a timed-out workflow. |
+| `Temporalex.QueryRejectedError` | Temporal rejected a query because of workflow execution status. |
+| `Temporalex.UpdateFailedError` | An update completed or was rejected with a Temporal failure. The failure tree is in `cause`. |
+| `Temporalex.ClientUnavailableError` | The client owner process was not available. |
+| `Temporalex.TransportError` | Transport, payload conversion, option validation, backend, or RPC failure. |
+
 ## Workflow Testing
 
 Most application workflow tests should use `Temporalex.Testing` rather than a
@@ -273,15 +292,19 @@ See [testing.md](testing.md) for the testing model.
 
 ## Error Structs
 
-Planned public error types:
+Temporal failure trees use `Temporalex.Failure.*` structs. These structs are encoded to and
+decoded from Temporal `Failure` protos and may appear as the `cause` of client operation
+errors.
 
 | Type | Meaning |
 |---|---|
-| `Temporalex.ActivityFailure` | Activity returned `{:error, _}` or crashed. |
-| `Temporalex.ChildWorkflowFailure` | Child workflow failed. |
-| `Temporalex.ApplicationError` | Application-level failure, optionally non-retryable. |
-| `Temporalex.TimeoutError` | Timeout exceeded. |
-| `Temporalex.CancelledError` | Workflow or activity was cancelled. |
-| `Temporalex.NondeterminismError` | Workflow replay diverged from history. |
+| `Temporalex.Failure.ApplicationError` | Application-level failure, with `type`, `details`, `retryable?`, and optional `cause`. |
+| `Temporalex.Failure.CancelledError` | Temporal cancellation failure with details. |
+| `Temporalex.Failure.TimeoutError` | Temporal timeout failure with timeout type and heartbeat details. |
+| `Temporalex.Failure.ActivityError` | Activity failure wrapper with activity metadata and nested cause. |
+| `Temporalex.Failure.WorkflowExecutionError` | Child workflow failure wrapper with workflow metadata and nested cause. |
+| `Temporalex.Failure.UnknownError` | Fallback for Temporal failure variants not yet modeled directly. |
+| `Temporalex.Core.Nondeterminism` | Activation failure when workflow replay diverges from history. |
 
-The core can use internal error structs, but public errors should be stable and documented.
+Workflow activation failures such as nondeterminism are not workflow failure results. They fail
+the workflow task so Temporal can retry the task with the same history.

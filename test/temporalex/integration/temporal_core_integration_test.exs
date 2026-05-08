@@ -285,7 +285,11 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         )
 
       try do
-        assert {:error, invalid_start_reason} =
+        assert {:error,
+                %Temporalex.TransportError{
+                  category: :invalid_options,
+                  message: invalid_start_reason
+                }} =
                  Temporalex.Client.start_workflow(client_name, Workflow, :invalid_options,
                    workflow_id: "temporalex-invalid-#{System.unique_integer([:positive])}",
                    workflow_task_timeout: -1,
@@ -372,7 +376,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert {:error, {:terminated, [:terminated_by_test]}} =
+        assert {:error, %Temporalex.WorkflowTerminatedError{details: [:terminated_by_test]}} =
                  Temporalex.Client.get_result(terminated, timeout: 30_000)
 
         cancelled_timer_id = "temporalex-cancelled-timer-#{System.unique_integer([:positive])}"
@@ -394,7 +398,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert {:error, {:cancelled, _details}} =
+        assert {:error, %Temporalex.WorkflowCancelledError{}} =
                  Temporalex.Client.get_result(cancelled_timer, timeout: 30_000)
 
         cancelled_activity_id =
@@ -419,7 +423,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
         assert_receive {:long_cancellable_cancelled, _reason}, 15_000
 
-        assert {:error, {:cancelled, _details}} =
+        assert {:error, %Temporalex.WorkflowCancelledError{}} =
                  Temporalex.Client.get_result(cancelled_activity, timeout: 30_000)
 
         search_id = "temporalex-search-attrs-#{System.unique_integer([:positive])}"
@@ -497,7 +501,10 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert {:error, {:failed, %Temporalex.Failure.ApplicationError{} = failure}} =
+        assert {:error,
+                %Temporalex.WorkflowFailedError{
+                  cause: %Temporalex.Failure.ApplicationError{} = failure
+                }} =
                  Temporalex.Client.get_result(non_retryable_workflow, timeout: 30_000)
 
         assert failure.type == "PlannedWorkflowFailure"
@@ -518,7 +525,10 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert {:error, {:failed, %Temporalex.Failure.ApplicationError{} = failure}} =
+        assert {:error,
+                %Temporalex.WorkflowFailedError{
+                  cause: %Temporalex.Failure.ApplicationError{} = failure
+                }} =
                  Temporalex.Client.get_result(typed_non_retryable_workflow, timeout: 30_000)
 
         assert failure.type == "PlannedWorkflowFailure"
@@ -535,7 +545,10 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert {:error, {:failed, %Temporalex.Failure.ApplicationError{} = failure}} =
+        assert {:error,
+                %Temporalex.WorkflowFailedError{
+                  cause: %Temporalex.Failure.ApplicationError{} = failure
+                }} =
                  Temporalex.Client.get_result(retryable_workflow, timeout: 30_000)
 
         assert failure.type == "PlannedWorkflowFailure"
@@ -554,7 +567,10 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert {:error, {:failed, %Temporalex.Failure.ActivityError{} = failure}} =
+        assert {:error,
+                %Temporalex.WorkflowFailedError{
+                  cause: %Temporalex.Failure.ActivityError{} = failure
+                }} =
                  Temporalex.Client.get_result(non_retryable_activity, timeout: 30_000)
 
         assert failure.retry_state == :non_retryable_failure
@@ -575,7 +591,10 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert {:error, {:failed, %Temporalex.Failure.ActivityError{} = failure}} =
+        assert {:error,
+                %Temporalex.WorkflowFailedError{
+                  cause: %Temporalex.Failure.ActivityError{} = failure
+                }} =
                  Temporalex.Client.get_result(retryable_activity, timeout: 30_000)
 
         assert failure.retry_state == :maximum_attempts_reached
