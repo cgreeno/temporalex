@@ -39,15 +39,25 @@ Remaining follow-up:
 
 ### Workflow Cancellation Semantics Are Incomplete
 
-Status: open.
+Status: completed on May 8, 2026.
 
-Current concern:
+Original concern:
 
 - `Job.CancelWorkflow` only sets `cancelled?: true`.
 - `Workflow.API.cancelled?/0` only reads that flag.
 - Cancellation does not unblock timers, signal waits, phases, activities, parallel branches, or update/signal handlers.
 - `{:cancelled, reason}` drops the cancellation reason/details when emitting `Command.CancelWorkflow`.
 - Temporal distinguishes graceful cancellation from termination. Cancellation should schedule workflow code so it can clean up.
+
+Implemented:
+
+- Added `Workflow.API.cancellation/0` and `Workflow.API.non_cancellable/1`.
+- Workflow cancellation now interrupts cancellable blocking primitives by raising `%Temporalex.Failure.CancelledError{}`.
+- `sleep`, signal waits, activities, phases, async phase handlers, and parallel branches are unblocked or canceled through executor-owned deterministic state transitions.
+- The executor emits `CancelTimer` and `RequestCancelActivity` commands where appropriate and ignores late resolutions for operations canceled with immediate semantics.
+- Activity cancellation honors `:wait_cancellation_completed`, `:try_cancel`, and `:abandon`.
+- Terminal `Command.CancelWorkflow` now carries the structured cancellation reason internally.
+- Added pure core tests plus Temporal dev-server coverage for timer and activity cancellation.
 
 References:
 
@@ -57,13 +67,10 @@ References:
 - `../../temporal-api/temporal/api/command/v1/message.proto`: `CancelWorkflowExecutionCommandAttributes.details`.
 - `../../documentation/docs/develop/rust/workflows/cancellation.mdx`: cancel versus terminate behavior.
 
-Needed:
+Remaining follow-up:
 
-- Design cancellation scopes or an equivalent Elixir-native cancellation model.
-- Define how workflow cancellation resolves or interrupts `sleep`, `wait_for_signal`, `phase`, `parallel`, activities, and handlers.
-- Emit `CancelTimer` and activity cancellation commands where appropriate.
-- Preserve cancellation details in the terminal cancel command and in decoded client result errors.
-- Add core replay tests and real-server tests for cancellation while blocked on timers, activities, phases, and handlers.
+- Temporalex preserves terminal cancellation details in core structs, but Temporal Core's local `CancelWorkflowExecution` command currently exposes no details field, so real-server canceled results may not include those details until Core exposes that field.
+- Add real-server coverage for cancellation while blocked in update handlers and parallel branches if those scenarios prove flaky in production-like workloads.
 
 ### Failure Modeling Is Too Flat
 
@@ -235,7 +242,7 @@ Current coverage:
 Missing production-confidence tests:
 
 - Additional Search Attribute visibility cases beyond the current start/upsert smoke path, if needed.
-- Cancellation while blocked on timer, activity, phase, signal wait, update handler, and parallel branch.
+- Additional real-server cancellation permutations beyond the current timer and activity cases, if needed.
 - Activity retry and non-retryable error behavior against the server.
 - Continue-as-new chains, including result retrieval across runs and option propagation.
 - Workflow ID reuse/conflict policies against running and closed workflows.

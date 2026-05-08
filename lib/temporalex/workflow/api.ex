@@ -5,11 +5,17 @@ defmodule Temporalex.Workflow.API do
 
   alias Temporalex.Core.Context
   alias Temporalex.Core.Op
+  alias Temporalex.Failure
+  alias Temporalex.Failure.CancelledError
 
   @context_key :__temporal_context__
+  @raise_reply :__temporalex_raise__
 
   def execute_activity(type, input, opts \\ []) when is_binary(type) and is_list(input) do
-    call(%Op.ExecuteActivity{type: type, input: input, opts: opts})
+    case call(%Op.ExecuteActivity{type: type, input: input, opts: opts}) do
+      {:cancelled, reason} -> raise cancellation_error(reason)
+      result -> result
+    end
   end
 
   @doc """
@@ -166,6 +172,20 @@ defmodule Temporalex.Workflow.API do
     call(%Op.Cancelled{})
   end
 
+  def cancellation do
+    call(%Op.Cancellation{})
+  end
+
+  def non_cancellable(fun) when is_function(fun, 0) do
+    :ok = call(%Op.EnterNonCancellable{})
+
+    try do
+      fun.()
+    after
+      :ok = call(%Op.ExitNonCancellable{})
+    end
+  end
+
   def now do
     call(%Op.Now{})
   end
@@ -236,6 +256,20 @@ defmodule Temporalex.Workflow.API do
 
   defp call(op) do
     %Context{executor: executor, thread_id: thread_id} = context!()
-    GenServer.call(executor, {:workflow_op, thread_id, op}, :infinity)
+
+    case GenServer.call(executor, {:workflow_op, thread_id, op}, :infinity) do
+      {@raise_reply, %{__exception__: true} = error} -> raise error
+      result -> result
+    end
+  end
+
+  defp cancellation_error(%CancelledError{} = error), do: error
+
+  defp cancellation_error(reason) when is_binary(reason) do
+    Failure.cancelled(reason)
+  end
+
+  defp cancellation_error(reason) do
+    Failure.cancelled("cancelled", details: List.wrap(reason))
   end
 end

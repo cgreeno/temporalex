@@ -6,6 +6,7 @@ defmodule Temporalex.CoreExecutorTest do
   alias Temporalex.Core.Nondeterminism
   alias Temporalex.Core.TestHarness
   alias Temporalex.Failure.ApplicationError
+  alias Temporalex.Failure.CancelledError
   alias Temporalex.SearchAttribute
   alias Temporalex.Workflow.API
 
@@ -211,6 +212,148 @@ defmodule Temporalex.CoreExecutorTest do
       first = API.wait_for_signal("go")
       second = API.wait_for_signal("go")
       {:ok, [first, second]}
+    end
+  end
+
+  defmodule CancelledSignalWaitWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      try do
+        API.wait_for_signal("go")
+        {:ok, :not_cancelled}
+      rescue
+        error in CancelledError ->
+          {:ok, %{cancelled?: API.cancelled?(), cancellation: API.cancellation(), error: error}}
+      end
+    end
+  end
+
+  defmodule CancellableTimerWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      try do
+        API.sleep(60_000)
+        {:ok, :slept}
+      rescue
+        error in CancelledError -> {:cancelled, error}
+      end
+    end
+  end
+
+  defmodule NonCancellableCleanupWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      state = %{reserved: true}
+
+      try do
+        API.sleep(60_000)
+        {:ok, :slept}
+      rescue
+        error in CancelledError ->
+          API.non_cancellable(fn ->
+            {:ok, _cleanup} = Activities.echo({:cleanup, state})
+            :ok
+          end)
+
+          {:cancelled, error}
+      end
+    end
+  end
+
+  defmodule CancellableCleanupWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      try do
+        try do
+          API.sleep(60_000)
+          {:ok, :slept}
+        rescue
+          _error in CancelledError ->
+            API.sleep(1)
+            {:ok, :cleanup_completed}
+        end
+      rescue
+        error in CancelledError ->
+          {:ok, {:cleanup_blocked, error.message}}
+      end
+    end
+  end
+
+  defmodule ActivityWaitCancellationWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      try do
+        {:ok, _result} =
+          API.execute_activity("#{inspect(Activities)}.echo", [:work],
+            cancellation_type: :wait_cancellation_completed
+          )
+
+        {:ok, :activity_completed}
+      rescue
+        error in CancelledError -> {:cancelled, error}
+      end
+    end
+  end
+
+  defmodule ActivityTryCancelWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      try do
+        {:ok, _result} =
+          API.execute_activity("#{inspect(Activities)}.echo", [:work],
+            cancellation_type: :try_cancel
+          )
+
+        {:ok, :activity_completed}
+      rescue
+        error in CancelledError -> {:cancelled, error}
+      end
+    end
+  end
+
+  defmodule ParallelCancellationWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      try do
+        API.parallel([
+          fn ->
+            API.sleep(10_000)
+            :a
+          end,
+          fn ->
+            API.sleep(20_000)
+            :b
+          end
+        ])
+
+        {:ok, :parallel_completed}
+      rescue
+        error in CancelledError -> {:cancelled, error}
+      end
+    end
+  end
+
+  defmodule TimeoutPhaseCancellationWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      try do
+        API.phase(:open,
+          timeout: 60_000,
+          signal: %{"done" => fn _args, state -> {:stop, state} end}
+        )
+
+        {:ok, :phase_completed}
+      rescue
+        error in CancelledError -> {:cancelled, error}
+      end
     end
   end
 
@@ -691,6 +834,152 @@ defmodule Temporalex.CoreExecutorTest do
 
       assert {:ok, {:ok, :done}} =
                TestHarness.replay(ActivityThenTimerWorkflow, :value, transcript)
+    end
+  end
+
+  describe "workflow cancellation semantics" do
+    test "signal waits are interrupted with structured cancellation" do
+      assert {:ok, exec} = TestHarness.start_workflow(CancelledSignalWaitWorkflow, nil)
+      assert {:yield, []} = TestHarness.next(exec)
+
+      assert {:complete, {:ok, result}} =
+               TestHarness.resolve(exec, %Job.CancelWorkflow{reason: "requested"})
+
+      assert result.cancelled? == true
+      assert %CancelledError{message: "requested"} = result.cancellation
+      assert %CancelledError{message: "requested"} = result.error
+    end
+
+    test "timer cancellation emits CancelTimer and terminal CancelWorkflow" do
+      assert {:ok, exec} = TestHarness.start_workflow(CancellableTimerWorkflow, nil)
+      assert {:yield, [%Command.StartTimer{seq: timer_seq}]} = TestHarness.next(exec)
+
+      assert {:yield,
+              [
+                %Command.CancelTimer{seq: ^timer_seq},
+                %Command.CancelWorkflow{reason: %CancelledError{message: "requested"}}
+              ]} = TestHarness.resolve(exec, %Job.CancelWorkflow{reason: "requested"})
+
+      state = Temporalex.Core.Executor.inspect_state(exec.pid)
+      assert state.pending == %{}
+
+      assert {:yield, []} = TestHarness.resolve(exec, %Job.TimerFired{seq: timer_seq})
+    end
+
+    test "non_cancellable cleanup can schedule durable work after cancellation" do
+      assert {:ok, exec} = TestHarness.start_workflow(NonCancellableCleanupWorkflow, nil)
+      assert {:yield, [%Command.StartTimer{seq: timer_seq}]} = TestHarness.next(exec)
+
+      assert {:yield,
+              [
+                %Command.CancelTimer{seq: ^timer_seq},
+                %Command.ScheduleActivity{seq: activity_seq, input: [cleanup: %{reserved: true}]}
+              ]} = TestHarness.resolve(exec, %Job.CancelWorkflow{reason: "cleanup requested"})
+
+      assert {:yield,
+              [
+                %Command.CancelWorkflow{
+                  reason: %CancelledError{message: "cleanup requested"}
+                }
+              ]} =
+               TestHarness.resolve(exec, %Job.ActivityResolved{
+                 seq: activity_seq,
+                 result: {:ok, {:cleanup, %{reserved: true}}}
+               })
+    end
+
+    test "new cancellable blocking work raises immediately after cancellation" do
+      assert {:ok, exec} = TestHarness.start_workflow(CancellableCleanupWorkflow, nil)
+      assert {:yield, [%Command.StartTimer{seq: timer_seq}]} = TestHarness.next(exec)
+
+      completion =
+        TestHarness.activate_raw(exec, [%Job.CancelWorkflow{reason: "requested"}])
+
+      assert {:ok,
+              [
+                %Command.CancelTimer{seq: ^timer_seq},
+                %Command.CompleteWorkflow{result: {:cleanup_blocked, "requested"}}
+              ]} = completion.status
+    end
+
+    test "activity cancellation waits by default until activity resolves cancelled" do
+      assert {:ok, exec} = TestHarness.start_workflow(ActivityWaitCancellationWorkflow, nil)
+      assert {:yield, [%Command.ScheduleActivity{seq: activity_seq}]} = TestHarness.next(exec)
+
+      assert {:yield, [%Command.RequestCancelActivity{seq: ^activity_seq}]} =
+               TestHarness.resolve(exec, %Job.CancelWorkflow{reason: "requested"})
+
+      assert %{^activity_seq => %{cancel_requested?: true}} = TestHarness.pending_calls(exec)
+
+      assert {:yield,
+              [
+                %Command.CancelWorkflow{
+                  reason: %CancelledError{message: "activity cancelled"}
+                }
+              ]} =
+               TestHarness.resolve(exec, %Job.ActivityResolved{
+                 seq: activity_seq,
+                 result: {:cancelled, Temporalex.Failure.cancelled("activity cancelled")}
+               })
+    end
+
+    test "try_cancel activity cancellation raises immediately and ignores late resolution" do
+      assert {:ok, exec} = TestHarness.start_workflow(ActivityTryCancelWorkflow, nil)
+      assert {:yield, [%Command.ScheduleActivity{seq: activity_seq}]} = TestHarness.next(exec)
+
+      assert {:yield,
+              [
+                %Command.RequestCancelActivity{seq: ^activity_seq},
+                %Command.CancelWorkflow{reason: %CancelledError{message: "requested"}}
+              ]} = TestHarness.resolve(exec, %Job.CancelWorkflow{reason: "requested"})
+
+      assert {:yield, []} =
+               TestHarness.resolve(exec, %Job.ActivityResolved{
+                 seq: activity_seq,
+                 result: {:ok, :late}
+               })
+    end
+
+    test "parallel cancellation cancels branch timers before cancelling the workflow" do
+      assert {:ok, exec} = TestHarness.start_workflow(ParallelCancellationWorkflow, nil)
+
+      assert {:yield,
+              [
+                %Command.StartTimer{seq: first_timer},
+                %Command.StartTimer{seq: second_timer}
+              ]} = TestHarness.next(exec)
+
+      assert {:yield,
+              [
+                %Command.CancelTimer{seq: ^first_timer},
+                %Command.CancelTimer{seq: ^second_timer},
+                %Command.CancelWorkflow{reason: %CancelledError{message: "requested"}}
+              ]} = TestHarness.resolve(exec, %Job.CancelWorkflow{reason: "requested"})
+    end
+
+    test "phase cancellation cancels phase timer and raises to the workflow" do
+      assert {:ok, exec} = TestHarness.start_workflow(TimeoutPhaseCancellationWorkflow, nil)
+      assert {:yield, [%Command.StartTimer{seq: timeout_seq}]} = TestHarness.next(exec)
+
+      assert {:yield,
+              [
+                %Command.CancelTimer{seq: ^timeout_seq},
+                %Command.CancelWorkflow{reason: %CancelledError{message: "requested"}}
+              ]} = TestHarness.resolve(exec, %Job.CancelWorkflow{reason: "requested"})
+    end
+
+    test "phase async handler cancellation cancels handler work before root cancellation" do
+      assert {:ok, exec} = TestHarness.start_workflow(AsyncSignalWorkflow, nil)
+      assert {:waiting, _info} = TestHarness.next(exec)
+
+      assert {:yield, [%Command.StartTimer{seq: handler_timer}]} =
+               TestHarness.send_signal(exec, "slow", [])
+
+      assert {:yield,
+              [
+                %Command.CancelTimer{seq: ^handler_timer},
+                %Command.CancelWorkflow{reason: %CancelledError{message: "requested"}}
+              ]} = TestHarness.resolve(exec, %Job.CancelWorkflow{reason: "requested"})
     end
   end
 

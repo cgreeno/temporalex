@@ -46,13 +46,13 @@ Workflow failures:
 - `raise %Temporalex.Failure.ApplicationError{}` also emits an application failure from workflow result and async update boundaries.
 - `{:error, %Temporalex.Failure.ActivityError{} = error}` and other decoded failure wrappers round-trip with their nested `cause`.
 - `{:error, reason}` remains supported and becomes an application failure with type `"Temporalex.ApplicationError"` and one detail payload containing `reason`.
-- `{:cancelled, reason}` emits `CancelWorkflowExecution` with cancellation details, not an application failure.
+- `{:cancelled, reason}` emits `CancelWorkflowExecution` and preserves the structured cancellation reason in core command state. Temporal Core's local cancel command currently has no details field, so real-server canceled results may not include those details.
 
 Activity failures:
 
 - `{:error, %ApplicationError{} = error}` responds with an application failure preserving type, details, and retryability.
 - `{:error, reason}` remains supported as the untyped application failure fallback.
-- Activity cancellation should use `CancelledError`/canceled failure details when cancellation propagation is implemented.
+- Activity cancellation uses `CancelledError`/canceled failure details.
 
 Query and update failures:
 

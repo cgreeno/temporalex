@@ -651,6 +651,54 @@ All workflow code must be deterministic. The same inputs (activity results, sign
 
 ---
 
+## Cancellation
+
+Workflow cancellation is delivered as a deterministic activation job. It does not kill BEAM
+processes. The executor records a `%Temporalex.Failure.CancelledError{}` and interrupts
+cancellable blocking primitives by resuming their workflow process with that exception.
+
+The cancellation primitives are:
+
+```elixir
+API.cancelled?()
+API.cancellation()
+API.non_cancellable(fn -> ... end)
+```
+
+`API.cancelled?/0` returns a boolean. `API.cancellation/0` returns the current
+`%Temporalex.Failure.CancelledError{}` or `nil`.
+
+After cancellation, new cancellable blocking work raises immediately unless it is inside
+`API.non_cancellable/1`. This makes cleanup explicit:
+
+```elixir
+try do
+  API.sleep(60_000)
+rescue
+  error in Temporalex.Failure.CancelledError ->
+    API.non_cancellable(fn ->
+      {:ok, _} = MyApp.Activities.cleanup()
+    end)
+
+    {:cancelled, error}
+end
+```
+
+State needed for cleanup should be carried as ordinary workflow state. Temporalex does not
+recover local variables from an interrupted stack frame.
+
+Cancellation effects:
+
+| Primitive | Cancellation behavior |
+|---|---|
+| `API.sleep/1` | Emits `CancelTimer` and raises `CancelledError` |
+| `API.wait_for_signal/1` | Removes the waiter and raises `CancelledError` |
+| Activity dispatch | Emits `RequestCancelActivity` unless `cancellation_type: :abandon`; `:wait_cancellation_completed` waits for the activity cancellation resolution, `:try_cancel` raises immediately |
+| `API.parallel/1` | Cancels cancellable branches in deterministic branch order and raises to the parent scope |
+| `API.phase/2` | Stops accepting messages, rejects queued/new updates as cancelled, cancels the phase timer, cancels cancellable handlers, then raises to the owner |
+
+---
+
 ## Mapping to Temporal Core SDK
 
 The programming model maps to the Temporal Core SDK's activation/command protocol:
@@ -658,7 +706,9 @@ The programming model maps to the Temporal Core SDK's activation/command protoco
 | Temporalex Construct | Core SDK Commands |
 |---|---|
 | `Activities.Foo.bar()` | `ScheduleActivity` → `ResolveActivity` |
+| cancelled activity | `RequestCancelActivity` → `ResolveActivity(cancelled)` |
 | `API.sleep(ms)` | `StartTimer` → `FireTimer` |
+| cancelled sleep | `CancelTimer` |
 | `API.wait_for_signal(name)` | No command (executor buffers `SignalWorkflow` jobs) |
 | `API.now` | No command; workflow time is provided by activation timestamp |
 | `API.random` / `API.uuid4` | No command; deterministic random seed is provided by activation jobs |

@@ -30,10 +30,11 @@ use temporalio_common::protos::coresdk::common::NamespacedWorkflowExecution;
 use temporalio_common::protos::coresdk::workflow_commands::{
     ActivityCancellationType, CancelTimer, CancelWorkflowExecution, CompleteWorkflowExecution,
     ContinueAsNewWorkflowExecution, FailWorkflowExecution, QueryResult, QuerySuccess,
-    RequestCancelExternalWorkflowExecution, ScheduleActivity, ScheduleLocalActivity,
-    SetPatchMarker, SignalExternalWorkflowExecution, StartChildWorkflowExecution, StartTimer,
-    UpdateResponse, UpsertWorkflowSearchAttributes, WorkflowCommand, query_result,
-    signal_external_workflow_execution, update_response, workflow_command,
+    RequestCancelActivity, RequestCancelExternalWorkflowExecution, ScheduleActivity,
+    ScheduleLocalActivity, SetPatchMarker, SignalExternalWorkflowExecution,
+    StartChildWorkflowExecution, StartTimer, UpdateResponse, UpsertWorkflowSearchAttributes,
+    WorkflowCommand, query_result, signal_external_workflow_execution, update_response,
+    workflow_command,
 };
 use temporalio_common::protos::coresdk::workflow_completion::{
     Failure as WorkflowCompletionFailure, Success as WorkflowCompletionSuccess,
@@ -2085,6 +2086,11 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
         }
         "Elixir.Temporalex.Core.Command.CancelTimer" => {
             workflow_command::Variant::CancelTimer(CancelTimer {
+                seq: map_get_i64(command, seq())? as u32,
+            })
+        }
+        "Elixir.Temporalex.Core.Command.RequestCancelActivity" => {
+            workflow_command::Variant::RequestCancelActivity(RequestCancelActivity {
                 seq: map_get_i64(command, seq())? as u32,
             })
         }

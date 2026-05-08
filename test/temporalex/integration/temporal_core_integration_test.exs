@@ -17,6 +17,14 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
       {:ok, {:heartbeat, value}}
     end
 
+    defactivity long_cancellable(ctx, parent),
+      start_to_close_timeout: 30_000,
+      heartbeat_timeout: 1_000,
+      cancellation_type: :wait_cancellation_completed do
+      send(parent, {:long_cancellable_started, self()})
+      wait_until_cancelled(ctx, parent)
+    end
+
     defactivity fail_retryable(ctx),
       start_to_close_timeout: 1_000,
       schedule_to_close_timeout: 10_000,
@@ -39,6 +47,18 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
          details: [ctx.attempt],
          retryable?: false
        )}
+    end
+
+    defp wait_until_cancelled(ctx, parent) do
+      case Temporalex.Activity.Context.heartbeat(ctx, :working) do
+        :ok ->
+          Process.sleep(50)
+          wait_until_cancelled(ctx, parent)
+
+        {:cancelled, reason} ->
+          send(parent, {:long_cancellable_cancelled, reason})
+          throw({:cancelled, Temporalex.Failure.cancelled("activity cancelled")})
+      end
     end
   end
 
@@ -102,6 +122,19 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
       API.publish_state({:waiting, label})
       API.sleep(60_000)
       {:ok, {:completed, label}}
+    end
+  end
+
+  defmodule ActivityCancellationWorkflow do
+    use Temporalex.Workflow
+
+    def run(parent) do
+      try do
+        {:ok, _result} = Activities.long_cancellable(parent)
+        {:ok, :activity_completed}
+      rescue
+        error in Temporalex.Failure.CancelledError -> {:cancelled, error}
+      end
     end
   end
 
@@ -195,6 +228,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
             Workflow,
             InteractiveWorkflow,
             WaitingWorkflow,
+            ActivityCancellationWorkflow,
             SearchAttributeWorkflow,
             FailureWorkflow,
             ActivityFailureWorkflow
@@ -295,6 +329,53 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
         assert {:error, {:terminated, [:terminated_by_test]}} =
                  Temporalex.Client.get_result(terminated, timeout: 30_000)
+
+        cancelled_timer_id = "temporalex-cancelled-timer-#{System.unique_integer([:positive])}"
+
+        assert {:ok, cancelled_timer} =
+                 Temporalex.Client.start_workflow(worker_name, WaitingWorkflow, :cancel_timer,
+                   workflow_id: cancelled_timer_id,
+                   timeout: 10_000
+                 )
+
+        assert eventually(fn ->
+                 Temporalex.Client.query_workflow(cancelled_timer, "state", [], timeout: 10_000) ==
+                   {:ok, {:waiting, :cancel_timer}}
+               end)
+
+        assert :ok =
+                 Temporalex.Client.cancel_workflow(cancelled_timer,
+                   reason: "integration cancellation",
+                   timeout: 10_000
+                 )
+
+        assert {:error, {:cancelled, _details}} =
+                 Temporalex.Client.get_result(cancelled_timer, timeout: 30_000)
+
+        cancelled_activity_id =
+          "temporalex-cancelled-activity-#{System.unique_integer([:positive])}"
+
+        assert {:ok, cancelled_activity} =
+                 Temporalex.Client.start_workflow(
+                   worker_name,
+                   ActivityCancellationWorkflow,
+                   self(),
+                   workflow_id: cancelled_activity_id,
+                   timeout: 10_000
+                 )
+
+        assert_receive {:long_cancellable_started, _pid}, 10_000
+
+        assert :ok =
+                 Temporalex.Client.cancel_workflow(cancelled_activity,
+                   reason: "integration activity cancellation",
+                   timeout: 10_000
+                 )
+
+        assert_receive {:long_cancellable_cancelled, _reason}, 15_000
+
+        assert {:error, {:cancelled, _details}} =
+                 Temporalex.Client.get_result(cancelled_activity, timeout: 30_000)
 
         search_id = "temporalex-search-attrs-#{System.unique_integer([:positive])}"
         search_label = "search-#{System.unique_integer([:positive])}"

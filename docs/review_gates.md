@@ -97,6 +97,6 @@ Outcome:
 
 These are known beta limits, not review-gate blockers for the implemented native execution path:
 
-- Full workflow cancellation propagation is not implemented yet. The client cancellation RPC is wired and `Job.CancelWorkflow` updates the workflow cancellation flag, but cancellation scopes and automatic unblocking/cancellation of pending timers, activities, phases, and branches need a dedicated design pass.
+- Workflow cancellation propagation is implemented for the current workflow primitives. Temporal Core's local terminal cancel command does not yet expose cancellation details, so real-server canceled results may have empty details.
 - Public error structs are still planned. Client/native errors currently return stable tagged terms for common workflow states plus strings for lower-level transport failures.
 - Child workflows, local activities, and Nexus operations are outside the implemented beta scope.

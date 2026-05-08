@@ -89,6 +89,7 @@ defmodule Temporalex.BackendConformanceTest do
                    {:ok,
                     [
                       %Command.StartTimer{seq: 0, duration_ms: 10},
+                      %Command.RequestCancelActivity{seq: 1},
                       %Command.UpsertSearchAttributes{
                         attrs: %{
                           "CustomKeywordField" => SearchAttribute.keyword("alpha"),

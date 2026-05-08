@@ -144,6 +144,8 @@ API.parallel(funs)
 API.update_state(fun)
 API.workflow_info()
 API.cancelled?()
+API.cancellation()
+API.non_cancellable(fn -> ... end)
 API.upsert_search_attributes(attrs)
 API.now()
 API.random()
@@ -151,6 +153,10 @@ API.uuid4()
 ```
 
 `API.update_state/1` is only valid inside async phase handlers.
+
+Workflow cancellation is cooperative. When a cancel request reaches the workflow, cancellable
+blocking primitives raise `%Temporalex.Failure.CancelledError{}`. Cleanup that must perform
+durable work after cancellation should be wrapped in `API.non_cancellable/1`.
 
 The detailed semantics are in [programming_model.md](programming_model.md).
 

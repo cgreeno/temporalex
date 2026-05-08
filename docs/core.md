@@ -111,11 +111,12 @@ Common commands:
 %Temporalex.Core.Command.ScheduleActivity{seq: integer(), thread_id: list(), activity_id: String.t(), type: String.t(), input: [term()], opts: keyword()}
 %Temporalex.Core.Command.StartTimer{seq: integer(), thread_id: list(), duration_ms: non_neg_integer()}
 %Temporalex.Core.Command.CancelTimer{seq: integer()}
+%Temporalex.Core.Command.RequestCancelActivity{seq: integer()}
 %Temporalex.Core.Command.SetPatchMarker{id: String.t(), deprecated: boolean()}
 %Temporalex.Core.Command.CompleteWorkflow{result: term()}
 %Temporalex.Core.Command.FailWorkflow{reason: term()}
 %Temporalex.Core.Command.ContinueAsNew{args: term()}
-%Temporalex.Core.Command.CancelWorkflow{}
+%Temporalex.Core.Command.CancelWorkflow{reason: term()}
 %Temporalex.Core.Command.RespondToUpdate{protocol_instance_id: String.t(), response: :accepted | {:completed, term()} | {:rejected, term()}}
 %Temporalex.Core.Command.RespondToQuery{query_id: String.t(), result: {:ok, term()} | {:error, term()}}
 %Temporalex.Core.Command.UpsertSearchAttributes{attrs: map()}
@@ -165,6 +166,9 @@ Workflow code calls the executor with operations:
 %Temporalex.Core.Op.DeprecatePatch{id: String.t()}
 %Temporalex.Core.Op.WorkflowInfo{}
 %Temporalex.Core.Op.Cancelled{}
+%Temporalex.Core.Op.Cancellation{}
+%Temporalex.Core.Op.EnterNonCancellable{}
+%Temporalex.Core.Op.ExitNonCancellable{}
 %Temporalex.Core.Op.UpsertSearchAttributes{attrs: map()}
 %Temporalex.Core.Op.Now{}
 %Temporalex.Core.Op.Random{}

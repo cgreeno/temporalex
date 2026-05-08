@@ -126,11 +126,12 @@ Core command mappings:
 | `StartTimer` | `Command.StartTimer` | Uses zero-based `seq`. |
 | `CancelTimer` | `Command.CancelTimer` | Uses the `seq` from the matching `StartTimer`. |
 | `ScheduleActivity` | `Command.ScheduleActivity` | Uses zero-based `seq` and explicit `activity_id`. If the user does not provide an id, the executor generates one deterministically from command state. |
+| `RequestCancelActivity` | `Command.RequestCancelActivity` | Uses the `seq` from the matching `ScheduleActivity`. |
 | `QueryResult` | `Command.RespondToQuery` | Uses `query_id`. |
 | `CompleteWorkflowExecution` | `Command.CompleteWorkflow` | Terminal workflow command. |
 | `FailWorkflowExecution` | `Command.FailWorkflow` | Terminal workflow command. |
 | `ContinueAsNewWorkflowExecution` | `Command.ContinueAsNew` | Terminal workflow command. |
-| `CancelWorkflowExecution` | `Command.CancelWorkflow` | Terminal workflow command. |
+| `CancelWorkflowExecution` | `Command.CancelWorkflow` | Terminal workflow command. Temporalex preserves the cancellation reason in the core struct; Temporal Core's local command currently has no details field. |
 | `SetPatchMarker` | `Command.SetPatchMarker` or patch-specific command | Needed for `API.patched?/1` and `API.deprecate_patch/1`. |
 | `UpsertWorkflowSearchAttributes` | `Command.UpsertSearchAttributes` | No `seq`. |
 | `UpdateResponse` | `Command.RespondToUpdate` | Uses `protocol_instance_id`, not user update id. |
