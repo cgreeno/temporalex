@@ -1,14 +1,14 @@
 defmodule Temporalex.MixProject do
   use Mix.Project
 
-  @version "0.2.0"
+  @version "0.3.0-dev"
   @source_url "https://github.com/cgreeno/temporalex"
 
   def project do
     [
       app: :temporalex,
       version: @version,
-      elixir: "~> 1.15",
+      elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
@@ -27,7 +27,6 @@ defmodule Temporalex.MixProject do
 
   def application do
     [
-      mod: {Temporalex, []},
       extra_applications: [:logger]
     ]
   end
@@ -38,9 +37,6 @@ defmodule Temporalex.MixProject do
   defp deps do
     [
       {:rustler, "~> 0.37", runtime: false},
-      {:protobuf, "~> 0.13"},
-      {:jason, "~> 1.4"},
-      {:telemetry, "~> 1.0"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
@@ -54,15 +50,15 @@ defmodule Temporalex.MixProject do
       },
       files: ~w(
         lib
-        native/temporalex_native/src
-        native/temporalex_native/Cargo.toml
-        native/temporalex_native/Cargo.lock
+        native/temporalex_nif/src
+        native/temporalex_nif/Cargo.toml
+        native/temporalex_nif/Cargo.lock
         .formatter.exs
         mix.exs
         README.md
         LICENSE
         CHANGELOG.md
-        docs/architecture.md
+        docs
       )
     ]
   end
@@ -72,8 +68,11 @@ defmodule Temporalex.MixProject do
       main: "readme",
       extras: [
         "README.md": [title: "Overview"],
-        "docs/architecture.md": [title: "Architecture"],
-        "CHANGELOG.md": [title: "Changelog"]
+        "CHANGELOG.md": [title: "Changelog"],
+        "docs/sdk_overview.md": [title: "SDK Overview"],
+        "docs/programming_model.md": [title: "Programming Model"],
+        "docs/implementation_principles.md": [title: "Implementation Principles"],
+        "docs/scheduler_and_replay.md": [title: "Scheduler and Replay"]
       ],
       groups_for_modules: [
         "Public API": [
@@ -85,30 +84,19 @@ defmodule Temporalex.MixProject do
           Temporalex.Client
         ],
         Worker: [
-          Temporalex.Worker
+          Temporalex.Worker,
+          Temporalex.Server
         ],
-        Errors: [
-          Temporalex.ActivityFailure,
-          Temporalex.ApplicationError,
-          Temporalex.CancelledError,
-          Temporalex.ChildWorkflowFailure,
-          Temporalex.NondeterminismError,
-          Temporalex.TimeoutError
+        Backend: [
+          Temporalex.Backend,
+          Temporalex.Backend.Test,
+          Temporalex.Backend.TemporalCore
         ],
-        Testing: [
-          Temporalex.Testing
-        ],
-        Internal: [
-          Temporalex.Converter,
-          Temporalex.Runtime,
-          Temporalex.Worker.Server,
-          Temporalex.Worker.Executor,
-          Temporalex.Worker.Replay,
-          Temporalex.Testing.Executor
+        Core: [
+          Temporalex.Core.Executor
         ]
       ],
       filter_modules: fn mod, _meta ->
-        # Hide the Native NIF surface — users should never call it directly.
         not String.starts_with?(inspect(mod), "Temporalex.Native")
       end
     ]
