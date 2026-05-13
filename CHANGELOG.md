@@ -1,105 +1,103 @@
 # Changelog
 
-## 0.2.0
+## 0.3.0
 
-First public release on Hex.
+Architectural rewrite. The 0.x line is **not** backwards-compatible with 0.2.0.
 
-`0.2.0` is a clean rewrite. The pre-release `0.1.0` SDK was never published;
-the API is intentionally not backwards-compatible with that version.
+The core design — deterministic cooperative scheduler, `Temporalex.Backend`
+boundary, phase / parallel / scheduler rounds — is authored by
+[@hansihe](https://github.com/hansihe). See
+[`docs/scheduler_and_replay.md`](docs/scheduler_and_replay.md) and
+[`docs/implementation_principles.md`](docs/implementation_principles.md) for
+the design source-of-truth.
 
-### Programming model
+### What changed
 
-Workflows read top-to-bottom as sequential code. Concurrency is explicit and
-structured — the only ways to introduce it are `API.receive/2` (a message
-loop with signal/update handlers) and `API.parallel/1` (concurrent fan-out).
-Every spawned handler must complete before the receive returns.
+- **Deterministic cooperative scheduler.** The executor owns thread ordering;
+  BEAM scheduling and mailbox arrival no longer affect command emission order.
+  `parallel` branches and handler dispatches have stable thread ids and run in
+  deterministic rounds. This eliminates a latent replay correctness gap in
+  0.2.0 where parallel command order depended on activity timing.
+- **Backend boundary.** `Temporalex.Backend` is a behaviour. Two implementations
+  ship: `Temporalex.Backend.TemporalCore` (Rustler + Temporal Core, production)
+  and `Temporalex.Backend.Test` (in-memory, deterministic, for unit tests).
+  All Rust / NIF / protobuf details live inside the backend; the executor
+  speaks `%Temporalex.Core.Activation{}` / `%Temporalex.Core.Completion{}`.
+- **Layer split.** Worker (supervisor) → Server (orchestration, backend state,
+  executor registry, activity task supervision) → Executor (deterministic
+  workflow state) → Backend (transport).
+- **Internal protocol as structs.** `Temporalex.Core.{Activation, Job.*,
+  Command.*, Completion, Op.*}` replace the tuple-and-keyword-list messages
+  used in 0.2.0. Easier to read, harder to misuse.
 
-### Features
+### Public API changes
 
-- `Temporalex.Workflow` — workflow modules with `run/1` and `handle_query/3`.
-- `Temporalex.Activity` — `defactivity` macro for both regular and
-  `local: true` activities. Local activities are durable across worker
-  crashes (recorded in workflow history).
-- `Temporalex.Workflow.API`:
-  - Sequential primitives: `execute_activity/3`, `execute_local_activity/3`,
-    `sleep/1`, `wait_for_signal/1`, `publish_state/1`, `patched?/1`,
-    `cancelled?/0`.
-  - Structured concurrency: `receive/2` with signal/update handlers and an
-    optional `:timeout`; `parallel/1` for fan-out.
-  - Async-only: `update_state/1` for atomic mutations from inside an
-    `{:async, fn, _}` handler.
-- `Temporalex.Worker` — supervisor for one task queue. Drop into an OTP
-  supervision tree.
-- `Temporalex.Client` — start, signal, query, cancel workflows from
-  outside workflow code.
-- `Temporalex.Testing` — step-by-step test driver. The same call protocol
-  as the production executor, so workflow code is unchanged between
-  tests and real runs.
-- ETF as the default payload encoding (preserves full Elixir type fidelity).
-
-### Robustness
-
-This release shipped after several rounds of bug-hunting. Notable fixes
-worth knowing about:
-
-- **Updates respond end-to-end.** Update handler return values are now
-  emitted as `UpdateResponse` commands (Accepted → Completed / Rejected).
-  Without this, the Temporal Update API caller would hang until update
-  timeout.
-- **Multi-signal-in-one-activation.** When Temporal delivers several
-  signals in a single activation, all handlers run in dispatch order and
-  every state mutation lands.
-- **Cancelled activities and child workflows replay correctly.** Replay
-  log builds entries for `:cancelled` resolutions; runtime apply path
-  handles them. Local-activity backoffs are filtered from the replay log.
-- **Receive timer / handler stop race.** Timer fires while a sync handler
-  is in flight; first stop wins, executor doesn't crash on a cleared
-  `receive_from`.
-- **Heartbeat details encode as a Payload.** Details now round-trip
-  through Temporal history with metadata intact, instead of being sent
-  as raw ETF bytes.
-- **Bounded buffers.** `signal_buffer` and `pending_handler_queue` are
-  capped (defaults: 10_000 each, configurable per executor). Floods drop
-  oldest with a warning; updates beyond the queue cap surface a
-  `:rejected` response instead of hanging.
-- **Worker shutdown awaits drain.** `terminate/2` calls the async
-  `shutdown_worker` NIF and waits up to 30s (configurable) for Core to
-  finish in-flight activations before returning.
-- **Server crash takes the worker tree with it.** Worker supervisor uses
-  `:one_for_all` so a Server crash doesn't leave executors orphaned with
-  stale `WorkerResource` references.
-- **Query and validator handlers are crash-protected.** A throwing or
-  exiting query/validator no longer kills the executor — surfaces as
-  `{:error, _}` to the caller.
-- **Native command encoding propagates errors.** Malformed commands and
-  malformed payloads inside command lists now surface as `{:error, _}`
-  from `encode_workflow_completion` instead of silently disappearing.
-
-### Status
-
-Suitable for evaluation and small-scale production. 303 unit tests pass.
-The API surface in `Temporalex.Workflow.API` is stable for `0.2.x`;
-lower-level modules (`Worker.Server`, `Worker.Executor`, `Native`) are
-public for testing hooks but not part of the API contract — those will
-likely change.
+- **`API.receive/2` → `API.phase/2`.** Same shape (reducer state, signal /
+  update handlers, optional `:timeout`), better name (`receive` is a BEAM
+  keyword).
+- **`Temporalex.Client`** is handle-based: `start_workflow/4` returns a
+  `%Client.Handle{}`; subsequent operations (`signal_workflow`,
+  `query_workflow`, `update_workflow`, `get_result`, `cancel_workflow`,
+  `terminate_workflow`, `describe_workflow`) take the handle. `update_workflow`
+  is now first-class — no more CLI workaround.
+- **Workflow execution returns a typed activation transcript.** Workflows
+  return `{:ok, result}` / `{:error, reason}` / `{:continue_as_new, args}` —
+  same as 0.2.0.
+- **`API.side_effect/1` removed.** It was knowingly non-durable across cache
+  evictions in 0.2.0; the design admits primitives only when they have a
+  precise replay contract. Use an activity (or a local activity once
+  re-added — see Known limitations).
+- **Worker config.** Workers now take a `:name` and `:backend` module:
+  ```elixir
+  {Temporalex.Worker,
+   name: MyApp.Temporal,
+   backend: Temporalex.Backend.TemporalCore,
+   target: "http://127.0.0.1:7233",
+   namespace: "default",
+   task_queue: "checkout",
+   workflows: [...],
+   activities: [...]}
+  ```
 
 ### Known limitations
 
-- **Update results aren't readable via the `temporal` CLI.** Workflow
-  payloads default to `binary/etf` encoding (full Elixir term fidelity).
-  The CLI's update-execute can't render binary/etf responses — it
-  errors with "payload encoding is not supported" when displaying. The
-  update itself executes correctly; only the CLI display is affected.
-  Two ways to drive updates without the CLI today: from another worker,
-  or from external code that reads ETF directly. A
-  `Temporalex.Client.update_workflow` (matching `start_workflow`,
-  `signal_workflow`) is the planned 0.2.1 fix.
+The following 0.2.0 features are **not yet present in 0.3.0** and are tracked
+for follow-up releases:
 
-### Wire-protocol invariant
+- **Local activities** (`defactivity foo, local: true do ... end`,
+  `API.execute_local_activity/3`). Returning after the core lands.
+- **Child workflows.** Same — re-adding once the executor scheduler proves
+  out in production use.
+- **Structured error types** (`Temporalex.ActivityFailure`, `ApplicationError`,
+  `CancelledError`, `NondeterminismError`, `TimeoutError`,
+  `ChildWorkflowFailure`). Currently the runtime surfaces failures as
+  raw error tuples; richer error types are queued.
 
-Each workflow activation must produce exactly one
-`complete_workflow_activation` call. The unit test harness
-`Temporalex.Test.ExecutorHelpers.assert_one_flush_per_activation`
-validates this without needing a Temporal server. Tests under
-`test/temporalex/worker_executor_test.exs` exercise the harness for
-sync update handlers and update handlers that park on activities.
+### Migration from 0.2.0
+
+`0.2.0` was a clean-slate prototype with the same package name. There are no
+production users we're aware of, so there is no migration path documented.
+If you were experimenting with 0.2.0, treat 0.3.0 as a fresh start:
+
+- rename `API.receive/2` → `API.phase/2`
+- remove any `API.side_effect/1` calls (use an activity)
+- update worker config to take `:name` and `:backend`
+- update client calls to use a handle returned by `start_workflow/4`
+
+### Build & test
+
+- Tests use `Temporalex.Backend.Test` and do not require a Temporal server.
+- Integration tests (`@moduletag :external`) require `temporal server start-dev`
+  and run via `mix test --include external`.
+- NIF builds against `temporalio/sdk-rust` v0.4.0 (was `temporalio/sdk-core`
+  pinned rev in 0.2.0).
+
+## 0.2.0
+
+First public release on Hex. Superseded by 0.3.0.
+
+The 0.2.0 surface (`API.receive`, `defactivity ..., local: true`, child
+workflows, `Temporalex.Converter`, etc.) is preserved in git history at tag
+`v0.2.0` for reference but is no longer maintained. See
+[git log v0.2.0](https://github.com/cgreeno/temporalex/releases/tag/v0.2.0)
+for the original release notes.

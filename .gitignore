@@ -6,7 +6,8 @@
 temporalex-*.tar
 
 # Rust
-/native/temporalex_native/target/
+/native/temporalex_nif/target/
+/native/temporalex_nif/Cargo.lock
 
 # Compiled NIF
 /priv/native/
@@ -24,6 +25,3 @@ erl_crash.dump
 # Local Claude Code config
 /.claude/
 
-# Internal working docs (kept locally, not published)
-/TESTS.md
-/TESTS_V2.md

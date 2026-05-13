@@ -1,19 +1,23 @@
 # Temporalex
 
-Workflow orchestration for Elixir, powered by the [Temporal](https://temporal.io/)
+Workflow orchestration for Elixir, built on the [Temporal](https://temporal.io/)
 Core SDK (Rust) over Rustler NIFs.
 
 Temporalex workflows read top-to-bottom as sequential code. Concurrency is
-explicit, scoped, and structured — there is no implicit event loop. Activities,
-timers, signals, queries, updates, child workflows, and continue-as-new all
-work the same way they do in the official SDKs, but the programming surface is
-designed for Elixir, not transliterated from another language.
+explicit and structured — there is no implicit event loop. The runtime uses a
+**deterministic cooperative scheduler** that owns thread ordering, so command
+sequences are reproducible from the same activation transcript regardless of
+BEAM scheduling or mailbox timing.
 
-> **Status: 0.2.0 on Hex.** From this release forward, upgrades aim to be
-> backwards-compatible within the `0.x` line — no more clean-slate rewrites.
-> Breaking changes will be flagged in the CHANGELOG and accompanied by a
-> deprecation period whenever practical. 303 unit tests plus end-to-end
-> integration tests against a live Temporal dev server.
+> **Status: 0.3.0.** This release is an architectural rewrite around a
+> deterministic core, a `Temporalex.Backend` boundary that isolates Temporal
+> Core / Rust details, and structured concurrency primitives `phase` and
+> `parallel`. The 0.x line is not backwards-compatible with 0.2.0. See
+> [CHANGELOG.md](CHANGELOG.md) for the migration notes.
+>
+> Core design and scheduler authored by [@hansihe](https://github.com/hansihe);
+> see [`docs/scheduler_and_replay.md`](docs/scheduler_and_replay.md) and
+> [`docs/implementation_principles.md`](docs/implementation_principles.md).
 
 ---
 
@@ -22,12 +26,12 @@ designed for Elixir, not transliterated from another language.
 ```elixir
 # mix.exs
 defp deps do
-  [{:temporalex, "~> 0.2.0"}]
+  [{:temporalex, "~> 0.3.0"}]
 end
 ```
 
-Requirements: Elixir ~> 1.15, Rust ~> 1.94 (the NIF crate compiles on first
-build).
+Requirements: Elixir `~> 1.17`, Rust toolchain (the NIF crate compiles on first
+build against `temporalio/sdk-rust` v0.4.0).
 
 ## Run a Temporal dev server
 
@@ -47,14 +51,8 @@ The Web UI lands at <http://localhost:8233>; the gRPC endpoint at
 defmodule MyApp.Activities.Payment do
   use Temporalex.Activity
 
-  defactivity charge(amount) do
+  defactivity charge(amount), start_to_close_timeout: 30_000 do
     {:ok, "charge-#{amount}"}
-  end
-
-  # Local activities run in-process, are recorded in workflow history,
-  # and survive worker crashes — the durable replacement for `side_effect/1`.
-  defactivity tag_id(prefix), local: true do
-    {:ok, "#{prefix}-#{System.unique_integer([:positive])}"}
   end
 end
 ```
@@ -65,6 +63,8 @@ end
 defmodule MyApp.Workflows.Checkout do
   use Temporalex.Workflow
 
+  alias Temporalex.Workflow.API
+
   def handle_query("status", _args, state), do: {:reply, state}
 
   def run(args) do
@@ -72,19 +72,20 @@ defmodule MyApp.Workflows.Checkout do
     {:ok, charge} = MyApp.Activities.Payment.charge(args["amount"])
 
     API.publish_state(:awaiting_confirmation)
+
     confirmed =
-      API.receive(false,
+      API.phase(false,
         signal: %{
-          "confirm" => fn _payload, _ -> {:stop, true} end,
-          "cancel"  => fn _payload, _ -> {:stop, false} end
+          "confirm" => fn _args, _state -> {:stop, true} end,
+          "cancel"  => fn _args, _state -> {:stop, false} end
         },
         timeout: :timer.minutes(5)
       )
 
-    if confirmed do
-      {:ok, %{charge: charge, confirmed: true}}
-    else
-      {:error, :user_cancelled}
+    case confirmed do
+      {:timeout, _state} -> {:error, :timed_out}
+      true               -> {:ok, %{charge: charge, confirmed: true}}
+      false              -> {:error, :user_cancelled}
     end
   end
 end
@@ -95,7 +96,9 @@ end
 ```elixir
 children = [
   {Temporalex.Worker,
-   url: "http://localhost:7233",
+   name: MyApp.Temporal,
+   backend: Temporalex.Backend.TemporalCore,
+   target: "http://127.0.0.1:7233",
    namespace: "default",
    task_queue: "checkout",
    workflows: [MyApp.Workflows.Checkout],
@@ -108,74 +111,72 @@ Supervisor.start_link(children, strategy: :one_for_one)
 ## Drive workflows from a client
 
 ```elixir
-{:ok, client} = Temporalex.Client.connect("http://localhost:7233")
-
-{:ok, _run_id} =
-  Temporalex.Client.start_workflow(client, "default",
-    workflow_id: "checkout-#{order_id}",
-    workflow_type: "MyApp.Workflows.Checkout",
-    task_queue: "checkout",
-    input: %{"amount" => 100},
-    execution_timeout_ms: :timer.hours(1)
+{:ok, handle} =
+  Temporalex.Client.start_workflow(
+    MyApp.Temporal,
+    MyApp.Workflows.Checkout,
+    %{"amount" => 100},
+    workflow_id: "checkout-#{order_id}"
   )
 
-:ok = Temporalex.Client.signal_workflow(client, "default",
-        workflow_id: "checkout-#{order_id}", signal_name: "confirm")
-
-{:ok, status} = Temporalex.Client.query_workflow(client, "default",
-                  workflow_id: "checkout-#{order_id}", query_type: "status")
+:ok = Temporalex.Client.signal_workflow(handle, "confirm")
+{:ok, status} = Temporalex.Client.query_workflow(handle, "status")
+{:ok, result} = Temporalex.Client.get_result(handle)
 ```
+
+The full client surface: `start_workflow`, `get_result`, `signal_workflow`,
+`query_workflow`, `update_workflow`, `cancel_workflow`, `terminate_workflow`,
+`describe_workflow`.
 
 ---
 
 ## Programming model
 
-Workflows are a single function. Concurrency enters only through `receive` and
-`parallel`, which scope all spawned work — every async handler must complete
-before the scope returns.
+Workflows are a single `run/1` function. Concurrency enters only through
+`phase` and `parallel`, which act as **structured concurrency scopes** — every
+async handler spawned within a scope must complete before the scope returns.
 
-| Primitive | Where | Purpose |
-| --- | --- | --- |
-| `defactivity` calls | anywhere | Schedule an activity, block until it resolves. |
-| `API.execute_local_activity/3` | anywhere | Same, but in-process and durable. |
-| `API.sleep(ms)` | anywhere | Durable timer. |
-| `API.wait_for_signal(name)` | anywhere | Pop one signal from the buffer. |
-| `API.publish_state(state)` | anywhere | Update the snapshot queries see. |
-| `API.patched?(id)` | anywhere | Workflow versioning, replay-safe. |
-| `API.receive(state, opts)` | anywhere | Message-processing scope with signal/update handlers. |
-| `API.parallel(fns)` | anywhere | Concurrent fan-out, results in input order. |
-| `API.update_state(fn)` | inside an async handler | Atomically transform the receive's reducer state. |
+| Primitive | Purpose |
+| --- | --- |
+| `Activities.Module.fun(args)` | Execute an activity. Blocks until resolved. |
+| `API.sleep(ms)` | Durable timer. |
+| `API.wait_for_signal(name)` | Pop one signal from the buffer. |
+| `API.publish_state(state)` | Update the snapshot that queries see. |
+| `API.now/0` `API.random/0` `API.uuid4/0` | Deterministic time/random. |
+| `API.patched?(id)` | Workflow versioning, replay-safe. |
+| `API.phase(state, opts)` | Message-processing scope with signal/update handlers and an optional `:timeout`. |
+| `API.parallel(fns)` | Cooperatively scheduled fan-out. Results in input order. |
+| `API.update_state(fn)` | Atomically transform the enclosing phase's state from inside an `{:async, fn, _}` handler. |
 
-Full details, return-value contracts, and design rationale: see
-[`docs/architecture.md`](docs/architecture.md).
+Full details, return-value contracts, and the determinism rationale:
+
+- [`docs/programming_model.md`](docs/programming_model.md) — public workflow programming model
+- [`docs/scheduler_and_replay.md`](docs/scheduler_and_replay.md) — scheduler rounds, pause points, replay matching
+- [`docs/implementation_principles.md`](docs/implementation_principles.md) — internal invariants and admission rules
+- [`docs/sdk_overview.md`](docs/sdk_overview.md) — architecture map
 
 ---
 
 ## Testing
 
-`Temporalex.Testing` runs workflows step-by-step without a Temporal server.
-Each blocking primitive surfaces as a descriptor you resolve in the test:
+`Temporalex.Backend.Test` is an in-memory backend that lets you drive a worker
+with core activation structs directly — no Temporal server required. The same
+`Temporalex.Server` and `Temporalex.Core.Executor` that handle real traffic
+also handle the test backend, so workflow code under test runs the production
+codepath.
 
 ```elixir
-test "checkout charges then waits for confirmation" do
-  {:ok, exec} = Temporalex.Testing.start_workflow(MyApp.Workflows.Checkout, %{"amount" => 50})
-
-  assert {:activity, call} = Temporalex.Testing.next(exec)
-  assert call.type == "MyApp.Activities.Payment.charge"
-
-  assert {:receive, info} = Temporalex.Testing.resolve(exec, {:ok, "charge-50"})
-  assert "confirm" in info.signals
-
-  Temporalex.Testing.send_signal(exec, "confirm")
-  Process.sleep(20)
-
-  assert {:ok, %{confirmed: true}} = Temporalex.Testing.next(exec)
-end
+start_supervised!(
+  {Temporalex.Worker,
+   name: MyApp.Temporal,
+   backend: Temporalex.Backend.Test,
+   workflows: [MyApp.Workflows.Checkout],
+   activities: [MyApp.Activities.Payment]}
+)
 ```
 
-Replay-state hooks are available too — see
-`Temporalex.Testing.start_workflow/3` `:is_replaying` and `:seen_patches`
-options.
+See `test/temporalex/server_integration_test.exs` for full activation and
+activity-task transcripts.
 
 ---
 
@@ -183,31 +184,33 @@ options.
 
 ```
 lib/temporalex/
-  workflow.ex          use Temporalex.Workflow + the API module
-  workflow/api.ex      sequential primitives, receive, parallel
-  activity.ex          defactivity macro
-  activity/context.ex  heartbeat, cancelled? for activity bodies
-  worker.ex            Supervisor — what users add to their tree
-  worker/server.ex     poll-loop owner + dispatcher
-  worker/executor.ex   per-workflow-task GenServer (production)
-  worker/replay.ex     pure replay-log construction & consumption
-  testing.ex           step-by-step test driver
-  testing/executor.ex  per-workflow-task GenServer (testing)
-  client.ex            start/signal/query/cancel from outside workflows
-  converter.ex         ETF / JSON / binary payload conversion
-  native.ex            Rustler NIF surface (do not call directly)
-  runtime.ex           per-app Tokio runtime singleton
-native/temporalex_native/
-  src/                 Rust NIF crate — proto bridge, client ops, worker
+  workflow.ex                use Temporalex.Workflow
+  workflow/api.ex            sequential primitives, phase, parallel
+  activity.ex                defactivity macro
+  activity/context.ex        heartbeat, cancelled? for activity bodies
+  client.ex                  start / get_result / signal / query / update / cancel / terminate / describe
+  worker.ex                  Supervisor — what users add to their tree
+  server.ex                  Worker server: backend state, executor registry, activation routing
+  core/executor.ex           deterministic workflow executor (scheduler + replay)
+  core/structs.ex            internal protocol: Activation, Job, Command, Completion, Op
+  core/test_harness.ex       in-process harness for testing the core directly
+  backend.ex                 Backend behaviour
+  backend/test.ex            in-memory backend for tests
+  backend/temporal_core.ex   Rustler-backed Temporal Core backend
+  native.ex                  Rustler NIF surface (do not call directly)
+native/temporalex_nif/
+  src/                       Rust NIF crate
 ```
 
 ---
 
 ## Contributing
 
-The project is in active development. [`docs/architecture.md`](docs/architecture.md)
-is the source of truth for the workflow programming model — read it before
-proposing changes to the public API.
+The architecture is documented in [`docs/`](docs/). Start with
+[`docs/sdk_overview.md`](docs/sdk_overview.md). The `docs/implementation_principles.md`
+admission rule applies to any new workflow API: a primitive only enters the
+public surface if it has a precise replay contract and can be tested without
+the real Temporal backend.
 
 ## License
 
