@@ -398,6 +398,26 @@ defmodule Temporalex.Core.Executor do
     |> Map.update!(:next_seq, &(&1 + 1))
   end
 
+  defp handle_workflow_op(state, from, thread_id, %Op.ExecuteLocalActivity{} = op) do
+    seq = state.next_seq
+    activity_id = Keyword.get(op.opts, :activity_id, "local-activity-#{seq}")
+
+    command = %Command.ScheduleLocalActivity{
+      seq: seq,
+      thread_id: thread_id,
+      activity_id: activity_id,
+      type: op.type,
+      input: op.input,
+      opts: op.opts
+    }
+
+    state
+    |> append_command(command)
+    |> put_pending(seq, thread_id, from, op)
+    |> block_thread(thread_id)
+    |> Map.update!(:next_seq, &(&1 + 1))
+  end
+
   defp handle_workflow_op(state, from, thread_id, %Op.Sleep{} = op) do
     seq = state.next_seq
     command = %Command.StartTimer{seq: seq, thread_id: thread_id, duration_ms: op.duration_ms}
@@ -595,6 +615,11 @@ defmodule Temporalex.Core.Executor do
         })
 
       {%Pending{op: %Op.ExecuteActivity{}, thread_id: thread_id, from: from}, pending} ->
+        state
+        |> Map.put(:pending, pending)
+        |> ready_thread(thread_id, {from, result})
+
+      {%Pending{op: %Op.ExecuteLocalActivity{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)
         |> ready_thread(thread_id, {from, result})

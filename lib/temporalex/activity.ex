@@ -36,6 +36,18 @@ defmodule Temporalex.Activity do
     impl_name = :"__#{name}__"
     {dispatch_args, context?} = dispatch_args(args_ast)
     dispatch_head = {name, meta, dispatch_args}
+    {local?, dispatch_opts} = Keyword.pop(opts, :local, false)
+
+    dispatch_call =
+      if local? do
+        quote do
+          Temporalex.Workflow.API.execute_local_activity(type, input, unquote(dispatch_opts))
+        end
+      else
+        quote do
+          Temporalex.Workflow.API.execute_activity(type, input, unquote(dispatch_opts))
+        end
+      end
 
     quote do
       @temporalex_activities %{
@@ -45,13 +57,14 @@ defmodule Temporalex.Activity do
         arity: unquote(length(dispatch_args)),
         implementation_arity: unquote(length(args_ast)),
         context?: unquote(context?),
-        opts: unquote(opts)
+        local?: unquote(local?),
+        opts: unquote(dispatch_opts)
       }
 
       def unquote(dispatch_head) do
         type = "#{inspect(__MODULE__)}.#{unquote(name)}"
         input = [unquote_splicing(dispatch_args)]
-        Temporalex.Workflow.API.execute_activity(type, input, unquote(opts))
+        unquote(dispatch_call)
       end
 
       def unquote(impl_name)(unquote_splicing(args_ast)) do

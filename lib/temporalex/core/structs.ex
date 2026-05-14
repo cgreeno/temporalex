@@ -186,6 +186,11 @@ defmodule Temporalex.Core.Command.ScheduleActivity do
   defstruct [:seq, :thread_id, :activity_id, :type, input: [], opts: []]
 end
 
+defmodule Temporalex.Core.Command.ScheduleLocalActivity do
+  @moduledoc false
+  defstruct [:seq, :thread_id, :activity_id, :type, input: [], opts: []]
+end
+
 defmodule Temporalex.Core.Command.StartTimer do
   @moduledoc false
   defstruct [:seq, :thread_id, :duration_ms]
@@ -267,6 +272,11 @@ defmodule Temporalex.Core.ActivityCompletion do
 end
 
 defmodule Temporalex.Core.Op.ExecuteActivity do
+  @moduledoc false
+  defstruct [:type, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Op.ExecuteLocalActivity do
   @moduledoc false
   defstruct [:type, input: [], opts: []]
 end

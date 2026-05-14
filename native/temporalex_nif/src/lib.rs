@@ -27,8 +27,9 @@ use temporalio_common::protos::coresdk::workflow_activation::{
 use temporalio_common::protos::coresdk::workflow_commands::{
     ActivityCancellationType, CancelTimer, CancelWorkflowExecution, CompleteWorkflowExecution,
     ContinueAsNewWorkflowExecution, FailWorkflowExecution, QueryResult, QuerySuccess,
-    ScheduleActivity, SetPatchMarker, StartTimer, UpdateResponse, UpsertWorkflowSearchAttributes,
-    WorkflowCommand, query_result, update_response, workflow_command,
+    ScheduleActivity, ScheduleLocalActivity, SetPatchMarker, StartTimer, UpdateResponse,
+    UpsertWorkflowSearchAttributes, WorkflowCommand, query_result, update_response,
+    workflow_command,
 };
 use temporalio_common::protos::coresdk::workflow_completion::{
     Failure as WorkflowCompletionFailure, Success as WorkflowCompletionSuccess,
@@ -1763,6 +1764,44 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
                 cancellation_type: activity_cancellation_type_from_opts(opts)? as i32,
                 do_not_eagerly_execute: false,
                 ..Default::default()
+            })
+        }
+        "Elixir.Temporalex.Core.Command.ScheduleLocalActivity" => {
+            let opts = map_get(command, opts_atom())?;
+            let timeout_ms = keyword_get_millis(opts, timeout(), "local activity timeout")?
+                .or(keyword_get_millis(
+                    opts,
+                    start_to_close_timeout(),
+                    "local activity start_to_close_timeout",
+                )?)
+                .unwrap_or(DEFAULT_ACTIVITY_TIMEOUT_MS);
+
+            workflow_command::Variant::ScheduleLocalActivity(ScheduleLocalActivity {
+                seq: map_get_i64(command, seq())? as u32,
+                activity_id: map_get_string(command, activity_id())?,
+                activity_type: map_get_string(command, type_atom())?,
+                attempt: 1,
+                original_schedule_time: None,
+                headers: keyword_get_payload_map(opts, headers())?,
+                arguments: terms_list_to_payloads(map_get(command, input())?)?,
+                schedule_to_close_timeout: Some(duration_from_ms(
+                    keyword_get_millis(
+                        opts,
+                        schedule_to_close_timeout(),
+                        "local activity schedule_to_close_timeout",
+                    )?
+                    .unwrap_or(timeout_ms),
+                )),
+                schedule_to_start_timeout: keyword_get_millis(
+                    opts,
+                    schedule_to_start_timeout(),
+                    "local activity schedule_to_start_timeout",
+                )?
+                .map(duration_from_ms),
+                start_to_close_timeout: Some(duration_from_ms(timeout_ms)),
+                retry_policy: retry_policy_from_opts(opts)?,
+                local_retry_threshold: None,
+                cancellation_type: activity_cancellation_type_from_opts(opts)? as i32,
             })
         }
         "Elixir.Temporalex.Core.Command.CompleteWorkflow" => {

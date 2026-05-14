@@ -12,6 +12,18 @@ defmodule Temporalex.Workflow.API do
     call(%Op.ExecuteActivity{type: type, input: input, opts: opts})
   end
 
+  @doc """
+  Schedule a local activity — runs in-process on this worker rather than via
+  the Temporal task queue, with durability provided by a history marker.
+
+  Faster than regular activities for short, deterministic work that doesn't
+  need cross-worker scheduling. The activity body still runs in the activity
+  task supervisor; Temporal Core records a marker so replay is correct.
+  """
+  def execute_local_activity(type, input, opts \\ []) when is_binary(type) and is_list(input) do
+    call(%Op.ExecuteLocalActivity{type: type, input: input, opts: opts})
+  end
+
   def sleep(duration_ms) when is_integer(duration_ms) and duration_ms >= 0 do
     call(%Op.Sleep{duration_ms: duration_ms})
   end
