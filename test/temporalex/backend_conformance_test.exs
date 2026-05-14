@@ -54,7 +54,14 @@ defmodule Temporalex.BackendConformanceTest do
   test "test backend delivers activity tasks and captures activity completions", %{worker: worker} do
     completion = %ActivityCompletion{
       task_token: "token",
-      result: {:error, {:unknown_activity_type, "missing"}}
+      result:
+        {:error,
+         %Temporalex.ApplicationError{
+           message: "unknown activity type: missing",
+           type: "UnknownActivityType",
+           non_retryable: true,
+           details: "missing"
+         }}
     }
 
     assert :ok =

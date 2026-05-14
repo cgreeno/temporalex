@@ -327,7 +327,14 @@ defmodule Temporalex.Server do
       :error ->
         completion = %ActivityCompletion{
           task_token: task.task_token,
-          result: {:error, {:unknown_activity_type, task.activity_type}}
+          result:
+            {:error,
+             %Temporalex.ApplicationError{
+               message: "unknown activity type: #{task.activity_type}",
+               type: "UnknownActivityType",
+               non_retryable: true,
+               details: task.activity_type
+             }}
         }
 
         submit_activity_completion(state, completion)
@@ -360,7 +367,14 @@ defmodule Temporalex.Server do
       {activity_info, state} ->
         completion = %ActivityCompletion{
           task_token: activity_info.task_token,
-          result: {:error, {:activity_exit, reason}}
+          result:
+            {:error,
+             %Temporalex.ApplicationError{
+               message: "activity process exited: #{inspect(reason)}",
+               type: "ActivityExit",
+               non_retryable: false,
+               details: reason
+             }}
         }
 
         submit_activity_completion(state, completion)
@@ -409,16 +423,64 @@ defmodule Temporalex.Server do
 
     try do
       case apply(activity.module, activity.implementation, args) do
-        {:ok, value} -> {:ok, value}
-        {:error, reason} -> {:error, reason}
-        other -> {:error, {:invalid_activity_return, other}}
+        {:ok, value} ->
+          {:ok, value}
+
+        {:error, %Temporalex.ApplicationError{} = err} ->
+          {:error, err}
+
+        {:error, reason} ->
+          {:error, application_error_from_reason(reason)}
+
+        other ->
+          {:error,
+           %Temporalex.ApplicationError{
+             message: "activity returned invalid value: #{inspect(other)}",
+             type: "InvalidActivityReturn",
+             non_retryable: true,
+             details: other
+           }}
       end
     rescue
-      error -> {:error, {:exception, error, __STACKTRACE__}}
+      err in Temporalex.ApplicationError ->
+        {:error, err}
+
+      error ->
+        {:error,
+         %Temporalex.ApplicationError{
+           message: Exception.message(error),
+           type: inspect(error.__struct__),
+           non_retryable: false,
+           details: %{exception: error, stacktrace: __STACKTRACE__}
+         }}
     catch
-      :throw, {:cancelled, reason} -> {:cancelled, reason}
-      kind, reason -> {:error, {kind, reason, __STACKTRACE__}}
+      :throw, {:cancelled, reason} ->
+        {:cancelled,
+         %Temporalex.CancelledError{
+           message: "activity cancelled",
+           details: reason
+         }}
+
+      kind, reason ->
+        {:error,
+         %Temporalex.ApplicationError{
+           message: "activity #{kind}: #{inspect(reason)}",
+           type: "ActivityExit",
+           non_retryable: false,
+           details: %{kind: kind, reason: reason, stacktrace: __STACKTRACE__}
+         }}
     end
+  end
+
+  defp application_error_from_reason(%Temporalex.ApplicationError{} = err), do: err
+
+  defp application_error_from_reason(reason) do
+    %Temporalex.ApplicationError{
+      message: inspect(reason),
+      type: "ApplicationError",
+      non_retryable: false,
+      details: reason
+    }
   end
 
   defp activity_context(task, state, cancelled) do

@@ -250,24 +250,38 @@ defmodule Temporalex.ServerIntegrationTest do
       activity_task("activity-fail", "#{inspect(Activities)}.fail", [:bad])
     )
 
-    assert %ActivityCompletion{result: {:error, :bad}} =
-             TestBackend.fetch_activity_completion(worker, "activity-fail")
+    assert %ActivityCompletion{
+             result:
+               {:error, %Temporalex.ApplicationError{details: :bad, type: "ApplicationError"}}
+           } = TestBackend.fetch_activity_completion(worker, "activity-fail")
 
     TestBackend.send_activity_task(
       worker,
       activity_task("activity-invalid", "#{inspect(Activities)}.invalid_return", [:bad_return])
     )
 
-    assert %ActivityCompletion{result: {:error, {:invalid_activity_return, :bad_return}}} =
-             TestBackend.fetch_activity_completion(worker, "activity-invalid")
+    assert %ActivityCompletion{
+             result:
+               {:error,
+                %Temporalex.ApplicationError{
+                  type: "InvalidActivityReturn",
+                  non_retryable: true
+                }}
+           } = TestBackend.fetch_activity_completion(worker, "activity-invalid")
 
     TestBackend.send_activity_task(
       worker,
       activity_task("activity-crash", "#{inspect(Activities)}.crash", ["boom"])
     )
 
-    assert %ActivityCompletion{result: {:error, {:exception, %RuntimeError{}, _stack}}} =
-             TestBackend.fetch_activity_completion(worker, "activity-crash")
+    assert %ActivityCompletion{
+             result:
+               {:error,
+                %Temporalex.ApplicationError{
+                  message: "boom",
+                  type: "RuntimeError"
+                }}
+           } = TestBackend.fetch_activity_completion(worker, "activity-crash")
   end
 
   test "activity context supports cooperative cancellation", %{worker: worker} do
@@ -289,8 +303,10 @@ defmodule Temporalex.ServerIntegrationTest do
 
     send(activity_pid, :heartbeat)
 
-    assert %ActivityCompletion{task_token: ^token, result: {:cancelled, :cancelled}} =
-             TestBackend.fetch_activity_completion(worker, token)
+    assert %ActivityCompletion{
+             task_token: ^token,
+             result: {:cancelled, %Temporalex.CancelledError{details: :cancelled}}
+           } = TestBackend.fetch_activity_completion(worker, token)
   end
 
   test "executor monitor cleanup removes crashed executors from registry", %{worker: worker} do
