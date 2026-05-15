@@ -1,74 +1,51 @@
 defmodule Temporalex.Activity.Context do
   @moduledoc """
-  Context for a running activity task.
+  Runtime context passed to activity implementations that declare a context
+  argument.
 
-  Stored in the process dictionary and accessible via `current/0`.
-  Provides `heartbeat/1` for long-running activities and `cancelled?/0`
-  for checking cancellation.
+  Heartbeats are submitted through the worker backend when the activity is running
+  under a `Temporalex.Server`.
   """
 
-  defstruct [
-    :task_token,
-    :activity_id,
-    :activity_type,
-    :workflow_namespace,
-    :workflow_type,
-    :workflow_id,
-    :workflow_run_id,
-    :task_queue,
-    :attempt,
-    :heartbeat_details,
-    :worker,
-    :server_pid,
-    :cancel_ref
-  ]
+  defstruct activity_id: nil,
+            activity_type: nil,
+            task_token: nil,
+            workflow_id: nil,
+            workflow_type: nil,
+            workflow_namespace: nil,
+            run_id: nil,
+            task_queue: nil,
+            attempt: 1,
+            heartbeat_timeout: nil,
+            is_local: false,
+            worker: nil,
+            cancelled: nil,
+            cancel_reason: nil
 
-  @doc "Get the current activity context from the process dictionary."
-  def current do
-    Process.get(:__temporal_activity_context__) ||
-      raise "Activity.Context accessed outside of an activity task"
-  end
-
-  @doc """
-  Send a heartbeat for the current activity. The Core SDK handles throttling.
-
-  Returns `:ok` or `{:cancelled, reason}` if the activity has been cancelled.
-  """
-  def heartbeat(details \\ nil) do
-    ctx = current()
-
-    if cancelled?(ctx) do
-      {:cancelled, :activity_cancelled}
+  def heartbeat(%__MODULE__{} = context, details \\ nil) do
+    if cancelled?(context) do
+      {:cancelled, context.cancel_reason || :cancelled}
     else
-      payload = encode_heartbeat_payload(details)
-      Temporalex.Native.record_activity_heartbeat(ctx.worker, ctx.task_token, payload)
+      with :ok <- submit_heartbeat(context, details) do
+        if cancelled?(context) do
+          {:cancelled, context.cancel_reason || :cancelled}
+        else
+          :ok
+        end
+      end
     end
   end
 
-  @doc false
-  # Encode heartbeat details to the same Payload shape as activity I/O so the
-  # encoding metadata survives the round-trip through Temporal history.
-  def encode_heartbeat_payload(nil), do: nil
-  def encode_heartbeat_payload(details), do: Temporalex.Converter.encode(details)
+  def cancelled?(%__MODULE__{cancelled: nil}), do: false
 
-  @doc "Check if the activity has been cancelled."
-  def cancelled? do
-    cancelled?(current())
+  def cancelled?(%__MODULE__{cancelled: cancelled}) do
+    :atomics.get(cancelled, 1) == 1
   end
 
-  defp cancelled?(%{cancel_ref: nil}), do: false
+  defp submit_heartbeat(%__MODULE__{worker: nil}, _details), do: :ok
+  defp submit_heartbeat(%__MODULE__{task_token: nil}, _details), do: :ok
 
-  defp cancelled?(%{cancel_ref: ref}) do
-    :atomics.get(ref, 1) == 1
-  end
-
-  @doc false
-  def new_cancel_ref do
-    :atomics.new(1, signed: false)
-  end
-
-  @doc false
-  def set_cancelled(ref) do
-    :atomics.put(ref, 1, 1)
+  defp submit_heartbeat(%__MODULE__{} = context, details) do
+    Temporalex.Server.record_activity_heartbeat(context.worker, context.task_token, details)
   end
 end

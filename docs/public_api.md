@@ -1,0 +1,238 @@
+# Public API
+
+This document captures the intended public Elixir API. The deterministic behavior behind these APIs is specified in [core.md](core.md) and [programming_model.md](programming_model.md).
+
+## Workflow Definition
+
+A workflow is a module that uses `Temporalex.Workflow` and defines `run/1`.
+
+```elixir
+defmodule MyApp.Workflows.Checkout do
+  use Temporalex.Workflow
+
+  def handle_query("status", _args, state), do: {:reply, state}
+
+  def run(%{"order_id" => order_id}) do
+    {:ok, charge_id} = MyApp.Activities.Payment.charge(%{order_id: order_id})
+    {:ok, %{charge_id: charge_id}}
+  end
+end
+```
+
+`use Temporalex.Workflow` generates:
+
+```elixir
+__workflow_type__/0
+__workflow_defaults__/0
+```
+
+`run/1` returns:
+
+```elixir
+{:ok, result}
+{:error, reason}
+{:continue_as_new, args}
+{:cancelled, reason}
+```
+
+`handle_query/3` is optional. It receives query name, query args, and the last state published by `API.publish_state/1`.
+
+## Activity Definition
+
+Activities are the workflow boundary for external work. Activity modules use `Temporalex.Activity` and define activities with `defactivity`.
+
+```elixir
+defmodule MyApp.Activities.Payment do
+  use Temporalex.Activity
+
+  defactivity charge(input), timeout: 30_000 do
+    PaymentService.charge(input)
+  end
+end
+```
+
+Each `defactivity` generates:
+
+1. A dispatch function with the declared name, for workflow code.
+2. An implementation function named `__<activity_name>__/N`, for server-side activity execution.
+3. Module metadata through `__temporal_activities__/0`.
+
+The dispatch function reads `:__temporal_context__` and calls the executor:
+
+```elixir
+GenServer.call(executor, {:workflow_op, thread_id, op}, :infinity)
+```
+
+If no workflow context exists, the dispatch function raises with a clear error explaining that activities must be called from workflow code.
+
+## Activity Type Strings
+
+Activity type strings are derived from module and function name:
+
+```elixir
+"MyApp.Activities.Payment.charge"
+```
+
+This string is used in core commands, backend mapping, server dispatch, and eventually Temporal UI visibility.
+
+## Activity Context
+
+Activities that need metadata, heartbeats, or cancellation can accept a context as the first argument.
+
+```elixir
+defactivity process_file(ctx, path), timeout: 60_000, heartbeat_timeout: 10_000 do
+  File.stream!(path)
+  |> Stream.with_index()
+  |> Enum.each(fn {line, i} ->
+    process(line)
+
+    case Temporalex.Activity.Context.heartbeat(ctx, %{progress: i}) do
+      :ok -> :continue
+      {:cancelled, reason} -> throw({:cancelled, reason})
+    end
+  end)
+
+  {:ok, :done}
+end
+```
+
+Context shape:
+
+```elixir
+%Temporalex.Activity.Context{
+  activity_id: String.t(),
+  activity_type: String.t(),
+  task_token: binary(),
+  workflow_id: String.t(),
+  workflow_type: String.t(),
+  workflow_namespace: String.t(),
+  run_id: String.t(),
+  task_queue: String.t(),
+  attempt: non_neg_integer(),
+  heartbeat_timeout: non_neg_integer() | nil,
+  is_local: boolean(),
+  worker: term(),
+  cancelled: :atomics.ref()
+}
+```
+
+The server builds this context from `%Temporalex.Core.ActivityTask{}`.
+
+## Activity Return Values
+
+Activity implementation functions return:
+
+```elixir
+{:ok, value}
+{:error, reason}
+```
+
+Any other return value or unhandled exception is treated as an activity failure.
+
+## Workflow API
+
+Workflow code uses `Temporalex.Workflow.API` for workflow primitives:
+
+```elixir
+API.sleep(duration_ms)
+API.wait_for_signal(name)
+API.publish_state(state)
+API.patched?(patch_id)
+API.deprecate_patch(patch_id)
+API.phase(initial_state, opts)
+API.parallel(funs)
+API.update_state(fun)
+API.workflow_info()
+API.cancelled?()
+API.upsert_search_attributes(attrs)
+API.now()
+API.random()
+API.uuid4()
+```
+
+`API.update_state/1` is only valid inside async phase handlers.
+
+The detailed semantics are in [programming_model.md](programming_model.md).
+
+## Client API
+
+The implemented client API talks through a running `Temporalex.Worker` that uses `Temporalex.Backend.TemporalCore`:
+
+```elixir
+{:ok, handle} =
+  Temporalex.Client.start_workflow(worker, MyApp.Workflows.Checkout, %{order_id: 123},
+    workflow_id: "order-123"
+  )
+
+{:ok, result} = Temporalex.Client.get_result(handle)
+```
+
+`worker` is the worker instance name, for example `MyApp.Temporal`.
+
+Workflow operations are available through handles or `{worker, workflow_id}`:
+
+```elixir
+:ok = Temporalex.Client.signal_workflow(handle, "approve", [%{approved_by: "alice"}])
+{:ok, reply} = Temporalex.Client.update_workflow(handle, "add_item", [%{sku: "ABC"}])
+{:ok, state} = Temporalex.Client.query_workflow(handle, "status")
+{:ok, description} = Temporalex.Client.describe_workflow(handle)
+
+:ok = Temporalex.Client.cancel_workflow(handle, reason: "user requested")
+:ok = Temporalex.Client.terminate_workflow(handle, reason: "manual override")
+
+:ok = Temporalex.Client.signal_workflow(worker, "order-123", "approve", [])
+{:ok, state} = Temporalex.Client.query_workflow(worker, "order-123", "status", [])
+```
+
+Start options accepted by the native backend include:
+
+```elixir
+workflow_id: "order-123",
+task_queue: "orders",
+headers: %{"trace_id" => trace_id},
+search_attributes: %{"CustomKeywordField" => "checkout"},
+workflow_execution_timeout: 86_400_000,
+workflow_run_timeout: 3_600_000,
+workflow_task_timeout: 10_000,
+retry_policy: [
+  initial_interval: 1_000,
+  backoff_coefficient: 2.0,
+  maximum_interval: 60_000,
+  maximum_attempts: 3,
+  non_retryable_error_types: ["ValidationError"]
+],
+id_reuse_policy: :reject_duplicate,
+id_conflict_policy: :fail,
+static_summary: "Checkout workflow"
+```
+
+Signal/update/query options accept `:headers`. Signal and cancel also accept `:request_id`; update accepts `:update_id`.
+
+## Retry Policy
+
+```elixir
+%Temporalex.RetryPolicy{
+  max_attempts: 0,
+  initial_interval: 1_000,
+  backoff_coefficient: 2.0,
+  maximum_interval: nil,
+  non_retryable_error_types: []
+}
+```
+
+`max_attempts: 0` means unlimited attempts.
+
+## Error Structs
+
+Planned public error types:
+
+| Type | Meaning |
+|---|---|
+| `Temporalex.ActivityFailure` | Activity returned `{:error, _}` or crashed. |
+| `Temporalex.ChildWorkflowFailure` | Child workflow failed. |
+| `Temporalex.ApplicationError` | Application-level failure, optionally non-retryable. |
+| `Temporalex.TimeoutError` | Timeout exceeded. |
+| `Temporalex.CancelledError` | Workflow or activity was cancelled. |
+| `Temporalex.NondeterminismError` | Workflow replay diverged from history. |
+
+The core can use internal error structs, but public errors should be stable and documented.

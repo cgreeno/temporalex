@@ -1,219 +1,211 @@
 defmodule Temporalex.Client do
   @moduledoc """
-  Client for interacting with Temporal workflows from outside workflow code.
+  Client API for workflow operations through a running `Temporalex.Worker`.
 
-  Used to start, signal, query, and cancel workflows programmatically.
+  This implementation is backed by the worker's Temporal Core connection. Native
+  resources stay inside `Temporalex.Backend.TemporalCore`; callers use Elixir terms
+  and workflow handles.
+  """
 
-  ## Usage
+  alias Temporalex.Backend.TemporalCore
 
-      # Get client from a running worker
-      {:ok, client} = Temporalex.Client.connect("http://localhost:7233")
+  defmodule Handle do
+    @moduledoc """
+    Handle for a started workflow execution.
+    """
 
-      # Start a workflow
-      {:ok, run_id} = Temporalex.Client.start_workflow(client, "default",
-        workflow_id: "order-123",
-        workflow_type: "MyApp.Workflows.Order",
-        task_queue: "my-queue",
-        input: %{order_id: "123"}
+    defstruct [:worker, :workflow_id, :run_id, :workflow_type]
+  end
+
+  def start_workflow(worker, workflow, input, opts \\ []) when is_list(opts) do
+    with {:ok, server} <- server_pid(worker),
+         {:ok, state} <- temporal_core_state(server),
+         workflow_type <- workflow_type(workflow),
+         {:ok, info} <- TemporalCore.start_workflow(state, workflow_type, input, opts) do
+      {:ok,
+       %Handle{
+         worker: worker,
+         workflow_id: Map.fetch!(info, :workflow_id),
+         run_id: Map.get(info, :run_id),
+         workflow_type: Map.get(info, :workflow_type, workflow_type)
+       }}
+    end
+  end
+
+  def get_result(%Handle{} = handle, opts \\ []) when is_list(opts) do
+    with {:ok, server} <- server_pid(handle.worker),
+         {:ok, state} <- temporal_core_state(server) do
+      TemporalCore.get_workflow_result(state, handle.workflow_id, handle.run_id, opts)
+    end
+  end
+
+  def signal_workflow(%Handle{} = handle, signal_name),
+    do: signal_workflow(handle, signal_name, [], [])
+
+  def signal_workflow(%Handle{} = handle, signal_name, args) when is_binary(signal_name),
+    do: signal_workflow(handle, signal_name, args, [])
+
+  def signal_workflow(%Handle{} = handle, signal_name, args, opts)
+      when is_binary(signal_name) and is_list(opts) do
+    with {:ok, state} <- state_for_worker(handle.worker) do
+      TemporalCore.signal_workflow(
+        state,
+        handle.workflow_id,
+        handle.run_id,
+        signal_name,
+        args,
+        opts
       )
+    end
+  end
 
-      # Signal a workflow
-      :ok = Temporalex.Client.signal_workflow(client, "default",
-        workflow_id: "order-123",
-        signal_name: "approve",
-        input: %{approved: true}
+  def signal_workflow(worker, workflow_id, signal_name, args, opts \\ [])
+      when is_binary(workflow_id) and is_binary(signal_name) and is_list(opts) do
+    with {:ok, state} <- state_for_worker(worker) do
+      TemporalCore.signal_workflow(
+        state,
+        workflow_id,
+        Keyword.get(opts, :run_id),
+        signal_name,
+        args,
+        opts
       )
+    end
+  end
 
-      # Query a workflow
-      {:ok, result} = Temporalex.Client.query_workflow(client, "default",
-        workflow_id: "order-123",
-        query_type: "status"
+  def query_workflow(%Handle{} = handle, query_name),
+    do: query_workflow(handle, query_name, [], [])
+
+  def query_workflow(%Handle{} = handle, query_name, args) when is_binary(query_name),
+    do: query_workflow(handle, query_name, args, [])
+
+  def query_workflow(%Handle{} = handle, query_name, args, opts)
+      when is_binary(query_name) and is_list(opts) do
+    with {:ok, state} <- state_for_worker(handle.worker) do
+      TemporalCore.query_workflow(
+        state,
+        handle.workflow_id,
+        handle.run_id,
+        query_name,
+        args,
+        opts
       )
-  """
-
-  @doc "Connect to a Temporal server. Returns `{:ok, client}` or `{:error, reason}`."
-  def connect(url, opts \\ []) do
-    {:ok, runtime} = Temporalex.Runtime.get()
-    api_key = Keyword.get(opts, :api_key, "")
-    headers = Keyword.get(opts, :headers, %{})
-
-    Temporalex.Native.connect(runtime, url, api_key, headers, self())
-
-    receive do
-      {:connected, client} -> {:ok, client}
-      {:connect_error, reason} -> {:error, reason}
-    after
-      10_000 -> {:error, :timeout}
     end
   end
 
-  @doc """
-  Start a workflow execution.
-
-  ## Options (required)
-  - `:workflow_id` — unique workflow identifier
-  - `:workflow_type` — workflow type name (e.g., "MyApp.Workflows.Order")
-  - `:task_queue` — task queue name
-
-  ## Options (optional)
-  - `:input` — workflow input (will be ETF-encoded)
-  - `:request_id` — idempotency key (auto-generated if omitted)
-  - `:execution_timeout_ms` — total time the workflow is allowed to run
-    (across continue-as-new chains)
-  - `:run_timeout_ms` — time a single run is allowed to take
-  - `:task_timeout_ms` — time a single workflow task is allowed to take
-    before being retried by the server
-  """
-  def start_workflow(client, namespace, opts) do
-    workflow_id = Keyword.fetch!(opts, :workflow_id)
-    workflow_type = Keyword.fetch!(opts, :workflow_type)
-    task_queue = Keyword.fetch!(opts, :task_queue)
-    input = Keyword.get(opts, :input)
-    request_id = Keyword.get(opts, :request_id, generate_request_id())
-
-    execution_timeout_ms = Keyword.get(opts, :execution_timeout_ms, 0)
-    run_timeout_ms = Keyword.get(opts, :run_timeout_ms, 0)
-    task_timeout_ms = Keyword.get(opts, :task_timeout_ms, 0)
-
-    input_payload = if input, do: Temporalex.Converter.encode(input), else: nil
-
-    Temporalex.Native.start_workflow(
-      client,
-      namespace,
-      workflow_id,
-      workflow_type,
-      task_queue,
-      input_payload,
-      request_id,
-      execution_timeout_ms,
-      run_timeout_ms,
-      task_timeout_ms,
-      self()
-    )
-
-    receive do
-      {:start_workflow_result, result} -> result
-    after
-      30_000 -> {:error, :timeout}
+  def query_workflow(worker, workflow_id, query_name, args, opts \\ [])
+      when is_binary(workflow_id) and is_binary(query_name) and is_list(opts) do
+    with {:ok, state} <- state_for_worker(worker) do
+      TemporalCore.query_workflow(
+        state,
+        workflow_id,
+        Keyword.get(opts, :run_id),
+        query_name,
+        args,
+        opts
+      )
     end
   end
 
-  @doc """
-  Send a signal to a running workflow.
+  def update_workflow(%Handle{} = handle, update_name),
+    do: update_workflow(handle, update_name, [], [])
 
-  ## Options (required)
-  - `:workflow_id` — target workflow ID
-  - `:signal_name` — signal name
+  def update_workflow(%Handle{} = handle, update_name, args) when is_binary(update_name),
+    do: update_workflow(handle, update_name, args, [])
 
-  ## Options (optional)
-  - `:input` — signal payload
-  - `:run_id` — specific run ID (empty string for latest)
-  """
-  def signal_workflow(client, namespace, opts) do
-    workflow_id = Keyword.fetch!(opts, :workflow_id)
-    signal_name = Keyword.fetch!(opts, :signal_name)
-    run_id = Keyword.get(opts, :run_id, "")
-    input = Keyword.get(opts, :input)
-    request_id = Keyword.get(opts, :request_id, generate_request_id())
-
-    input_payload = if input, do: Temporalex.Converter.encode(input), else: nil
-
-    Temporalex.Native.signal_workflow(
-      client,
-      namespace,
-      workflow_id,
-      run_id,
-      signal_name,
-      input_payload,
-      request_id,
-      self()
-    )
-
-    receive do
-      {:signal_workflow_result, result} -> result
-    after
-      30_000 -> {:error, :timeout}
+  def update_workflow(%Handle{} = handle, update_name, args, opts)
+      when is_binary(update_name) and is_list(opts) do
+    with {:ok, state} <- state_for_worker(handle.worker) do
+      TemporalCore.update_workflow(
+        state,
+        handle.workflow_id,
+        handle.run_id,
+        update_name,
+        args,
+        opts
+      )
     end
   end
 
-  @doc """
-  Query a workflow's state.
-
-  ## Options (required)
-  - `:workflow_id` — target workflow ID
-  - `:query_type` — query name
-
-  ## Options (optional)
-  - `:args` — query arguments
-  - `:run_id` — specific run ID
-  """
-  def query_workflow(client, namespace, opts) do
-    workflow_id = Keyword.fetch!(opts, :workflow_id)
-    query_type = Keyword.fetch!(opts, :query_type)
-    run_id = Keyword.get(opts, :run_id, "")
-    args = Keyword.get(opts, :args)
-
-    args_payload = if args, do: Temporalex.Converter.encode(args), else: nil
-
-    Temporalex.Native.query_workflow(
-      client,
-      namespace,
-      workflow_id,
-      run_id,
-      query_type,
-      args_payload,
-      self()
-    )
-
-    receive do
-      {:query_workflow_result, {:ok, payload_bytes}} ->
-        {:ok,
-         Temporalex.Converter.decode(%{
-           metadata: %{"encoding" => "binary/etf"},
-           data: payload_bytes
-         })}
-
-      {:query_workflow_result, {:error, _} = err} ->
-        err
-    after
-      30_000 -> {:error, :timeout}
+  def update_workflow(worker, workflow_id, update_name, args, opts \\ [])
+      when is_binary(workflow_id) and is_binary(update_name) and is_list(opts) do
+    with {:ok, state} <- state_for_worker(worker) do
+      TemporalCore.update_workflow(
+        state,
+        workflow_id,
+        Keyword.get(opts, :run_id),
+        update_name,
+        args,
+        opts
+      )
     end
   end
 
-  @doc """
-  Cancel a running workflow.
-
-  ## Options (required)
-  - `:workflow_id` — target workflow ID
-
-  ## Options (optional)
-  - `:run_id` — specific run ID
-  - `:reason` — cancellation reason
-  """
-  def cancel_workflow(client, namespace, opts) do
-    workflow_id = Keyword.fetch!(opts, :workflow_id)
-    run_id = Keyword.get(opts, :run_id, "")
-    reason = Keyword.get(opts, :reason, "")
-    request_id = Keyword.get(opts, :request_id, generate_request_id())
-
-    Temporalex.Native.cancel_workflow(
-      client,
-      namespace,
-      workflow_id,
-      run_id,
-      reason,
-      request_id,
-      self()
-    )
-
-    receive do
-      {:cancel_workflow_result, result} -> result
-    after
-      30_000 -> {:error, :timeout}
+  def cancel_workflow(%Handle{} = handle, opts \\ []) when is_list(opts) do
+    with {:ok, state} <- state_for_worker(handle.worker) do
+      TemporalCore.cancel_workflow(state, handle.workflow_id, handle.run_id, opts)
     end
   end
 
-  defp generate_request_id do
-    :crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false)
+  def cancel_workflow(worker, workflow_id, opts) when is_binary(workflow_id) and is_list(opts) do
+    with {:ok, state} <- state_for_worker(worker) do
+      TemporalCore.cancel_workflow(state, workflow_id, Keyword.get(opts, :run_id), opts)
+    end
+  end
+
+  def terminate_workflow(%Handle{} = handle, opts \\ []) when is_list(opts) do
+    with {:ok, state} <- state_for_worker(handle.worker) do
+      TemporalCore.terminate_workflow(state, handle.workflow_id, handle.run_id, opts)
+    end
+  end
+
+  def terminate_workflow(worker, workflow_id, opts)
+      when is_binary(workflow_id) and is_list(opts) do
+    with {:ok, state} <- state_for_worker(worker) do
+      TemporalCore.terminate_workflow(state, workflow_id, Keyword.get(opts, :run_id), opts)
+    end
+  end
+
+  def describe_workflow(%Handle{} = handle, opts \\ []) when is_list(opts) do
+    with {:ok, state} <- state_for_worker(handle.worker) do
+      TemporalCore.describe_workflow(state, handle.workflow_id, handle.run_id, opts)
+    end
+  end
+
+  def describe_workflow(worker, workflow_id, opts)
+      when is_binary(workflow_id) and is_list(opts) do
+    with {:ok, state} <- state_for_worker(worker) do
+      TemporalCore.describe_workflow(state, workflow_id, Keyword.get(opts, :run_id), opts)
+    end
+  end
+
+  defp server_pid(worker) do
+    case Temporalex.Worker.server_pid(worker) do
+      nil -> {:error, {:worker_not_started, worker}}
+      pid when is_pid(pid) -> {:ok, pid}
+    end
+  end
+
+  defp state_for_worker(worker) do
+    with {:ok, server} <- server_pid(worker) do
+      temporal_core_state(server)
+    end
+  end
+
+  defp temporal_core_state(server) do
+    case Temporalex.Server.backend_state(server) do
+      %TemporalCore.State{} = state -> {:ok, state}
+      other -> {:error, {:unsupported_backend, other}}
+    end
+  end
+
+  defp workflow_type(workflow_type) when is_binary(workflow_type), do: workflow_type
+
+  defp workflow_type(workflow_module) when is_atom(workflow_module) do
+    if function_exported?(workflow_module, :__workflow_type__, 0) do
+      workflow_module.__workflow_type__()
+    else
+      inspect(workflow_module)
+    end
   end
 end

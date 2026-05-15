@@ -1,15 +1,18 @@
 defmodule Temporalex do
   @moduledoc """
-  Workflow orchestration framework for Elixir built on Temporal.
+  Documentation for `Temporalex`.
   """
-  use Application
 
-  @impl true
-  def start(_type, _args) do
-    children = [
-      Temporalex.Runtime
-    ]
+  @doc """
+  Hello world.
 
-    Supervisor.start_link(children, strategy: :one_for_one, name: Temporalex.Supervisor)
+  ## Examples
+
+      iex> Temporalex.hello()
+      :world
+
+  """
+  def hello do
+    :world
   end
 end
