@@ -54,6 +54,38 @@ defmodule MyApp.Activities.Payment do
   defactivity charge(amount), start_to_close_timeout: 30_000 do
     {:ok, "charge-#{amount}"}
   end
+
+  # Local activity: runs in-process on the same worker, durable via a
+  # history marker. Use for short, deterministic work where the network
+  # round-trip to schedule a regular activity isn't worth it.
+  defactivity stamp(prefix), local: true, start_to_close_timeout: 5_000 do
+    {:ok, "#{prefix}-#{System.unique_integer([:positive])}"}
+  end
+end
+```
+
+## Structured errors
+
+Activities can raise `Temporalex.ApplicationError` (or return `{:error,
+reason}`); the workflow sees a typed exception with the cause preserved:
+
+```elixir
+defactivity charge(amount) do
+  if amount > 10_000 do
+    raise %Temporalex.ApplicationError{
+      message: "amount exceeds limit",
+      type: "AmountTooLarge",
+      non_retryable: true
+    }
+  else
+    {:ok, amount}
+  end
+end
+
+# In the workflow:
+case Activities.charge(amount) do
+  {:ok, charge}                                                    -> ...
+  {:error, %Temporalex.ActivityFailure{cause: %{type: "AmountTooLarge"}}} -> ...
 end
 ```
 

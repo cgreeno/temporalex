@@ -59,19 +59,24 @@ the design source-of-truth.
    activities: [...]}
   ```
 
+### Restored from 0.2.0
+
+- **Local activities.** `defactivity foo, local: true do ... end` plus
+  `API.execute_local_activity/3`. Runs the activity body on the worker
+  that scheduled it, with durability via Temporal's history-marker
+  mechanism. Verified end-to-end against a live Temporal server.
+- **Structured error types** with full proto round-trip:
+  `Temporalex.ApplicationError` (type, message, non_retryable, details),
+  `CancelledError`, `TimeoutError`, `ActivityFailure` (wraps a cause and
+  carries activity identity), `ChildWorkflowFailure`, `NondeterminismError`.
+  Raised in an activity, they reach the workflow as
+  `%ActivityFailure{cause: %ApplicationError{...}}` with the right fields
+  on the wire and in the Temporal UI.
+
 ### Known limitations
 
-The following 0.2.0 features are **not yet present in 0.3.0** and are tracked
-for follow-up releases:
-
-- **Local activities** (`defactivity foo, local: true do ... end`,
-  `API.execute_local_activity/3`). Returning after the core lands.
-- **Child workflows.** Same — re-adding once the executor scheduler proves
-  out in production use.
-- **Structured error types** (`Temporalex.ActivityFailure`, `ApplicationError`,
-  `CancelledError`, `NondeterminismError`, `TimeoutError`,
-  `ChildWorkflowFailure`). Currently the runtime surfaces failures as
-  raw error tuples; richer error types are queued.
+- **Child workflows.** Not yet re-added in 0.3.0. Tracked for 0.3.1
+  alongside cascading cancel and signal-child surface.
 
 ### Migration from 0.2.0
 
