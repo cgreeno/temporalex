@@ -204,6 +204,12 @@ defmodule Temporalex.Core.Executor do
 
         %Job.RemoveFromCache{} ->
           {query_jobs, teardown_threads(%{state | evicted?: true})}
+
+        %Job.ResolveChildWorkflowExecutionStart{seq: seq, status: status} ->
+          {query_jobs, resolve_child_start(state, seq, status)}
+
+        %Job.ResolveChildWorkflowExecution{seq: seq, result: result} ->
+          {query_jobs, resolve_child_completion(state, seq, result)}
       end
 
     apply_jobs(rest, query_jobs, state)
@@ -407,6 +413,28 @@ defmodule Temporalex.Core.Executor do
       thread_id: thread_id,
       activity_id: activity_id,
       type: op.type,
+      input: op.input,
+      opts: op.opts
+    }
+
+    state
+    |> append_command(command)
+    |> put_pending(seq, thread_id, from, op)
+    |> block_thread(thread_id)
+    |> Map.update!(:next_seq, &(&1 + 1))
+  end
+
+  defp handle_workflow_op(state, from, thread_id, %Op.ExecuteChildWorkflow{} = op) do
+    seq = state.next_seq
+
+    workflow_id =
+      Keyword.get(op.opts, :workflow_id, "child-#{seq}-#{state.run_id || "run"}")
+
+    command = %Command.StartChildWorkflowExecution{
+      seq: seq,
+      thread_id: thread_id,
+      workflow_type: op.workflow_type,
+      workflow_id: workflow_id,
       input: op.input,
       opts: op.opts
     }
@@ -624,6 +652,11 @@ defmodule Temporalex.Core.Executor do
         |> Map.put(:pending, pending)
         |> ready_thread(thread_id, {from, result})
 
+      {%Pending{op: %Op.ExecuteChildWorkflow{}, thread_id: thread_id, from: from}, pending} ->
+        state
+        |> Map.put(:pending, pending)
+        |> ready_thread(thread_id, {from, result})
+
       {%Pending{op: %Op.Sleep{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)
@@ -634,6 +667,37 @@ defmodule Temporalex.Core.Executor do
         |> Map.put(:pending, pending)
         |> fire_phase_timeout(phase_id)
     end
+  end
+
+  # Child workflow start resolution. Succeeded leaves the pending alive so the
+  # parent thread keeps waiting for the final ResolveChildWorkflowExecution
+  # job. Failed/cancelled wake the parent immediately with a structured error.
+  defp resolve_child_start(state, _seq, {:succeeded, _run_id}) do
+    state
+  end
+
+  defp resolve_child_start(state, seq, {:failed, info}) do
+    failure = %Temporalex.ChildWorkflowFailure{
+      message: "failed to start child workflow",
+      workflow_id: info[:workflow_id],
+      workflow_type: info[:workflow_type],
+      cause: %Temporalex.ApplicationError{
+        message: "child workflow start failure: #{info[:cause]}",
+        type: "ChildWorkflowStartFailed",
+        non_retryable: true,
+        details: info[:cause]
+      }
+    }
+
+    resolve_pending(state, seq, {:error, failure})
+  end
+
+  defp resolve_child_start(state, seq, {:cancelled, failure}) do
+    resolve_pending(state, seq, {:cancelled, failure})
+  end
+
+  defp resolve_child_completion(state, seq, result) do
+    resolve_pending(state, seq, result)
   end
 
   defp receive_signal(state, %Job.SignalReceived{} = signal) do
@@ -913,7 +977,17 @@ defmodule Temporalex.Core.Executor do
 
     case thread.kind do
       :root ->
-        append_command(state, %Command.FailWorkflow{reason: {:exception, reason}})
+        # Unwrap raised exceptions so the Rust encoder sees the underlying
+        # struct (e.g. %Temporalex.ApplicationError{}) and emits the correct
+        # Temporal Failure proto variant. Bare values fall through to the
+        # generic ApplicationError encoder path.
+        unwrapped =
+          case reason do
+            {:exception, %_{__exception__: true} = err, _stack} -> err
+            other -> other
+          end
+
+        append_command(state, %Command.FailWorkflow{reason: unwrapped})
 
       :parallel_branch ->
         complete_parallel_branch(state, thread, {:error, reason})

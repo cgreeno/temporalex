@@ -374,7 +374,9 @@ defmodule Temporalex.CoreExecutorTest do
 
       assert {:ok, exec} = TestHarness.start_workflow(RaisingWorkflow, :ignored)
 
-      assert {:complete, {:error, {:exception, {:exception, %RuntimeError{}, _stack}}}} =
+      # Raised exceptions surface as the underlying struct (not wrapped) so
+      # the Rust encoder can map them to the right Temporal Failure variant.
+      assert {:complete, {:error, %RuntimeError{message: "boom"}}} =
                TestHarness.next(exec)
     end
 
@@ -563,7 +565,9 @@ defmodule Temporalex.CoreExecutorTest do
                      workflow_info: %{},
                      randomness_seed: 0
                    }
-                 ], replay: true).status
+                 ],
+                 replay: true
+               ).status
 
       assert {:ok, exec} = TestHarness.start_workflow(PatchWorkflow, nil)
 
@@ -578,7 +582,9 @@ defmodule Temporalex.CoreExecutorTest do
                      workflow_info: %{},
                      randomness_seed: 0
                    }
-                 ], replay: true).status
+                 ],
+                 replay: true
+               ).status
     end
 
     test "workflow processes carry only the Temporalex context key" do

@@ -24,6 +24,39 @@ defmodule Temporalex.Workflow.API do
     call(%Op.ExecuteLocalActivity{type: type, input: input, opts: opts})
   end
 
+  @doc """
+  Start a child workflow and block until it completes.
+
+  `workflow` may be a module that uses `Temporalex.Workflow` (its
+  `__workflow_type__/0` is consulted) or a workflow type string.
+
+  Options:
+  - `:workflow_id` (required) — child workflow identifier
+  - `:task_queue` — defaults to the parent's task queue
+  - `:execution_timeout_ms`, `:run_timeout_ms`, `:task_timeout_ms`
+  - `:retry_policy` — keyword list, same shape as activity retry policies
+  - `:parent_close_policy` — `:terminate` (default), `:abandon`, `:request_cancel`
+  - `:workflow_id_reuse_policy` — `:allow_duplicate` (default), `:allow_duplicate_failed_only`, `:reject_duplicate`, `:terminate_if_running`
+
+  Returns `{:ok, result}` on completion, `{:error, %Temporalex.ChildWorkflowFailure{...}}` on
+  child failure or start failure, `{:cancelled, ...}` on cancellation.
+  """
+  def execute_child_workflow(workflow, input, opts \\ []) when is_list(input) do
+    type =
+      cond do
+        is_binary(workflow) ->
+          workflow
+
+        is_atom(workflow) and function_exported?(workflow, :__workflow_type__, 0) ->
+          workflow.__workflow_type__()
+
+        is_atom(workflow) ->
+          inspect(workflow)
+      end
+
+    call(%Op.ExecuteChildWorkflow{workflow_type: type, input: input, opts: opts})
+  end
+
   def sleep(duration_ms) when is_integer(duration_ms) and duration_ms >= 0 do
     call(%Op.Sleep{duration_ms: duration_ms})
   end

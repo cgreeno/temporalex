@@ -24,12 +24,13 @@ use temporalio_common::protos::coresdk::workflow_activation::{
     WorkflowActivation, WorkflowActivationJob, remove_from_cache::EvictionReason,
     workflow_activation_job,
 };
+use temporalio_common::protos::coresdk::child_workflow::ParentClosePolicy;
 use temporalio_common::protos::coresdk::workflow_commands::{
     ActivityCancellationType, CancelTimer, CancelWorkflowExecution, CompleteWorkflowExecution,
     ContinueAsNewWorkflowExecution, FailWorkflowExecution, QueryResult, QuerySuccess,
-    ScheduleActivity, ScheduleLocalActivity, SetPatchMarker, StartTimer, UpdateResponse,
-    UpsertWorkflowSearchAttributes, WorkflowCommand, query_result, update_response,
-    workflow_command,
+    ScheduleActivity, ScheduleLocalActivity, SetPatchMarker, StartChildWorkflowExecution,
+    StartTimer, UpdateResponse, UpsertWorkflowSearchAttributes, WorkflowCommand, query_result,
+    update_response, workflow_command,
 };
 use temporalio_common::protos::coresdk::workflow_completion::{
     Failure as WorkflowCompletionFailure, Success as WorkflowCompletionSuccess,
@@ -208,6 +209,10 @@ rustler::atoms! {
     start_to_close,
     schedule_to_close,
     schedule_to_start,
+    succeeded,
+    request_cancel,
+    parent_close_policy,
+    terminate_atom = "terminate",
     history_length_atom = "history_length",
     calendar_atom = "calendar",
     year_atom = "year",
@@ -1563,9 +1568,77 @@ fn activation_job_to_term<'a>(
                 message() => eviction.message.clone(),
             )
         }
+        workflow_activation_job::Variant::ResolveChildWorkflowExecutionStart(start) => {
+            let status_term = child_start_status_to_term(env, start.status.as_ref())?;
+            put_fields!(
+                make_struct(env, "Elixir.Temporalex.Core.Job.ResolveChildWorkflowExecutionStart")?,
+                seq() => start.seq as i64,
+                status_atom() => status_term,
+            )
+        }
+        workflow_activation_job::Variant::ResolveChildWorkflowExecution(resolution) => {
+            let result_term = child_workflow_result_to_term(env, resolution.result.as_ref())?;
+            put_fields!(
+                make_struct(env, "Elixir.Temporalex.Core.Job.ResolveChildWorkflowExecution")?,
+                seq() => resolution.seq as i64,
+                result() => result_term,
+            )
+        }
         other => Err(anyhow!(
             "unsupported workflow activation job from Temporal Core: {other:?}"
         )),
+    }
+}
+
+fn child_start_status_to_term<'a>(
+    env: Env<'a>,
+    status: Option<&temporalio_common::protos::coresdk::workflow_activation::resolve_child_workflow_execution_start::Status>,
+) -> anyhow::Result<Term<'a>> {
+    use temporalio_common::protos::coresdk::workflow_activation::resolve_child_workflow_execution_start::Status as S;
+
+    match status.context("child workflow start status missing")? {
+        S::Succeeded(success) => Ok((succeeded(), success.run_id.clone()).encode(env)),
+
+        S::Failed(failure) => {
+            let info = put_fields!(
+                Term::map_new(env),
+                workflow_id() => failure.workflow_id.clone(),
+                workflow_type() => failure.workflow_type.clone(),
+                cause() => failure.cause as i64,
+            )?;
+            Ok((failed(), info).encode(env))
+        }
+
+        S::Cancelled(cancellation) => Ok((
+            cancelled(),
+            failure_to_term(env, cancellation.failure.as_ref())?,
+        )
+            .encode(env)),
+    }
+}
+
+fn child_workflow_result_to_term<'a>(
+    env: Env<'a>,
+    result: Option<&temporalio_common::protos::coresdk::child_workflow::ChildWorkflowResult>,
+) -> anyhow::Result<Term<'a>> {
+    use temporalio_common::protos::coresdk::child_workflow::child_workflow_result::Status as S;
+
+    let result = result.context("child workflow result missing")?;
+    let status = result.status.as_ref().context("child workflow result empty status")?;
+
+    match status {
+        S::Completed(success) => {
+            let payload = success.result.as_ref().context("child completion missing payload")?;
+            Ok((ok(), payload_to_term(env, payload)?).encode(env))
+        }
+        S::Failed(failure) => {
+            Ok((error(), failure_to_term(env, failure.failure.as_ref())?).encode(env))
+        }
+        S::Cancelled(cancellation) => Ok((
+            cancelled(),
+            failure_to_term(env, cancellation.failure.as_ref())?,
+        )
+            .encode(env)),
     }
 }
 
@@ -1802,6 +1875,53 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
                 retry_policy: retry_policy_from_opts(opts)?,
                 local_retry_threshold: None,
                 cancellation_type: activity_cancellation_type_from_opts(opts)? as i32,
+            })
+        }
+        "Elixir.Temporalex.Core.Command.StartChildWorkflowExecution" => {
+            let opts = map_get(command, opts_atom())?;
+            let task_queue = keyword_get_string(opts, task_queue())?
+                .unwrap_or_else(|| default_task_queue.to_string());
+            let namespace = keyword_get_string(opts, namespace())?.unwrap_or_default();
+
+            workflow_command::Variant::StartChildWorkflowExecution(StartChildWorkflowExecution {
+                seq: map_get_i64(command, seq())? as u32,
+                namespace,
+                workflow_id: map_get_string(command, workflow_id())?,
+                workflow_type: map_get_string(command, workflow_type())?,
+                task_queue,
+                input: terms_list_to_payloads(map_get(command, input())?)?,
+                workflow_execution_timeout: keyword_get_millis(
+                    opts,
+                    execution_timeout(),
+                    "child workflow execution_timeout",
+                )?
+                .or(keyword_get_millis(
+                    opts,
+                    workflow_execution_timeout(),
+                    "child workflow workflow_execution_timeout",
+                )?)
+                .map(duration_from_ms),
+                workflow_run_timeout: keyword_get_millis(
+                    opts,
+                    run_timeout(),
+                    "child workflow run_timeout",
+                )?
+                .map(duration_from_ms),
+                workflow_task_timeout: keyword_get_millis(
+                    opts,
+                    task_timeout(),
+                    "child workflow task_timeout",
+                )?
+                .map(duration_from_ms),
+                parent_close_policy: parent_close_policy_from_opts(opts)? as i32,
+                workflow_id_reuse_policy: workflow_id_reuse_policy_from_opts(opts)? as i32,
+                retry_policy: retry_policy_from_opts(opts)?,
+                cron_schedule: keyword_get_string(opts, cron_schedule())?.unwrap_or_default(),
+                headers: keyword_get_payload_map(opts, headers())?,
+                memo: HashMap::new(),
+                search_attributes: None,
+                cancellation_type: 0,
+                ..Default::default()
             })
         }
         "Elixir.Temporalex.Core.Command.CompleteWorkflow" => {
@@ -2465,6 +2585,25 @@ fn activity_cancellation_type_from_opts(opts: Term) -> anyhow::Result<ActivityCa
 }
 
 #[allow(deprecated)]
+fn parent_close_policy_from_opts(opts: Term) -> anyhow::Result<ParentClosePolicy> {
+    let Some(term) = keyword_get(opts, parent_close_policy())? else {
+        return Ok(ParentClosePolicy::Terminate);
+    };
+
+    let atom: Atom = decode_term(term)?;
+    if atom == terminate_atom() {
+        Ok(ParentClosePolicy::Terminate)
+    } else if atom == abandon() {
+        Ok(ParentClosePolicy::Abandon)
+    } else if atom == request_cancel() {
+        Ok(ParentClosePolicy::RequestCancel)
+    } else if atom == unspecified() {
+        Ok(ParentClosePolicy::Unspecified)
+    } else {
+        Err(anyhow!("unsupported parent close policy"))
+    }
+}
+
 fn workflow_id_reuse_policy_from_opts(opts: Term) -> anyhow::Result<WorkflowIdReusePolicy> {
     let Some(term) =
         keyword_get(opts, workflow_id_reuse_policy())?.or(keyword_get(opts, id_reuse_policy())?)

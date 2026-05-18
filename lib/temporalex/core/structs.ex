@@ -181,6 +181,18 @@ defmodule Temporalex.Core.Job.RemoveFromCache do
   defstruct reason: nil, message: nil
 end
 
+defmodule Temporalex.Core.Job.ResolveChildWorkflowExecutionStart do
+  @moduledoc false
+  # status: {:succeeded, run_id} | {:failed, %{workflow_id, workflow_type, cause}} | {:cancelled, failure}
+  defstruct [:seq, :status]
+end
+
+defmodule Temporalex.Core.Job.ResolveChildWorkflowExecution do
+  @moduledoc false
+  # result: {:ok, value} | {:error, failure} | {:cancelled, failure}
+  defstruct [:seq, :result]
+end
+
 defmodule Temporalex.Core.Command.ScheduleActivity do
   @moduledoc false
   defstruct [:seq, :thread_id, :activity_id, :type, input: [], opts: []]
@@ -189,6 +201,11 @@ end
 defmodule Temporalex.Core.Command.ScheduleLocalActivity do
   @moduledoc false
   defstruct [:seq, :thread_id, :activity_id, :type, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Command.StartChildWorkflowExecution do
+  @moduledoc false
+  defstruct [:seq, :thread_id, :workflow_type, :workflow_id, input: [], opts: []]
 end
 
 defmodule Temporalex.Core.Command.StartTimer do
@@ -279,6 +296,11 @@ end
 defmodule Temporalex.Core.Op.ExecuteLocalActivity do
   @moduledoc false
   defstruct [:type, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Op.ExecuteChildWorkflow do
+  @moduledoc false
+  defstruct [:workflow_type, input: [], opts: []]
 end
 
 defmodule Temporalex.Core.Op.Sleep do
