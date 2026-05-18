@@ -656,5 +656,231 @@ defmodule Temporalex.CoreExtrasTest do
                     }}
                })
     end
+
+    defmodule SignalingMultipleWorkflow do
+      use Temporalex.Workflow
+
+      def run(_) do
+        :ok = API.signal_child_workflow("child-1", "first", [:a])
+        :ok = API.signal_child_workflow("child-1", "second", [:b, :c])
+        :ok = API.signal_child_workflow("child-2", "first", [])
+        {:ok, :all_sent}
+      end
+    end
+
+    test "multiple sequential signal_child_workflow calls get distinct seq numbers and complete in order" do
+      assert {:ok, exec} = TestHarness.start_workflow(SignalingMultipleWorkflow, nil)
+
+      # First signal: parent blocks waiting for ResolveSignalExternalWorkflow.
+      assert {:yield,
+              [
+                %Command.SignalExternalWorkflowExecution{
+                  seq: seq1,
+                  target: {:child, "child-1"},
+                  signal_name: "first",
+                  args: [:a]
+                }
+              ]} = TestHarness.next(exec)
+
+      # Resolve first — parent emits second command.
+      assert {:yield,
+              [
+                %Command.SignalExternalWorkflowExecution{
+                  seq: seq2,
+                  target: {:child, "child-1"},
+                  signal_name: "second",
+                  args: [:b, :c]
+                }
+              ]} =
+               TestHarness.resolve(exec, %Job.ResolveSignalExternalWorkflow{
+                 seq: seq1,
+                 result: :ok
+               })
+
+      refute seq1 == seq2
+
+      # Resolve second — parent emits third command (different target).
+      assert {:yield,
+              [
+                %Command.SignalExternalWorkflowExecution{
+                  seq: seq3,
+                  target: {:child, "child-2"},
+                  signal_name: "first",
+                  args: []
+                }
+              ]} =
+               TestHarness.resolve(exec, %Job.ResolveSignalExternalWorkflow{
+                 seq: seq2,
+                 result: :ok
+               })
+
+      refute seq3 == seq1
+      refute seq3 == seq2
+
+      # Resolve third — workflow completes.
+      assert {:complete, {:ok, :all_sent}} =
+               TestHarness.resolve(exec, %Job.ResolveSignalExternalWorkflow{
+                 seq: seq3,
+                 result: :ok
+               })
+    end
+
+    defmodule SignalingFromParallelWorkflow do
+      use Temporalex.Workflow
+
+      def run(_) do
+        [a, b] =
+          API.parallel([
+            fn -> API.signal_child_workflow("child-A", "ping", []) end,
+            fn -> API.signal_child_workflow("child-B", "ping", []) end
+          ])
+
+        {:ok, {a, b}}
+      end
+    end
+
+    test "signal_child_workflow from parallel branches emits both signals with stable thread ids" do
+      assert {:ok, exec} = TestHarness.start_workflow(SignalingFromParallelWorkflow, nil)
+
+      # Both branches emit a signal command in the same activation.
+      assert {:yield, commands} = TestHarness.next(exec)
+      signals = Enum.filter(commands, &match?(%Command.SignalExternalWorkflowExecution{}, &1))
+      assert length(signals) == 2
+
+      # Each signal carries the branch's thread id, in input order.
+      branch_a = Enum.find(signals, &(&1.thread_id == [{:p, 0}]))
+      branch_b = Enum.find(signals, &(&1.thread_id == [{:p, 1}]))
+      assert branch_a != nil and branch_a.target == {:child, "child-A"}
+      assert branch_b != nil and branch_b.target == {:child, "child-B"}
+
+      # Resolve both. Order of resolution doesn't matter (different seqs).
+      assert {:yield, []} =
+               TestHarness.resolve(exec, %Job.ResolveSignalExternalWorkflow{
+                 seq: branch_a.seq,
+                 result: :ok
+               })
+
+      assert {:complete, {:ok, {:ok, :ok}}} =
+               TestHarness.resolve(exec, %Job.ResolveSignalExternalWorkflow{
+                 seq: branch_b.seq,
+                 result: :ok
+               })
+    end
+
+    defmodule SignalingRichPayloadWorkflow do
+      use Temporalex.Workflow
+
+      def run(_) do
+        # Rich Elixir term as the signal payload — proves args are passed
+        # through opaquely without coercion at the executor layer (encoding
+        # happens at the Rust boundary).
+        payload = %{nested: %{values: [1, 2, 3]}, tag: :complex}
+        :ok = API.signal_child_workflow("child-1", "data", [payload])
+        {:ok, :sent}
+      end
+    end
+
+    test "signal args carry rich Elixir terms through the Op intact" do
+      assert {:ok, exec} = TestHarness.start_workflow(SignalingRichPayloadWorkflow, nil)
+
+      assert {:yield, [%Command.SignalExternalWorkflowExecution{args: args}]} =
+               TestHarness.next(exec)
+
+      assert [%{nested: %{values: [1, 2, 3]}, tag: :complex}] = args
+    end
+
+    defmodule SignalingBlocksThreadWorkflow do
+      use Temporalex.Workflow
+
+      defmodule Acts do
+        use Temporalex.Activity
+
+        defactivity work(label), timeout: 1_000 do
+          {:ok, label}
+        end
+      end
+
+      def run(_) do
+        # If signal_child_workflow weren't blocking, the second activity
+        # would emit immediately. The test asserts the activity command
+        # does NOT appear until the signal is resolved.
+        :ok = API.signal_child_workflow("child-1", "go", [])
+        {:ok, _} = Acts.work(:after_signal)
+        {:ok, :done}
+      end
+    end
+
+    test "signal_child_workflow blocks the calling thread until resolution arrives" do
+      assert {:ok, exec} = TestHarness.start_workflow(SignalingBlocksThreadWorkflow, nil)
+
+      # First activation: only the signal command. No activity yet.
+      assert {:yield, [%Command.SignalExternalWorkflowExecution{seq: seq}]} =
+               TestHarness.next(exec)
+
+      # Resolve the signal → thread unblocks → activity is scheduled.
+      assert {:yield, [%Command.ScheduleActivity{input: [:after_signal]}]} =
+               TestHarness.resolve(exec, %Job.ResolveSignalExternalWorkflow{
+                 seq: seq,
+                 result: :ok
+               })
+    end
+
+    defmodule SignalingFromAsyncUpdateWorkflow do
+      use Temporalex.Workflow
+
+      def run(_) do
+        result =
+          API.phase(:running,
+            update: %{
+              "broadcast" => fn _args, state ->
+                {:async,
+                 fn ->
+                   :ok = API.signal_child_workflow("child-1", "wake", [:from_async])
+                   :delivered
+                 end, state}
+              end
+            },
+            signal: %{"done" => fn _args, state -> {:stop, state} end}
+          )
+
+        {:ok, result}
+      end
+    end
+
+    test "signal_child_workflow inside an async update handler works" do
+      assert {:ok, exec} =
+               TestHarness.start_workflow(SignalingFromAsyncUpdateWorkflow, nil)
+
+      assert {:waiting, _} = TestHarness.next(exec)
+
+      # The async handler returns :delivered as the update reply.
+      assert {:yield, commands} = TestHarness.send_update(exec, "broadcast", [])
+
+      # Acceptance + the signal command emitted from inside the async fn.
+      assert Enum.any?(commands, &match?(%Command.RespondToUpdate{response: :accepted}, &1))
+
+      signal_cmd =
+        Enum.find(commands, &match?(%Command.SignalExternalWorkflowExecution{}, &1))
+
+      assert signal_cmd != nil
+      assert signal_cmd.target == {:child, "child-1"}
+      assert signal_cmd.signal_name == "wake"
+      assert signal_cmd.args == [:from_async]
+
+      # Resolve signal → async handler returns :delivered → update completes.
+      assert {:yield, completed_commands} =
+               TestHarness.resolve(exec, %Job.ResolveSignalExternalWorkflow{
+                 seq: signal_cmd.seq,
+                 result: :ok
+               })
+
+      assert Enum.any?(
+               completed_commands,
+               &match?(%Command.RespondToUpdate{response: {:completed, :delivered}}, &1)
+             )
+
+      # Stop the phase, workflow completes.
+      assert {:complete, {:ok, :running}} = TestHarness.send_signal(exec, "done", [])
+    end
   end
 end
