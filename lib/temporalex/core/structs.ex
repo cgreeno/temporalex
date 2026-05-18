@@ -193,6 +193,12 @@ defmodule Temporalex.Core.Job.ResolveChildWorkflowExecution do
   defstruct [:seq, :result]
 end
 
+defmodule Temporalex.Core.Job.ResolveSignalExternalWorkflow do
+  @moduledoc false
+  # result: :ok | {:error, failure}
+  defstruct [:seq, :result]
+end
+
 defmodule Temporalex.Core.Command.ScheduleActivity do
   @moduledoc false
   defstruct [:seq, :thread_id, :activity_id, :type, input: [], opts: []]
@@ -206,6 +212,12 @@ end
 defmodule Temporalex.Core.Command.StartChildWorkflowExecution do
   @moduledoc false
   defstruct [:seq, :thread_id, :workflow_type, :workflow_id, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Command.SignalExternalWorkflowExecution do
+  @moduledoc false
+  # target: {:child, workflow_id}
+  defstruct [:seq, :thread_id, :target, :signal_name, args: [], opts: []]
 end
 
 defmodule Temporalex.Core.Command.StartTimer do
@@ -301,6 +313,11 @@ end
 defmodule Temporalex.Core.Op.ExecuteChildWorkflow do
   @moduledoc false
   defstruct [:workflow_type, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Op.SignalChildWorkflow do
+  @moduledoc false
+  defstruct [:workflow_id, :signal_name, args: [], opts: []]
 end
 
 defmodule Temporalex.Core.Op.Sleep do

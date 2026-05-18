@@ -210,6 +210,9 @@ defmodule Temporalex.Core.Executor do
 
         %Job.ResolveChildWorkflowExecution{seq: seq, result: result} ->
           {query_jobs, resolve_child_completion(state, seq, result)}
+
+        %Job.ResolveSignalExternalWorkflow{seq: seq, result: result} ->
+          {query_jobs, resolve_pending(state, seq, result)}
       end
 
     apply_jobs(rest, query_jobs, state)
@@ -446,6 +449,25 @@ defmodule Temporalex.Core.Executor do
     |> Map.update!(:next_seq, &(&1 + 1))
   end
 
+  defp handle_workflow_op(state, from, thread_id, %Op.SignalChildWorkflow{} = op) do
+    seq = state.next_seq
+
+    command = %Command.SignalExternalWorkflowExecution{
+      seq: seq,
+      thread_id: thread_id,
+      target: {:child, op.workflow_id},
+      signal_name: op.signal_name,
+      args: op.args,
+      opts: op.opts
+    }
+
+    state
+    |> append_command(command)
+    |> put_pending(seq, thread_id, from, op)
+    |> block_thread(thread_id)
+    |> Map.update!(:next_seq, &(&1 + 1))
+  end
+
   defp handle_workflow_op(state, from, thread_id, %Op.Sleep{} = op) do
     seq = state.next_seq
     command = %Command.StartTimer{seq: seq, thread_id: thread_id, duration_ms: op.duration_ms}
@@ -653,6 +675,11 @@ defmodule Temporalex.Core.Executor do
         |> ready_thread(thread_id, {from, result})
 
       {%Pending{op: %Op.ExecuteChildWorkflow{}, thread_id: thread_id, from: from}, pending} ->
+        state
+        |> Map.put(:pending, pending)
+        |> ready_thread(thread_id, {from, result})
+
+      {%Pending{op: %Op.SignalChildWorkflow{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)
         |> ready_thread(thread_id, {from, result})

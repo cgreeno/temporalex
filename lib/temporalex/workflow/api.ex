@@ -57,6 +57,30 @@ defmodule Temporalex.Workflow.API do
     call(%Op.ExecuteChildWorkflow{workflow_type: type, input: input, opts: opts})
   end
 
+  @doc """
+  Send a signal to a child workflow that was started by this workflow.
+
+  `workflow_id` must match the `workflow_id` you used in
+  `execute_child_workflow/3`. The signal is sent durably — the call
+  blocks until Temporal confirms delivery (or fails).
+
+  Returns `:ok` on successful delivery, `{:error, %Temporalex.ApplicationError{}}`
+  if the target workflow doesn't exist or the signal can't be delivered.
+
+  This is a "fire and confirm delivery" primitive: the signal handler in
+  the child runs asynchronously to the parent; success only means Temporal
+  has accepted the signal for delivery.
+  """
+  def signal_child_workflow(workflow_id, signal_name, args \\ [], opts \\ [])
+      when is_binary(workflow_id) and is_binary(signal_name) and is_list(args) do
+    call(%Op.SignalChildWorkflow{
+      workflow_id: workflow_id,
+      signal_name: signal_name,
+      args: args,
+      opts: opts
+    })
+  end
+
   def sleep(duration_ms) when is_integer(duration_ms) and duration_ms >= 0 do
     call(%Op.Sleep{duration_ms: duration_ms})
   end

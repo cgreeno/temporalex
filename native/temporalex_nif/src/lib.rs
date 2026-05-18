@@ -28,9 +28,10 @@ use temporalio_common::protos::coresdk::child_workflow::ParentClosePolicy;
 use temporalio_common::protos::coresdk::workflow_commands::{
     ActivityCancellationType, CancelTimer, CancelWorkflowExecution, CompleteWorkflowExecution,
     ContinueAsNewWorkflowExecution, FailWorkflowExecution, QueryResult, QuerySuccess,
-    ScheduleActivity, ScheduleLocalActivity, SetPatchMarker, StartChildWorkflowExecution,
-    StartTimer, UpdateResponse, UpsertWorkflowSearchAttributes, WorkflowCommand, query_result,
-    update_response, workflow_command,
+    ScheduleActivity, ScheduleLocalActivity, SetPatchMarker, SignalExternalWorkflowExecution,
+    StartChildWorkflowExecution, StartTimer, UpdateResponse, UpsertWorkflowSearchAttributes,
+    WorkflowCommand, query_result, signal_external_workflow_execution, update_response,
+    workflow_command,
 };
 use temporalio_common::protos::coresdk::workflow_completion::{
     Failure as WorkflowCompletionFailure, Success as WorkflowCompletionSuccess,
@@ -213,6 +214,10 @@ rustler::atoms! {
     request_cancel,
     parent_close_policy,
     terminate_atom = "terminate",
+    signal_name,
+    target,
+    child,
+    external,
     history_length_atom = "history_length",
     calendar_atom = "calendar",
     year_atom = "year",
@@ -1584,9 +1589,39 @@ fn activation_job_to_term<'a>(
                 result() => result_term,
             )
         }
+        workflow_activation_job::Variant::ResolveSignalExternalWorkflow(resolution) => {
+            let result_term = match resolution.failure.as_ref() {
+                None => ok().encode(env),
+                Some(failure) => (error(), failure_to_term(env, Some(failure))?).encode(env),
+            };
+
+            put_fields!(
+                make_struct(env, "Elixir.Temporalex.Core.Job.ResolveSignalExternalWorkflow")?,
+                seq() => resolution.seq as i64,
+                result() => result_term,
+            )
+        }
         other => Err(anyhow!(
             "unsupported workflow activation job from Temporal Core: {other:?}"
         )),
+    }
+}
+
+fn signal_target_from_term(
+    term: Term,
+) -> anyhow::Result<signal_external_workflow_execution::Target> {
+    // Elixir shape: {:child, workflow_id} for child workflows.
+    let (tag, value) = term
+        .decode::<(Atom, Term)>()
+        .map_err(|_| anyhow!("signal target must be a tagged tuple"))?;
+
+    if tag == child() {
+        let workflow_id: String = decode_term(value)?;
+        Ok(signal_external_workflow_execution::Target::ChildWorkflowId(
+            workflow_id,
+        ))
+    } else {
+        Err(anyhow!("unsupported signal target tag: {tag:?}"))
     }
 }
 
@@ -1923,6 +1958,20 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
                 cancellation_type: 0,
                 ..Default::default()
             })
+        }
+        "Elixir.Temporalex.Core.Command.SignalExternalWorkflowExecution" => {
+            let target_term = map_get(command, target())?;
+            let target = signal_target_from_term(target_term)?;
+
+            workflow_command::Variant::SignalExternalWorkflowExecution(
+                SignalExternalWorkflowExecution {
+                    seq: map_get_i64(command, seq())? as u32,
+                    signal_name: map_get_string(command, signal_name())?,
+                    args: terms_list_to_payloads(map_get(command, args())?)?,
+                    headers: HashMap::new(),
+                    target: Some(target),
+                },
+            )
         }
         "Elixir.Temporalex.Core.Command.CompleteWorkflow" => {
             workflow_command::Variant::CompleteWorkflowExecution(CompleteWorkflowExecution {

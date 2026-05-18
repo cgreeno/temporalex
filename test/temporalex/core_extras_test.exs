@@ -593,4 +593,68 @@ defmodule Temporalex.CoreExtrasTest do
                })
     end
   end
+
+  # ─────────────────────────── Signal child workflow ────────────────────────
+
+  describe "signal child workflow" do
+    defmodule SignalingParentWorkflow do
+      use Temporalex.Workflow
+
+      def run(_) do
+        :ok = API.signal_child_workflow("fixed-child-id", "wake", [:payload])
+        {:ok, :signal_sent}
+      end
+    end
+
+    test "signal_child_workflow emits SignalExternalWorkflowExecution with :child target" do
+      assert {:ok, exec} = TestHarness.start_workflow(SignalingParentWorkflow, nil)
+
+      assert {:yield,
+              [
+                %Command.SignalExternalWorkflowExecution{
+                  seq: seq,
+                  target: {:child, "fixed-child-id"},
+                  signal_name: "wake",
+                  args: [:payload]
+                }
+              ]} = TestHarness.next(exec)
+
+      # Successful delivery → :ok resolution.
+      assert {:complete, {:ok, :signal_sent}} =
+               TestHarness.resolve(exec, %Job.ResolveSignalExternalWorkflow{
+                 seq: seq,
+                 result: :ok
+               })
+    end
+
+    defmodule SignalingErrorHandlingWorkflow do
+      use Temporalex.Workflow
+
+      def run(_) do
+        case API.signal_child_workflow("missing-child", "wake", []) do
+          :ok -> {:ok, :delivered}
+          {:error, _} = err -> {:ok, {:not_delivered, err}}
+        end
+      end
+    end
+
+    test "signal_child_workflow failure surfaces as {:error, _} to the workflow" do
+      assert {:ok, exec} = TestHarness.start_workflow(SignalingErrorHandlingWorkflow, nil)
+
+      assert {:yield, [%Command.SignalExternalWorkflowExecution{seq: seq}]} =
+               TestHarness.next(exec)
+
+      assert {:complete, {:ok, {:not_delivered, {:error, %Temporalex.ApplicationError{}}}}} =
+               TestHarness.resolve(exec, %Job.ResolveSignalExternalWorkflow{
+                 seq: seq,
+                 result:
+                   {:error,
+                    %Temporalex.ApplicationError{
+                      message: "no such workflow",
+                      type: "NotFound",
+                      non_retryable: true
+                    }}
+               })
+    end
+  end
 end
