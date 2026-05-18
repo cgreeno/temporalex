@@ -975,31 +975,32 @@ defmodule Temporalex.Core.Executor do
     thread = Map.fetch!(state.threads, thread_id)
     state = put_thread(state, %{thread | status: :failed, error: reason})
 
+    # Unwrap raised exceptions so callers (root → Rust encoder, parallel
+    # branch → result list, phase handler → update response) see the
+    # underlying exception struct rather than an internal
+    # `{:exception, struct, stacktrace}` tuple. Bare values pass through
+    # unchanged.
+    unwrapped =
+      case reason do
+        {:exception, %_{__exception__: true} = err, _stack} -> err
+        other -> other
+      end
+
     case thread.kind do
       :root ->
-        # Unwrap raised exceptions so the Rust encoder sees the underlying
-        # struct (e.g. %Temporalex.ApplicationError{}) and emits the correct
-        # Temporal Failure proto variant. Bare values fall through to the
-        # generic ApplicationError encoder path.
-        unwrapped =
-          case reason do
-            {:exception, %_{__exception__: true} = err, _stack} -> err
-            other -> other
-          end
-
         append_command(state, %Command.FailWorkflow{reason: unwrapped})
 
       :parallel_branch ->
-        complete_parallel_branch(state, thread, {:error, reason})
+        complete_parallel_branch(state, thread, {:error, unwrapped})
 
       :phase_dispatch ->
-        fail_phase_dispatch(state, thread, reason)
+        fail_phase_dispatch(state, thread, unwrapped)
 
       :async_signal_handler ->
         complete_async_signal(state, thread)
 
       :async_update_handler ->
-        complete_async_update(state, thread, {:rejected, reason})
+        complete_async_update(state, thread, {:rejected, unwrapped})
     end
   end
 

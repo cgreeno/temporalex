@@ -869,7 +869,7 @@ defmodule Temporalex.CoreExecutorTest do
                 %Command.RespondToUpdate{protocol_instance_id: "bad-state", response: :accepted},
                 %Command.RespondToUpdate{
                   protocol_instance_id: "bad-state",
-                  response: {:rejected, {:exception, %RuntimeError{}, _stack}}
+                  response: {:rejected, %RuntimeError{}}
                 }
               ]} =
                TestHarness.send_update(exec, "bad_state", [], protocol_instance_id: "bad-state")
