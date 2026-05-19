@@ -1,16 +1,20 @@
 # Hex Release
 #
 # How to release:
-#   1. Bump @version in mix.exs (e.g. "0.1.0" -> "0.2.0")
+#   1. Bump @version in mix.exs (e.g. "0.3.0" -> "0.3.1")
 #   2. Update CHANGELOG.md
-#   3. Commit: git commit -am "Release v0.2.0"
-#   4. Tag:    git tag v0.2.0
+#   3. Commit: git commit -am "Release v0.3.1"
+#   4. Tag:    git tag v0.3.1
 #   5. Push:   git push && git push --tags
 #
 # The tag push triggers this workflow. It validates the tag matches
 # mix.exs, runs tests, and publishes to hex.pm.
 #
-# Manual trigger is also available from the Actions tab (dry run by default).
+# Requires the HEX_API_KEY secret in the repo settings — generate one
+# with `mix hex.user key generate` and add it under Settings → Secrets.
+#
+# Manual trigger is also available from the Actions tab (dry run by
+# default).
 
 name: Hex Release
 
@@ -49,16 +53,16 @@ jobs:
             deps
             _build
             priv/native
-          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/temporalex_native/Cargo.lock', 'native/temporalex_native/src/**') }}
+          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock', 'native/temporalex_nif/Cargo.toml', 'native/temporalex_nif/src/**') }}
 
       - name: Cache Rust
         uses: actions/cache@v4
         with:
           path: |
-            native/temporalex_native/target
+            native/temporalex_nif/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-rust-${{ hashFiles('native/temporalex_native/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-${{ hashFiles('native/temporalex_nif/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-rust-
 
       - run: mix deps.get
@@ -88,10 +92,10 @@ jobs:
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
 
-      # Manual trigger with dry_run=true → dry run
+      # Manual trigger with dry_run=true → dry run (just builds, no upload)
       - name: Publish to Hex (dry run)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') && inputs.dry_run }}
-        run: mix hex.publish --yes --dry-run
+        run: mix hex.build
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
 
