@@ -4,6 +4,43 @@
 
 Architectural rewrite. The 0.x line is **not** backwards-compatible with 0.2.0.
 
+### Feature surface (parity with 0.2.0)
+
+- **Child workflows.** `API.execute_child_workflow/3` starts a child and
+  blocks until it completes. Start failure, child failure, and child
+  cancellation each surface as a structured `Temporalex.ChildWorkflowFailure`
+  wrapping the underlying cause.
+- **`API.signal_child_workflow/4`.** Send a durable signal to a child
+  workflow by id. Blocks until Temporal confirms delivery (or fails).
+  Works from inside `run/1`, parallel branches, sync handlers, and async
+  update handlers.
+
+### Bug fix in this release
+
+- **Activation-time update race.** Updates arriving in the same activation
+  as `InitializeWorkflow` (replay scenarios after a cache eviction) were
+  being rejected with `{:not_accepting_update, _}` before the workflow
+  runner had a chance to enter its phase. Fixed by processing activation
+  jobs in two phases — input jobs (initialize, resolutions) first, drain
+  scheduler to drain workflow code to its parked state, then message
+  jobs (signals, updates, queries). Caught by the `update_workflow`
+  integration test, which is now stable across runs.
+
+- **Error unwrap consistency.** `fail_thread/3` now unwraps internal
+  `{:exception, struct, stacktrace}` tuples uniformly across all thread
+  kinds — root, parallel branch, phase dispatch, async update handler.
+  Previously only root paths unwrapped, so a workflow that pattern-
+  matched on `{:error, %ApplicationError{}}` would silently miss
+  failures coming from `parallel/1` branches or `{:async, _, _}`
+  handlers.
+
+### Test coverage
+
+160 tests total — 130 unit (against `Backend.Test`) and 30 live-Temporal
+integration tests including 6 CLI-driven tests that exercise the
+external-tooling interop path (`temporal workflow start/signal/describe/
+cancel/terminate/list`).
+
 The core design — deterministic cooperative scheduler, `Temporalex.Backend`
 boundary, phase / parallel / scheduler rounds — is authored by
 [@hansihe](https://github.com/hansihe). See

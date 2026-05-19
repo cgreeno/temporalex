@@ -179,6 +179,8 @@ async handler spawned within a scope must complete before the scope returns.
 | `API.phase(state, opts)` | Message-processing scope with signal/update handlers and an optional `:timeout`. |
 | `API.parallel(fns)` | Cooperatively scheduled fan-out. Results in input order. |
 | `API.update_state(fn)` | Atomically transform the enclosing phase's state from inside an `{:async, fn, _}` handler. |
+| `API.execute_child_workflow(mod, input, opts)` | Start a child workflow, block until it completes. |
+| `API.signal_child_workflow(id, name, args)` | Send a durable signal to a child workflow. |
 
 Full details, return-value contracts, and the determinism rationale:
 
