@@ -19,7 +19,7 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
     bytes =
       encode!(@workflow_activation, %{
         run_id: "run-1",
-        timestamp: %{seconds: 1_700_000_000, nanos: 123_000_000},
+        timestamp: ~U[2023-11-14 22:13:20.123000Z],
         is_replaying: true,
         history_length: 7,
         history_size_bytes: 4096,
@@ -145,7 +145,7 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
              header_fields: %{"trace" => PayloadConverter.term_to_payload("trace-1")},
              input: [PayloadConverter.term_to_payload(%{amount: 1000})],
              attempt: 3,
-             heartbeat_timeout: %{seconds: 2, nanos: 500_000_000},
+             heartbeat_timeout: 2500,
              is_local: false
            }}
       })
