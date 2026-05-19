@@ -20,13 +20,6 @@ defmodule Temporalex.Core.Completion do
   """
 
   defstruct run_id: nil, status: {:ok, []}
-
-  @type status :: {:ok, [struct()]} | {:failed, term(), keyword()}
-
-  @type t :: %__MODULE__{
-          run_id: String.t() | nil,
-          status: status()
-        }
 end
 
 defmodule Temporalex.Core.Nondeterminism do
@@ -96,11 +89,7 @@ end
 defmodule Temporalex.Core.Pending do
   @moduledoc false
 
-  # awaiter / completion are used only by non-blocking start_child_workflow:
-  # after the start resolves, the pending stays alive until an
-  # Op.AwaitChildWorkflow claims the completion (or until the completion
-  # arrives and is cached for a future await).
-  defstruct [:seq, :thread_id, :from, :op, :awaiter, :completion, cancel_requested?: false]
+  defstruct [:seq, :thread_id, :from, :op, :cancellation_type, cancel_requested?: false]
 end
 
 defmodule Temporalex.Core.ParallelScope do
@@ -194,55 +183,35 @@ defmodule Temporalex.Core.Job.RemoveFromCache do
   defstruct reason: nil, message: nil
 end
 
-defmodule Temporalex.Core.Job.ResolveChildWorkflowExecutionStart do
+defmodule Temporalex.Core.Command.RetryPolicy do
   @moduledoc false
-  # status: {:succeeded, run_id} | {:failed, %{workflow_id, workflow_type, cause}} | {:cancelled, failure}
-  defstruct [:seq, :status]
-end
 
-defmodule Temporalex.Core.Job.ResolveChildWorkflowExecution do
-  @moduledoc false
-  # result: {:ok, value} | {:error, failure} | {:cancelled, failure}
-  defstruct [:seq, :result]
-end
-
-defmodule Temporalex.Core.Job.ResolveSignalExternalWorkflow do
-  @moduledoc false
-  # result: :ok | {:error, failure}
-  defstruct [:seq, :result]
-end
-
-defmodule Temporalex.Core.Job.ResolveRequestCancelExternalWorkflow do
-  @moduledoc false
-  # result: :ok | {:error, failure}
-  defstruct [:seq, :result]
+  defstruct initial_interval_ms: nil,
+            backoff_coefficient: nil,
+            maximum_interval_ms: nil,
+            maximum_attempts: 0,
+            non_retryable_error_types: []
 end
 
 defmodule Temporalex.Core.Command.ScheduleActivity do
   @moduledoc false
-  defstruct [:seq, :thread_id, :activity_id, :type, input: [], opts: []]
-end
 
-defmodule Temporalex.Core.Command.ScheduleLocalActivity do
-  @moduledoc false
-  defstruct [:seq, :thread_id, :activity_id, :type, input: [], opts: []]
-end
-
-defmodule Temporalex.Core.Command.StartChildWorkflowExecution do
-  @moduledoc false
-  defstruct [:seq, :thread_id, :workflow_type, :workflow_id, input: [], opts: []]
-end
-
-defmodule Temporalex.Core.Command.SignalExternalWorkflowExecution do
-  @moduledoc false
-  # target: {:child, workflow_id}
-  defstruct [:seq, :thread_id, :target, :signal_name, args: [], opts: []]
-end
-
-defmodule Temporalex.Core.Command.RequestCancelExternalWorkflowExecution do
-  @moduledoc false
-  # target: {:child, workflow_id}
-  defstruct [:seq, :thread_id, :target]
+  defstruct [
+    :seq,
+    :thread_id,
+    :activity_id,
+    :type,
+    task_queue: nil,
+    input: [],
+    headers: %{},
+    schedule_to_close_timeout_ms: 60_000,
+    schedule_to_start_timeout_ms: nil,
+    start_to_close_timeout_ms: 60_000,
+    heartbeat_timeout_ms: nil,
+    retry_policy: nil,
+    cancellation_type: :wait_cancellation_completed,
+    do_not_eagerly_execute: false
+  ]
 end
 
 defmodule Temporalex.Core.Command.StartTimer do
@@ -277,7 +246,20 @@ end
 
 defmodule Temporalex.Core.Command.ContinueAsNew do
   @moduledoc false
-  defstruct [:input, :workflow_type, :task_queue, opts: []]
+
+  defstruct [
+    :input,
+    :workflow_type,
+    task_queue: nil,
+    workflow_run_timeout_ms: nil,
+    workflow_task_timeout_ms: nil,
+    memo: %{},
+    headers: %{},
+    search_attributes: nil,
+    retry_policy: nil,
+    versioning_intent: :unspecified,
+    initial_versioning_behavior: :unspecified
+  ]
 end
 
 defmodule Temporalex.Core.Command.CancelWorkflow do
@@ -328,48 +310,11 @@ defmodule Temporalex.Core.ActivityCompletion do
   """
 
   defstruct task_token: nil, result: nil
-
-  @type result :: {:ok, term()} | {:error, term()} | {:cancelled, term()} | nil
-
-  @type t :: %__MODULE__{
-          task_token: binary() | nil,
-          result: result()
-        }
 end
 
 defmodule Temporalex.Core.Op.ExecuteActivity do
   @moduledoc false
   defstruct [:type, input: [], opts: []]
-end
-
-defmodule Temporalex.Core.Op.ExecuteLocalActivity do
-  @moduledoc false
-  defstruct [:type, input: [], opts: []]
-end
-
-defmodule Temporalex.Core.Op.ExecuteChildWorkflow do
-  @moduledoc false
-  defstruct [:workflow_type, input: [], opts: []]
-end
-
-defmodule Temporalex.Core.Op.SignalChildWorkflow do
-  @moduledoc false
-  defstruct [:workflow_id, :signal_name, args: [], opts: []]
-end
-
-defmodule Temporalex.Core.Op.StartChildWorkflow do
-  @moduledoc false
-  defstruct [:workflow_type, input: [], opts: []]
-end
-
-defmodule Temporalex.Core.Op.AwaitChildWorkflow do
-  @moduledoc false
-  defstruct [:seq]
-end
-
-defmodule Temporalex.Core.Op.CancelChildWorkflow do
-  @moduledoc false
-  defstruct [:workflow_id, opts: []]
 end
 
 defmodule Temporalex.Core.Op.Sleep do

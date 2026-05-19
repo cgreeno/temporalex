@@ -82,7 +82,11 @@ resolve the exact operation:
   activity_id: "activity-0",
   type: "MyApp.Activities.charge_card",
   input: [%{order_id: "ord_123"}],
-  opts: [...]
+  task_queue: nil,
+  headers: %{},
+  start_to_close_timeout_ms: 30_000,
+  retry_policy: nil,
+  cancellation_type: :wait_cancellation_completed
 }
 ```
 

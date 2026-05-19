@@ -408,8 +408,16 @@ defmodule Temporalex.Testing.Runner do
       thread_id: command.thread_id,
       activity_id: command.activity_id,
       type: command.type,
+      task_queue: command.task_queue,
       input: command.input,
-      opts: command.opts
+      headers: command.headers,
+      schedule_to_close_timeout_ms: command.schedule_to_close_timeout_ms,
+      schedule_to_start_timeout_ms: command.schedule_to_start_timeout_ms,
+      start_to_close_timeout_ms: command.start_to_close_timeout_ms,
+      heartbeat_timeout_ms: command.heartbeat_timeout_ms,
+      retry_policy: command.retry_policy,
+      cancellation_type: command.cancellation_type,
+      do_not_eagerly_execute: command.do_not_eagerly_execute
     }
   end
 
@@ -425,12 +433,44 @@ defmodule Temporalex.Testing.Runner do
 
   defp activity_matches?(command, opts) do
     Enum.all?(opts, fn
-      {:type, expected} -> command.type == normalize_activity_type(expected)
-      {:input, expected} -> command.input == expected
-      {:activity_id, expected} -> command.activity_id == expected
-      {:thread_id, expected} -> command.thread_id == expected
-      {:opts, expected} -> command.opts == expected
-      {_key, _expected} -> false
+      {:type, expected} ->
+        command.type == normalize_activity_type(expected)
+
+      {:input, expected} ->
+        command.input == expected
+
+      {:activity_id, expected} ->
+        command.activity_id == expected
+
+      {:thread_id, expected} ->
+        command.thread_id == expected
+
+      {:task_queue, expected} ->
+        command.task_queue == expected
+
+      {:headers, expected} ->
+        command.headers == expected
+
+      {:schedule_to_close_timeout_ms, expected} ->
+        command.schedule_to_close_timeout_ms == expected
+
+      {:schedule_to_start_timeout_ms, expected} ->
+        command.schedule_to_start_timeout_ms == expected
+
+      {:start_to_close_timeout_ms, expected} ->
+        command.start_to_close_timeout_ms == expected
+
+      {:heartbeat_timeout_ms, expected} ->
+        command.heartbeat_timeout_ms == expected
+
+      {:retry_policy, expected} ->
+        command.retry_policy == expected
+
+      {:cancellation_type, expected} ->
+        command.cancellation_type == expected
+
+      {_key, _expected} ->
+        false
     end)
   end
 

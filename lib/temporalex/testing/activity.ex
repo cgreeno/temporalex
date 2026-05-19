@@ -13,7 +13,15 @@ defmodule Temporalex.Testing.Activity do
     :thread_id,
     :activity_id,
     :type,
+    :task_queue,
     input: [],
-    opts: []
+    headers: %{},
+    schedule_to_close_timeout_ms: nil,
+    schedule_to_start_timeout_ms: nil,
+    start_to_close_timeout_ms: nil,
+    heartbeat_timeout_ms: nil,
+    retry_policy: nil,
+    cancellation_type: nil,
+    do_not_eagerly_execute: false
   ]
 end

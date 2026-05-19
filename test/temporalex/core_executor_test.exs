@@ -81,6 +81,14 @@ defmodule Temporalex.CoreExecutorTest do
     end
   end
 
+  defmodule InvalidContinueOptionsWorkflow do
+    use Temporalex.Workflow
+
+    def run(input) do
+      API.continue_as_new!(input, run_timeout: -1)
+    end
+  end
+
   defmodule ContinueFromParallelWorkflow do
     use Temporalex.Workflow
 
@@ -121,6 +129,16 @@ defmodule Temporalex.CoreExecutorTest do
         {:ok, result} -> {:ok, result}
         other -> {:ok, other}
       end
+    end
+  end
+
+  defmodule InvalidActivityOptionsWorkflow do
+    use Temporalex.Workflow
+
+    def run(value) do
+      API.execute_activity!("#{inspect(Activities)}.echo", [value],
+        retry_policy: [backoff_coefficient: 0.5]
+      )
     end
   end
 
@@ -696,17 +714,21 @@ defmodule Temporalex.CoreExecutorTest do
       assert command.workflow_type == CompleteWorkflow.__workflow_type__()
       assert command.task_queue == "next-task-queue"
 
-      assert command.opts[:memo] == %{"generation" => 1}
-      assert command.opts[:headers] == %{"trace" => "continue"}
+      assert command.memo == %{"generation" => 1}
+      assert command.headers == %{"trace" => "continue"}
 
-      assert command.opts[:search_attributes] == %{
+      assert command.search_attributes == %{
                "CustomKeywordField" => SearchAttribute.keyword("continued"),
                "CustomIntField" => SearchAttribute.int(9)
              }
 
-      assert command.opts[:retry_policy] == [initial_interval: 10, maximum_attempts: 3]
-      assert command.opts[:versioning_intent] == :compatible
-      assert command.opts[:initial_versioning_behavior] == :auto_upgrade
+      assert command.retry_policy == %Command.RetryPolicy{
+               initial_interval_ms: 10,
+               maximum_attempts: 3
+             }
+
+      assert command.versioning_intent == :compatible
+      assert command.initial_versioning_behavior == :auto_upgrade
       assert TestHarness.thread_states(exec) == %{}
     end
 
@@ -715,21 +737,17 @@ defmodule Temporalex.CoreExecutorTest do
         input: %{next: 1},
         workflow_type: CompleteWorkflow.__workflow_type__(),
         task_queue: "next-task-queue",
-        opts: [
-          workflow_type: CompleteWorkflow.__workflow_type__(),
-          task_queue: "other-task-queue",
-          run_timeout: 20_000,
-          task_timeout: 3_000,
-          memo: %{"generation" => 1},
-          headers: %{"trace" => "continue"},
-          search_attributes: %{
-            "CustomKeywordField" => SearchAttribute.keyword("continued"),
-            "CustomIntField" => SearchAttribute.int(9)
-          },
-          retry_policy: [initial_interval: 10, maximum_attempts: 3],
-          versioning_intent: :compatible,
-          initial_versioning_behavior: :auto_upgrade
-        ]
+        workflow_run_timeout_ms: 20_001,
+        workflow_task_timeout_ms: 3_000,
+        memo: %{"generation" => 1},
+        headers: %{"trace" => "continue"},
+        search_attributes: %{
+          "CustomKeywordField" => SearchAttribute.keyword("continued"),
+          "CustomIntField" => SearchAttribute.int(9)
+        },
+        retry_policy: %Command.RetryPolicy{initial_interval_ms: 10, maximum_attempts: 3},
+        versioning_intent: :compatible,
+        initial_versioning_behavior: :auto_upgrade
       }
 
       assert {:ok, exec} = TestHarness.start_workflow(ContinueWithOptionsWorkflow, 1)
@@ -744,6 +762,15 @@ defmodule Temporalex.CoreExecutorTest do
       assert {:complete, {:error, results}} = TestHarness.next(exec)
       assert [{:error, {:exception, %RuntimeError{} = error, _stack}}] = results
       assert error.message =~ "may only be called from the root workflow thread"
+    end
+
+    test "continue_as_new! options are validated before command emission" do
+      assert {:ok, exec} = TestHarness.start_workflow(InvalidContinueOptionsWorkflow, :next)
+
+      assert {:complete, {:error, {:exception, {:exception, %ArgumentError{} = error, _stack}}}} =
+               TestHarness.next(exec)
+
+      assert error.message == "continue_as_new! workflow_run_timeout must be non-negative"
     end
 
     test "activity commands block and resume by sequence number" do
@@ -761,6 +788,15 @@ defmodule Temporalex.CoreExecutorTest do
                  seq: command.seq,
                  result: {:ok, :result}
                })
+    end
+
+    test "activity options are validated before command emission" do
+      assert {:ok, exec} = TestHarness.start_workflow(InvalidActivityOptionsWorkflow, :value)
+
+      assert {:complete, {:error, {:exception, {:exception, %ArgumentError{} = error, _stack}}}} =
+               TestHarness.next(exec)
+
+      assert error.message == "retry_policy.backoff_coefficient must be 1.0 or larger"
     end
 
     test "activity bang dispatch unwraps successful results" do
@@ -1095,7 +1131,8 @@ defmodule Temporalex.CoreExecutorTest do
           activity_id: "activity-0",
           type: "#{inspect(Activities)}.echo",
           input: [:value],
-          opts: [timeout: 1_000]
+          schedule_to_close_timeout_ms: 1_000,
+          start_to_close_timeout_ms: 1_000
         }
       ]
 
@@ -1658,7 +1695,8 @@ defmodule Temporalex.CoreExecutorTest do
           activity_id: "activity-0",
           type: "#{inspect(Activities)}.echo",
           input: [:b1],
-          opts: [timeout: 1_000]
+          schedule_to_close_timeout_ms: 1_000,
+          start_to_close_timeout_ms: 1_000
         }
       ]
 
