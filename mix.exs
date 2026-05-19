@@ -45,6 +45,8 @@ defmodule Temporalex.MixProject do
 
   defp deps do
     [
+      {:jason, "~> 1.4"},
+      {:pb, "~> 0.1.0"},
       {:rustler, "~> 0.37", runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
