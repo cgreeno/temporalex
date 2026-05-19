@@ -133,7 +133,7 @@ Findings:
 - The executor accepts continue-as-new only from the running root workflow thread when it is the only live workflow thread and no phase, parallel scope, or workflow operation is pending.
 - After accepting the terminal command, the executor tears down workflow-owned processes without replying to the blocked caller, so user code after `continue_as_new!/2` does not run.
 - The core command carries input, workflow type, task queue, and options. Replay identity includes all of those fields.
-- Native command encoding covers the Temporal Core continue-as-new fields currently exposed locally: run timeout, task timeout, memo, headers, typed Search Attributes, retry policy, versioning intent, and initial versioning behavior.
+- Temporal Core command encoding covers the continue-as-new fields currently exposed locally: run timeout, task timeout, memo, headers, typed Search Attributes, retry policy, versioning intent, and initial versioning behavior.
 - Workflow info now exposes activation timestamp, replay flag, history length, history size, and `continue_as_new_suggested`.
 - Temporal API's `backoff_start_interval` is not exposed by the local Temporal Core command proto, so Temporalex does not expose that option yet.
 
@@ -210,12 +210,12 @@ Findings:
 
 - The server-facing backend boundary still uses core structs for activations, activity tasks, workflow completions, and activity completions. Protobuf structs and Rustler resources stay inside `Temporalex.Backend.TemporalCore`, `Temporalex.Native`, and the native crate.
 - The native NIF interface follows the documented async pattern. `create_runtime/0` is synchronous; connect, worker start, completion submission, shutdown, and client workflow operations return quickly and send tagged messages back to Elixir.
-- Rust owns the long-lived poll loops. The server receives `{:workflow_activation, %Activation{}}` and `{:activity_task, %ActivityTask{}}`; it does not call per-poll NIFs.
+- Rust owns the long-lived poll loops and sends raw task protobuf bytes to the Elixir poller bridge. The server receives `{:workflow_activation, %Activation{}}` and `{:activity_task, %ActivityTask{}}`; it does not call per-poll NIFs and does not see protobuf bytes.
 - Completion submission is asynchronous and failure-bearing. The server handles `{:workflow_completion, :ok | {:error, reason}}` and `{:activity_completion, :ok | {:error, reason}}` messages as fatal backend submission failures when needed.
 - Activity heartbeats flow from `Temporalex.Activity.Context.heartbeat/2` through `Temporalex.Server.record_activity_heartbeat/3` to the backend, where details are encoded as ETF payload bytes and submitted through Temporal Core.
 - Worker shutdown is covered by explicit server termination, the Rustler resource monitor, and resource drop. Shutdown initiation is scheduled on the Temporal Core Tokio runtime handle rather than called directly from BEAM scheduler threads.
 - The client path starts workflows, awaits workflow results, signals, queries, updates, cancels, terminates, and describes executions through the standalone `Temporalex.Client` owner process and its backend client state.
-- Workflow start options cover task queue selection, headers, search attributes, workflow timeouts, retry policy, id reuse/conflict policies, and static metadata. Query options cover query reject condition. Activity command encoding covers retry policy and activity cancellation type. Invalid negative duration/retry values are rejected instead of cast into oversized native durations.
+- Workflow start options cover task queue selection, headers, search attributes, workflow timeouts, retry policy, id reuse/conflict policies, and static metadata. Query options cover query reject condition. Activity command encoding covers retry policy and activity cancellation type. Invalid negative duration/retry values are rejected instead of cast into oversized durations.
 - `test/temporalex/integration/temporal_core_integration_test.exs` verifies a real Temporal dev-server run covering client start, invalid start option handling, worker polling, timer command/resolution, activity task execution, heartbeat submission, activity completion, workflow completion, signal/query/update/describe, termination, and result decoding.
 - `test/temporalex/integration/temporal_worker_restart_test.exs` verifies worker restart and real-history replay against a Temporal dev server for timer completion while no worker is running, activity retry after worker shutdown, signal handling while the worker is down, continue-as-new after restart, explicit client survival across worker restarts, and reuse of the same task queue by restarted workers.
 
@@ -239,6 +239,26 @@ Validation:
 
 - `test/temporalex/client_error_test.exs` covers client-side normalization for start conflicts, workflow result outcomes, query rejection, update failure, not found, client unavailability, and transport errors.
 - Real-server integration tests assert the public error structs for invalid start options, workflow termination, cancellation, workflow failure, activity failure, workflow ID conflicts, not-found operations, query rejection, and update rejection.
+
+## Temporal Core Codec Placement Review
+
+Status: completed.
+
+Review date: May 19, 2026.
+
+Findings:
+
+- `Temporalex.Backend.TemporalCore.Codec` owns worker-facing Temporal Core protobuf translation through MiniPB. Workflow activations and activity tasks decode from raw protobuf bytes into core structs before reaching the server.
+- Workflow completions, activity completions, and activity heartbeats encode to Temporal Core protobuf bytes in Elixir. The Rust NIF only decodes those bytes at the final Temporal Core API call boundary where the Rust crate requires typed SDK structs.
+- `Temporalex.Backend.TemporalCore.PollerBridge` is the only process that receives raw poll-loop bytes. Worker lifecycle messages and Rustler resource monitoring still target the owning worker server process directly.
+- Obsolete Rust conversion code for core activations, activity tasks, workflow commands, completion terms, and core-specific atoms has been removed instead of retained as fallback paths.
+- Decode failures from malformed payloads propagate as backend errors; failure details are not silently dropped.
+
+Validation:
+
+- `mix test test/temporalex/backend/temporal_core/codec_test.exs test/temporalex/backend_conformance_test.exs`: 9 tests, 0 failures.
+- `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
+- `cargo fmt --manifest-path native/temporalex_nif/Cargo.toml --check`: success.
 
 ## Beta Limits
 

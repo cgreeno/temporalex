@@ -438,7 +438,7 @@ The next work should be server/backend integration, not new workflow semantics:
 3. [x] Test backend that delivers core structs and captures completions.
 4. [x] Server-to-executor activation routing.
 5. [x] Activity task supervision and activity completion submission.
-6. [x] Backend conformance tests for the stable backend behaviour, exercised by the test backend and native codec checks.
+6. [x] Backend conformance tests for the stable backend behaviour, exercised by the test backend and Temporal Core codec checks.
 7. [x] Temporal Core/Rustler backend that translates protobuf/Core messages into the same core structs.
 8. [x] External integration test against `temporal server start-dev` covering worker polling, timers, activity execution, heartbeats, workflow completion, client start, and result retrieval.
 

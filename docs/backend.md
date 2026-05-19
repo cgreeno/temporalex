@@ -172,7 +172,7 @@ Implementation status:
 - `Temporalex.Backend` is implemented as the server-facing behaviour.
 - `Temporalex.Backend.Test` is implemented and stores workflow/activity completions in memory for assertions.
 - `Temporalex.Backend.TemporalCore` is implemented through Rustler and Temporal Core.
-- `test/temporalex/backend_conformance_test.exs` exercises the backend contract against the test backend and verifies native codec encoding for core completions.
+- `test/temporalex/backend_conformance_test.exs` exercises the backend contract against the test backend and verifies Temporal Core codec encoding for core completions.
 - `test/temporalex/integration/temporal_core_integration_test.exs` exercises the real backend against a Temporal dev server.
 - `test/temporalex/integration/temporal_worker_restart_test.exs` exercises worker restart and real-history replay against a Temporal dev server.
 
@@ -200,6 +200,7 @@ The codec modules live under the real backend:
 ```elixir
 Temporalex.Backend.TemporalCore.Codec
 Temporalex.Backend.TemporalCore.PayloadConverter
+Temporalex.Backend.TemporalCore.Proto.Schema
 ```
 
 Those modules can have direct unit tests with protobuf fixtures, but they are not the main server boundary.
