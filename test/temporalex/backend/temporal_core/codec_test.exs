@@ -181,6 +181,43 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
             }} = Codec.activity_task_from_bytes(cancel_bytes)
   end
 
+  test "decodes empty failure payload maps as empty detail lists" do
+    bytes =
+      encode!(@workflow_activation, %{
+        run_id: "run-1",
+        jobs: [
+          %{
+            variant:
+              {:resolve_activity,
+               %{
+                 seq: 1,
+                 result: %{
+                   status:
+                     {:cancelled,
+                      %{
+                        failure: %{
+                          message: "cancelled",
+                          source: "test",
+                          failure_info: {:canceled_failure_info, %{details: %{}}}
+                        }
+                      }}
+                 }
+               }}
+          }
+        ]
+      })
+
+    assert {:ok,
+            %Activation{
+              jobs: [
+                %Job.ActivityResolved{
+                  seq: 1,
+                  result: {:cancelled, %Failure.CancelledError{message: "cancelled", details: []}}
+                }
+              ]
+            }} = Codec.workflow_activation_from_bytes(bytes)
+  end
+
   test "does not silently drop invalid failure detail payloads" do
     invalid_payload = %{
       metadata: %{"encoding" => "binary/erlang-eterm"},

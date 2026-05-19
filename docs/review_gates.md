@@ -256,7 +256,8 @@ Findings:
 
 Validation:
 
-- `mix test test/temporalex/backend/temporal_core/codec_test.exs test/temporalex/backend_conformance_test.exs`: 9 tests, 0 failures.
+- `mix test test/temporalex/backend/temporal_core/codec_test.exs test/temporalex/backend_conformance_test.exs`: 10 tests, 0 failures.
+- `mix test --only external`: 4 tests, 0 failures.
 - `cargo test --manifest-path native/temporalex_nif/Cargo.toml`: success.
 - `cargo fmt --manifest-path native/temporalex_nif/Cargo.toml --check`: success.
 
