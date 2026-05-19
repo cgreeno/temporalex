@@ -105,7 +105,32 @@ defmodule Temporalex.Core.Executor do
         state = teardown_threads(%{state | evicted?: true})
         {%Completion{run_id: activation.run_id, status: {:ok, []}}, finish_activation(state)}
       else
-        {query_jobs, state} = apply_jobs(activation.jobs, [], state)
+        # Two-phase job processing so that updates and signals see a fully
+        # set-up workflow state (phase, handlers, published state):
+        #
+        # 1. Apply "input" jobs (Initialize, ActivityResolved, TimerFired,
+        #    CancelWorkflow, NotifyPatch, UpdateRandomSeed, RemoveFromCache,
+        #    and child-workflow resolutions). Drive the scheduler so the
+        #    workflow runs to its next parked state.
+        # 2. Apply "message" jobs (SignalReceived, UpdateReceived,
+        #    QueryReceived). Drive the scheduler again to dispatch handlers.
+        #
+        # Single-pass processing would reject updates that arrive in the
+        # same activation as a replay-InitializeWorkflow, because the
+        # workflow runner hadn't yet entered API.phase to populate
+        # state.phase.
+        {input_jobs, message_jobs} = Enum.split_with(activation.jobs, &input_job?/1)
+
+        {_, state} = apply_jobs(input_jobs, [], state)
+
+        state =
+          if query_only?(activation.jobs) do
+            state
+          else
+            state |> maybe_dispatch_phase() |> drain_scheduler()
+          end
+
+        {query_jobs, state} = apply_jobs(message_jobs, [], state)
 
         state =
           query_jobs
@@ -116,9 +141,7 @@ defmodule Temporalex.Core.Executor do
           if query_only?(activation.jobs) do
             state
           else
-            state
-            |> maybe_dispatch_phase()
-            |> drain_scheduler()
+            state |> maybe_dispatch_phase() |> drain_scheduler()
           end
 
         completion = completion_from_state(state)
@@ -127,6 +150,11 @@ defmodule Temporalex.Core.Executor do
 
     {:reply, completion, state}
   end
+
+  defp input_job?(%Job.SignalReceived{}), do: false
+  defp input_job?(%Job.UpdateReceived{}), do: false
+  defp input_job?(%Job.QueryReceived{}), do: false
+  defp input_job?(_), do: true
 
   @impl GenServer
   def handle_info({:EXIT, pid, reason}, state) do

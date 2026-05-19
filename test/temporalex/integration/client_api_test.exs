@@ -130,13 +130,6 @@ defmodule Temporalex.ClientApiIntegrationTest do
     _ = Temporalex.Client.get_result(handle, timeout: 10_000)
   end
 
-  # FLAKY: updates that arrive between activations can race with the
-  # executor's phase-entry — the rejected path surfaces as the response
-  # even after the workflow has visibly entered the phase (confirmed by
-  # query). Tracked for follow-up; the protocol_edges integration test
-  # already exercises the update happy path via async handler.
-  @tag :flaky
-  @tag skip: "flaky update timing race; see comment"
   test "update_workflow returns the handler's reply", %{worker: worker} do
     {:ok, handle} =
       Temporalex.Client.start_workflow(worker, Workflow, 10,

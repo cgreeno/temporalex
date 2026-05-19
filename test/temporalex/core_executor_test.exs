@@ -922,13 +922,17 @@ defmodule Temporalex.CoreExecutorTest do
           }
         ])
 
+      # Two-phase activation processing means the workflow runs to its
+      # terminal CompleteWorkflow command (phase 1: input jobs + scheduler)
+      # BEFORE the update is dispatched (phase 2). The update sees no
+      # phase, is rejected.
       assert {:ok,
               [
+                %Command.CompleteWorkflow{},
                 %Command.RespondToUpdate{
                   protocol_instance_id: "outside",
                   response: {:rejected, {:not_accepting_update, "add"}}
-                },
-                %Command.CompleteWorkflow{}
+                }
               ]} = completion.status
     end
 
