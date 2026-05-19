@@ -10,7 +10,7 @@ defmodule Temporalex.Backend.TemporalCore do
   @behaviour Temporalex.Backend
 
   alias Temporalex.Backend.TemporalCore.Codec
-  alias Temporalex.Backend.TemporalCore.PayloadConverter
+  alias Temporalex.Backend.TemporalCore.PollerBridge
   alias Temporalex.Core.ActivityCompletion
   alias Temporalex.Core.Completion
   alias Temporalex.Error
@@ -30,8 +30,7 @@ defmodule Temporalex.Backend.TemporalCore do
       :start_timeout,
       :completion_timeout,
       :shutdown_timeout,
-      :workflow_result_timeout,
-      payload_codec: :etf
+      :workflow_result_timeout
     ]
   end
 
@@ -42,12 +41,12 @@ defmodule Temporalex.Backend.TemporalCore do
       :runtime,
       :client,
       :worker,
+      :poller_bridge,
       :owner_pid,
       :namespace,
       :task_queue,
       :start_timeout,
-      :shutdown_timeout,
-      payload_codec: :etf
+      :shutdown_timeout
     ]
   end
 
@@ -84,8 +83,7 @@ defmodule Temporalex.Backend.TemporalCore do
          completion_timeout: Keyword.get(opts, :completion_timeout, @default_completion_timeout),
          shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @default_shutdown_timeout),
          workflow_result_timeout:
-           Keyword.get(opts, :workflow_result_timeout, @default_workflow_result_timeout),
-         payload_codec: payload_codec_from_opts(opts)
+           Keyword.get(opts, :workflow_result_timeout, @default_workflow_result_timeout)
        }}
     else
       {:error, reason} ->
@@ -102,50 +100,56 @@ defmodule Temporalex.Backend.TemporalCore do
     task_queue = Keyword.get(opts, :task_queue, client_state.task_queue)
     start_timeout = Keyword.get(opts, :start_timeout, @default_start_timeout)
 
-    with :ok <-
-           Native.start_worker(
-             client_state.runtime,
-             client_state.client,
-             task_queue,
-             client_state.namespace,
-             workflow_poller_count(opts),
-             activity_poller_count(opts),
-             owner_pid
-           ),
-         {:ok, worker} <- await_worker(start_timeout) do
-      {:ok,
-       %WorkerState{
-         runtime: client_state.runtime,
-         client: client_state.client,
-         worker: worker,
-         owner_pid: owner_pid,
-         namespace: client_state.namespace,
-         task_queue: task_queue,
-         start_timeout: start_timeout,
-         shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @default_shutdown_timeout),
-         payload_codec: client_state.payload_codec
-       }}
-    else
-      {:error, reason} ->
-        {:error, Error.normalize_client_reason(reason, operation: :start_worker)}
+    {:ok, poller_bridge} = PollerBridge.start_link(owner_pid)
+
+    result =
+      with :ok <-
+             Native.start_worker(
+               client_state.runtime,
+               client_state.client,
+               task_queue,
+               client_state.namespace,
+               workflow_poller_count(opts),
+               activity_poller_count(opts),
+               owner_pid,
+               poller_bridge
+             ),
+           {:ok, worker} <- await_worker(start_timeout) do
+        {:ok,
+         %WorkerState{
+           runtime: client_state.runtime,
+           client: client_state.client,
+           worker: worker,
+           poller_bridge: poller_bridge,
+           owner_pid: owner_pid,
+           namespace: client_state.namespace,
+           task_queue: task_queue,
+           start_timeout: start_timeout,
+           shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @default_shutdown_timeout)
+         }}
+      else
+        {:error, reason} ->
+          {:error, Error.normalize_client_reason(reason, operation: :start_worker)}
+      end
+
+    if match?({:error, _reason}, result) do
+      send(poller_bridge, :stop)
     end
+
+    result
   end
 
   @impl Temporalex.Backend
   def complete_workflow_activation(%WorkerState{} = state, %Completion{} = completion) do
     with {:ok, bytes} <-
-           Codec.workflow_completion_to_bytes(completion,
-             task_queue: state.task_queue,
-             payload_codec: state.payload_codec
-           ) do
+           Codec.workflow_completion_to_bytes(completion, task_queue: state.task_queue) do
       Native.complete_workflow_activation(state.worker, bytes, state.owner_pid)
     end
   end
 
   @impl Temporalex.Backend
   def complete_activity_task(%WorkerState{} = state, %ActivityCompletion{} = completion) do
-    with {:ok, bytes} <-
-           Codec.activity_completion_to_bytes(completion, payload_codec: state.payload_codec) do
+    with {:ok, bytes} <- Codec.activity_completion_to_bytes(completion) do
       Native.complete_activity_task(state.worker, bytes, state.owner_pid)
     end
   end
@@ -153,22 +157,17 @@ defmodule Temporalex.Backend.TemporalCore do
   @impl Temporalex.Backend
   def record_activity_heartbeat(%WorkerState{} = state, task_token, details)
       when is_binary(task_token) do
-    details_bytes =
-      if is_nil(details) do
-        nil
-      else
-        PayloadConverter.term_to_bytes(details)
-      end
-
-    Native.record_activity_heartbeat(state.worker, task_token, details_bytes)
+    with {:ok, bytes} <- Codec.activity_heartbeat_to_bytes(task_token, details) do
+      Native.record_activity_heartbeat(state.worker, bytes)
+    end
   end
 
   @impl Temporalex.Backend
   def shutdown_worker(%WorkerState{} = state) do
     Native.initiate_shutdown(state.worker)
 
-    case Native.shutdown_worker(state.worker, self()) do
-      :ok ->
+    try do
+      with :ok <- Native.shutdown_worker(state.worker, self()) do
         case await_shutdown(state.shutdown_timeout) do
           :ok ->
             :ok
@@ -176,9 +175,14 @@ defmodule Temporalex.Backend.TemporalCore do
           {:error, reason} ->
             {:error, Error.normalize_client_reason(reason, operation: :shutdown_worker)}
         end
-
-      {:error, reason} ->
-        {:error, Error.normalize_client_reason(reason, operation: :shutdown_worker)}
+      else
+        {:error, reason} ->
+          {:error, Error.normalize_client_reason(reason, operation: :shutdown_worker)}
+      end
+    after
+      if is_pid(state.poller_bridge) do
+        send(state.poller_bridge, :stop)
+      end
     end
   end
 
@@ -425,19 +429,6 @@ defmodule Temporalex.Backend.TemporalCore do
 
   defp normalize_header_payload_keys(headers) do
     Map.new(headers, fn {key, value} -> {to_string(key), value} end)
-  end
-
-  defp payload_codec_from_opts(opts) do
-    case Keyword.get(opts, :payload_codec, :etf) do
-      :etf ->
-        :etf
-
-      :json ->
-        :json
-
-      other ->
-        raise ArgumentError, "invalid :payload_codec #{inspect(other)}; expected :etf or :json"
-    end
   end
 
   defp workflow_poller_count(opts) do

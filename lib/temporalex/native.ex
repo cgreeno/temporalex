@@ -8,14 +8,17 @@ defmodule Temporalex.Native do
   def connect(_runtime, _url, _api_key, _headers, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def start_worker(_runtime, _client, _task_queue, _namespace, _max_wf, _max_act, _pid),
-    do: :erlang.nif_error(:nif_not_loaded)
-
-  def encode_workflow_completion(_completion, _task_queue, _codec),
-    do: :erlang.nif_error(:nif_not_loaded)
-
-  def encode_activity_completion(_completion, _codec),
-    do: :erlang.nif_error(:nif_not_loaded)
+  def start_worker(
+        _runtime,
+        _client,
+        _task_queue,
+        _namespace,
+        _max_wf,
+        _max_act,
+        _pid,
+        _poll_pid
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
 
   def complete_workflow_activation(_worker, _bytes, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
@@ -23,7 +26,7 @@ defmodule Temporalex.Native do
   def complete_activity_task(_worker, _bytes, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def record_activity_heartbeat(_worker, _task_token, _details_bytes),
+  def record_activity_heartbeat(_worker, _bytes),
     do: :erlang.nif_error(:nif_not_loaded)
 
   def initiate_shutdown(_worker), do: :erlang.nif_error(:nif_not_loaded)
