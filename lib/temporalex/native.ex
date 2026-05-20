@@ -11,10 +11,10 @@ defmodule Temporalex.Native do
   def start_worker(_runtime, _client, _task_queue, _namespace, _max_wf, _max_act, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def encode_workflow_completion(_completion, _task_queue),
+  def encode_workflow_completion(_completion, _task_queue, _codec),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def encode_activity_completion(_completion),
+  def encode_activity_completion(_completion, _codec),
     do: :erlang.nif_error(:nif_not_loaded)
 
   def complete_workflow_activation(_worker, _bytes, _pid),

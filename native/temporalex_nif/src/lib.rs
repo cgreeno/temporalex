@@ -236,6 +236,39 @@ rustler::atoms! {
 const ETF_ENCODING: &[u8] = b"binary/erlang-eterm";
 const JSON_ENCODING: &[u8] = b"json/plain";
 const NULL_ENCODING: &[u8] = b"binary/null";
+
+/// Active payload encoder for the current NIF call.
+///
+/// Set at the top of encode_workflow_completion / encode_activity_completion
+/// and read inside `payload_from_term`. Thread-local because Rustler NIFs
+/// run synchronously on the calling scheduler thread; the same thread may
+/// serve different workers across calls, so each call must re-set its codec.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PayloadCodec {
+    Etf,
+    Json,
+}
+
+thread_local! {
+    static CURRENT_CODEC: std::cell::Cell<PayloadCodec> =
+        std::cell::Cell::new(PayloadCodec::Etf);
+}
+
+fn set_codec(codec: PayloadCodec) {
+    CURRENT_CODEC.with(|c| c.set(codec));
+}
+
+fn current_codec() -> PayloadCodec {
+    CURRENT_CODEC.with(|c| c.get())
+}
+
+fn codec_from_atom(atom: Atom, env: Env) -> anyhow::Result<PayloadCodec> {
+    match atom.to_term(env).atom_to_string().ok().as_deref() {
+        Some("etf") | None => Ok(PayloadCodec::Etf),
+        Some("json") => Ok(PayloadCodec::Json),
+        Some(other) => Err(anyhow!("unsupported payload_codec: {other}")),
+    }
+}
 const DEFAULT_ACTIVITY_TIMEOUT_MS: u64 = 30_000;
 
 pub struct RuntimeResource {
@@ -570,19 +603,40 @@ fn encode_workflow_completion<'a>(
     env: Env<'a>,
     completion: Term<'a>,
     task_queue: String,
+    codec_atom: Atom,
 ) -> Term<'a> {
-    match workflow_completion_from_term(completion, &task_queue) {
+    match codec_from_atom(codec_atom, env) {
+        Ok(codec) => set_codec(codec),
+        Err(err) => return error_term(env, format!("{err:#}")),
+    }
+
+    let result = match workflow_completion_from_term(completion, &task_queue) {
         Ok(completion) => ok_binary(env, completion.encode_to_vec()),
         Err(err) => error_term(env, format!("{err:#}")),
-    }
+    };
+
+    set_codec(PayloadCodec::Etf);
+    result
 }
 
 #[rustler::nif]
-fn encode_activity_completion<'a>(env: Env<'a>, completion: Term<'a>) -> Term<'a> {
-    match activity_completion_from_term(completion) {
+fn encode_activity_completion<'a>(
+    env: Env<'a>,
+    completion: Term<'a>,
+    codec_atom: Atom,
+) -> Term<'a> {
+    match codec_from_atom(codec_atom, env) {
+        Ok(codec) => set_codec(codec),
+        Err(err) => return error_term(env, format!("{err:#}")),
+    }
+
+    let result = match activity_completion_from_term(completion) {
         Ok(completion) => ok_binary(env, completion.encode_to_vec()),
         Err(err) => error_term(env, format!("{err:#}")),
-    }
+    };
+
+    set_codec(PayloadCodec::Etf);
+    result
 }
 
 #[rustler::nif]
@@ -1417,7 +1471,84 @@ fn payload_from_bytes(data: Vec<u8>) -> Payload {
 }
 
 fn payload_from_term(term: Term) -> Payload {
-    payload_from_bytes(term.to_binary().as_slice().to_vec())
+    match current_codec() {
+        PayloadCodec::Etf => payload_from_bytes(term.to_binary().as_slice().to_vec()),
+
+        PayloadCodec::Json => {
+            // Lossy term → JSON conversion. If the term can't be represented
+            // (atom that isn't true/false/nil, tuple, pid, ref, etc.), fall
+            // back to inspect-style string so the encoding doesn't crash.
+            let value = term_to_json_value(term);
+            let bytes = serde_json::to_vec(&value).unwrap_or_else(|_| b"null".to_vec());
+            Payload {
+                metadata: HashMap::from([(
+                    "encoding".to_string(),
+                    JSON_ENCODING.to_vec(),
+                )]),
+                data: bytes,
+                external_payloads: vec![],
+            }
+        }
+    }
+}
+
+/// Lossy mapping: Elixir term → serde_json::Value.
+///
+///   nil / true / false → null / true / false
+///   integer (i64)      → number
+///   float (f64)        → number
+///   binary             → string (assumed UTF-8; otherwise base64-ish lossy)
+///   list               → array (recursive)
+///   map                → object (keys coerced to strings)
+///   atom               → string (atom name)
+///   tuple, pid, ref    → string ("<unsupported: ...>")
+///
+/// Atoms collapse to strings — caller is responsible for not mixing types
+/// the workflow on the other side won't accept.
+fn term_to_json_value(term: Term) -> serde_json::Value {
+    if let Ok(b) = term.decode::<bool>() {
+        return serde_json::Value::Bool(b);
+    }
+    if let Ok(atom) = term.decode::<Atom>() {
+        if atom == nil() {
+            return serde_json::Value::Null;
+        }
+        let name = atom
+            .to_term(term.get_env())
+            .atom_to_string()
+            .unwrap_or_else(|_| "<atom>".into());
+        return serde_json::Value::String(name);
+    }
+    if let Ok(i) = term.decode::<i64>() {
+        return serde_json::Value::Number(i.into());
+    }
+    if let Ok(f) = term.decode::<f64>() {
+        return serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null);
+    }
+    if let Ok(s) = term.decode::<String>() {
+        return serde_json::Value::String(s);
+    }
+    if let Ok(b) = term.decode::<Binary>() {
+        return serde_json::Value::String(String::from_utf8_lossy(b.as_slice()).into_owned());
+    }
+    if let Ok(iter) = term.decode::<ListIterator>() {
+        let arr: Vec<serde_json::Value> = iter.map(term_to_json_value).collect();
+        return serde_json::Value::Array(arr);
+    }
+    if let Some(iter) = MapIterator::new(term) {
+        let mut obj = serde_json::Map::new();
+        for (k, v) in iter {
+            let key_str = match term_to_json_value(k) {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            obj.insert(key_str, term_to_json_value(v));
+        }
+        return serde_json::Value::Object(obj);
+    }
+    serde_json::Value::String(format!("<unsupported term: {:?}>", term))
 }
 
 fn payload_to_term<'a>(env: Env<'a>, payload: &Payload) -> anyhow::Result<Term<'a>> {

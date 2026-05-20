@@ -134,7 +134,12 @@ children = [
    namespace: "default",
    task_queue: "checkout",
    workflows: [MyApp.Workflows.Checkout],
-   activities: [MyApp.Activities.Payment]}
+   activities: [MyApp.Activities.Payment],
+   # :etf (default) preserves full Elixir term fidelity.
+   # :json makes payloads renderable by `temporal` CLI and non-Elixir
+   # clients, at the cost of lossy term encoding (atoms → strings,
+   # tuples → unsupported).
+   payload_codec: :etf}
 ]
 
 Supervisor.start_link(children, strategy: :one_for_one)

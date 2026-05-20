@@ -30,7 +30,8 @@ defmodule Temporalex.Backend.TemporalCore do
       :start_timeout,
       :completion_timeout,
       :shutdown_timeout,
-      :workflow_result_timeout
+      :workflow_result_timeout,
+      payload_codec: :etf
     ]
   end
 
@@ -80,7 +81,8 @@ defmodule Temporalex.Backend.TemporalCore do
          completion_timeout: Keyword.get(opts, :completion_timeout, @default_completion_timeout),
          shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @default_shutdown_timeout),
          workflow_result_timeout:
-           Keyword.get(opts, :workflow_result_timeout, @default_workflow_result_timeout)
+           Keyword.get(opts, :workflow_result_timeout, @default_workflow_result_timeout),
+         payload_codec: payload_codec_from_opts(opts)
        }}
     end
   end
@@ -88,14 +90,18 @@ defmodule Temporalex.Backend.TemporalCore do
   @impl Temporalex.Backend
   def complete_workflow_activation(%State{} = state, %Completion{} = completion) do
     with {:ok, bytes} <-
-           Codec.workflow_completion_to_bytes(completion, task_queue: state.task_queue) do
+           Codec.workflow_completion_to_bytes(completion,
+             task_queue: state.task_queue,
+             payload_codec: state.payload_codec
+           ) do
       Native.complete_workflow_activation(state.worker, bytes, state.owner_pid)
     end
   end
 
   @impl Temporalex.Backend
   def complete_activity_task(%State{} = state, %ActivityCompletion{} = completion) do
-    with {:ok, bytes} <- Codec.activity_completion_to_bytes(completion) do
+    with {:ok, bytes} <-
+           Codec.activity_completion_to_bytes(completion, payload_codec: state.payload_codec) do
       Native.complete_activity_task(state.worker, bytes, state.owner_pid)
     end
   end
@@ -347,6 +353,19 @@ defmodule Temporalex.Backend.TemporalCore do
 
   defp normalize_header_payload_keys(headers) do
     Map.new(headers, fn {key, value} -> {to_string(key), value} end)
+  end
+
+  defp payload_codec_from_opts(opts) do
+    case Keyword.get(opts, :payload_codec, :etf) do
+      :etf ->
+        :etf
+
+      :json ->
+        :json
+
+      other ->
+        raise ArgumentError, "invalid :payload_codec #{inspect(other)}; expected :etf or :json"
+    end
   end
 
   defp workflow_poller_count(opts) do

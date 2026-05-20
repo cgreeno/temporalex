@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.1
+
+### Interop: JSON payload codec
+
+- **Inbound payloads** are now auto-detected by `encoding` metadata.
+  Workers transparently decode `json/plain` payloads in addition to the
+  default `binary/erlang-eterm`. Workflows can be started by the
+  official `temporal` CLI (or the Python/Go/Java SDKs) with
+  JSON-encoded inputs without configuration changes.
+- **Outbound payloads** are configurable per worker via
+  `payload_codec: :etf | :json` (default `:etf`). With `:json`,
+  workflow results, activity completions, query responses, and
+  update responses are encoded as `json/plain` — enabling
+  `temporal workflow result` and other CLI rendering paths that don't
+  understand ETF.
+- JSON encoding is lossy by design (atoms collapse to strings, tuples
+  serialize as `<unsupported>`). Workflows that need full Elixir term
+  fidelity should keep the default ETF codec.
+
+### Internal
+
+- CI workflows (`.github/workflows/ci.yml`, `release.yml`) updated for
+  the v0.3.0 crate rename and `--include external` integration filter.
+
+163 tests pass (160 prior + 3 new — 1 CLI JSON-input + 2 JSON output
+round-trip).
+
 ## 0.3.0
 
 Architectural rewrite. The 0.x line is **not** backwards-compatible with 0.2.0.
