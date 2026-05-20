@@ -1871,6 +1871,7 @@ dependencies = [
  "prost",
  "prost-wkt-types",
  "rustler",
+ "serde_json",
  "temporalio-client",
  "temporalio-common",
  "temporalio-sdk-core",

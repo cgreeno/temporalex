@@ -58,6 +58,28 @@ defmodule Temporalex.CliDrivenIntegrationTest do
     end
   end
 
+  defmodule JsonInputWorkflow do
+    @moduledoc """
+    Receives a JSON-encoded input from the CLI. With our payload decoder
+    auto-detecting `json/plain` metadata, this should arrive as a regular
+    Elixir term (map with string keys, list, string, etc.).
+
+    The workflow publishes the received input so the test can query and
+    verify it was decoded correctly.
+    """
+    use Temporalex.Workflow
+
+    alias Temporalex.Workflow.API
+
+    def handle_query("got", _args, state), do: {:reply, state}
+
+    def run(input) do
+      API.publish_state({:got_input, input})
+      :ok = API.sleep(60_000)
+      {:ok, input}
+    end
+  end
+
   setup_all do
     unless temporal_available?() do
       raise "Temporal dev server not reachable at 127.0.0.1:7233"
@@ -77,7 +99,7 @@ defmodule Temporalex.CliDrivenIntegrationTest do
         target: "http://127.0.0.1:7233",
         namespace: "default",
         task_queue: task_queue,
-        workflows: [SleepingWorkflow, SignalWaitingWorkflow],
+        workflows: [SleepingWorkflow, SignalWaitingWorkflow, JsonInputWorkflow],
         activities: []
       )
 
@@ -216,6 +238,62 @@ defmodule Temporalex.CliDrivenIntegrationTest do
 
     assert eventually(fn -> cli_describe_status(workflow_id) == :terminated end, 10_000),
            "workflow never reached Terminated after CLI terminate"
+  end
+
+  test "CLI starts a workflow with a JSON input; worker decodes it via payload metadata",
+       %{worker: worker, task_queue: tq} do
+    # The temporal CLI's --input sends a JSON-encoded payload with
+    # encoding metadata "json/plain". Our worker's payload_to_term
+    # auto-detects this and decodes it to an Elixir term.
+    workflow_id = "cli-json-input-#{System.unique_integer([:positive])}"
+
+    {output, exit_code} =
+      cli([
+        "workflow",
+        "start",
+        "--workflow-id",
+        workflow_id,
+        "--type",
+        JsonInputWorkflow.__workflow_type__(),
+        "--task-queue",
+        tq,
+        "--input",
+        ~s({"order_id": 42, "items": ["a", "b"]})
+      ])
+
+    assert exit_code == 0, "CLI start failed: #{output}"
+
+    handle = %Temporalex.Client.Handle{
+      worker: worker,
+      workflow_id: workflow_id,
+      run_id: nil,
+      workflow_type: JsonInputWorkflow.__workflow_type__()
+    }
+
+    # Wait for the workflow to publish its received input.
+    assert eventually(
+             fn ->
+               case Temporalex.Client.query_workflow(handle, "got", [], timeout: 2_000) do
+                 {:ok, {:got_input, decoded}} ->
+                   decoded == %{"order_id" => 42, "items" => ["a", "b"]}
+
+                 _ ->
+                   false
+               end
+             end,
+             15_000
+           ),
+           "workflow did not see correctly-decoded JSON input"
+
+    _ =
+      cli([
+        "workflow",
+        "terminate",
+        "--workflow-id",
+        workflow_id,
+        "--reason",
+        "test_cleanup"
+      ])
   end
 
   test "CLI lists workflows and finds our running one", %{task_queue: tq} do

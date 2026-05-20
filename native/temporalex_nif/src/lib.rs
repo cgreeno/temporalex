@@ -234,6 +234,8 @@ rustler::atoms! {
 }
 
 const ETF_ENCODING: &[u8] = b"binary/erlang-eterm";
+const JSON_ENCODING: &[u8] = b"json/plain";
+const NULL_ENCODING: &[u8] = b"binary/null";
 const DEFAULT_ACTIVITY_TIMEOUT_MS: u64 = 30_000;
 
 pub struct RuntimeResource {
@@ -1420,14 +1422,81 @@ fn payload_from_term(term: Term) -> Payload {
 
 fn payload_to_term<'a>(env: Env<'a>, payload: &Payload) -> anyhow::Result<Term<'a>> {
     let data = payload.data.as_slice();
-    if data.is_empty() {
-        return Ok(nil().encode(env));
-    }
+    let encoding = payload
+        .metadata
+        .get("encoding")
+        .map(|v| v.as_slice())
+        .unwrap_or(ETF_ENCODING);
 
-    let (term, _read) = env
-        .binary_to_term(data)
-        .ok_or_else(|| anyhow!("payload is not ETF encoded"))?;
-    Ok(term)
+    match encoding {
+        NULL_ENCODING => Ok(nil().encode(env)),
+
+        JSON_ENCODING => {
+            if data.is_empty() {
+                return Ok(nil().encode(env));
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(data).map_err(|e| anyhow!("json/plain decode: {e}"))?;
+            json_value_to_term(env, &value)
+        }
+
+        _etf_or_default => {
+            if data.is_empty() {
+                return Ok(nil().encode(env));
+            }
+            let (term, _read) = env
+                .binary_to_term(data)
+                .ok_or_else(|| anyhow!("payload is not ETF encoded (encoding metadata: {})", String::from_utf8_lossy(encoding)))?;
+            Ok(term)
+        }
+    }
+}
+
+/// Convert a serde_json::Value into an Elixir term.
+///
+/// Mapping (lossy by design — Elixir's term-space is richer than JSON):
+///   null      → nil
+///   bool      → bool
+///   integer   → i64
+///   float     → f64
+///   string    → binary (UTF-8)
+///   array     → list
+///   object    → %{} with string (binary) keys
+///
+/// Atoms, tuples, references, PIDs, etc. have no JSON representation;
+/// workflows that need full fidelity must use the default ETF codec.
+fn json_value_to_term<'a>(env: Env<'a>, value: &serde_json::Value) -> anyhow::Result<Term<'a>> {
+    match value {
+        serde_json::Value::Null => Ok(nil().encode(env)),
+        serde_json::Value::Bool(b) => Ok(Encoder::encode(b, env)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Encoder::encode(&i, env))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Encoder::encode(&f, env))
+            } else {
+                // Fall through for very large unsigned values
+                Ok(Encoder::encode(&n.to_string(), env))
+            }
+        }
+        serde_json::Value::String(s) => Ok(Encoder::encode(s, env)),
+        serde_json::Value::Array(items) => {
+            let terms: anyhow::Result<Vec<Term>> =
+                items.iter().map(|v| json_value_to_term(env, v)).collect();
+            Ok(Encoder::encode(&terms?, env))
+        }
+        serde_json::Value::Object(obj) => {
+            let mut map = Term::map_new(env);
+            for (key, val) in obj {
+                let key_term = Encoder::encode(key, env);
+                let val_term = json_value_to_term(env, val)?;
+                map = map
+                    .map_put(key_term, val_term)
+                    .map_err(|_| anyhow!("failed to insert JSON object key"))?;
+            }
+            Ok(map)
+        }
+    }
 }
 
 fn payloads_to_terms<'a>(env: Env<'a>, payloads: &[Payload]) -> anyhow::Result<Vec<Term<'a>>> {
