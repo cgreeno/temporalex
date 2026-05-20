@@ -959,6 +959,167 @@ defmodule Temporalex.CoreExtrasTest do
       end
     end
 
+    defmodule StartFailureParent do
+      @moduledoc """
+      Start fails (e.g. workflow_id collision). The starter must receive
+      a %ChildWorkflowFailure{} rather than a handle.
+      """
+      use Temporalex.Workflow
+
+      def run(_) do
+        case API.start_child_workflow(__MODULE__.Child, [], workflow_id: "always-collides") do
+          {:ok, _handle} -> {:error, :unexpected_success}
+          {:error, failure} -> {:ok, {:start_failed, failure}}
+        end
+      end
+
+      defmodule Child do
+        use Temporalex.Workflow
+        def run(_), do: {:ok, :ignored}
+      end
+    end
+
+    test "start_child_workflow start failure wakes starter with %ChildWorkflowFailure{}" do
+      assert {:ok, exec} = TestHarness.start_workflow(StartFailureParent, nil)
+
+      assert {:yield, [%Command.StartChildWorkflowExecution{seq: seq}]} =
+               TestHarness.next(exec)
+
+      assert {:complete, {:ok, {:start_failed, %Temporalex.ChildWorkflowFailure{cause: cause}}}} =
+               TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecutionStart{
+                 seq: seq,
+                 status:
+                   {:failed,
+                    %{
+                      workflow_id: "always-collides",
+                      workflow_type: "child",
+                      cause: :workflow_already_exists
+                    }}
+               })
+
+      assert cause.type == "ChildWorkflowStartFailed"
+      assert cause.non_retryable == true
+    end
+
+    defmodule StaleHandleParent do
+      @moduledoc """
+      Construct a handle by hand with a seq that doesn't exist in
+      pending. await_child_workflow must return a structured error
+      rather than hanging forever.
+      """
+      use Temporalex.Workflow
+
+      def run(_) do
+        bogus = %Temporalex.ChildHandle{
+          workflow_id: "never-existed",
+          run_id: nil,
+          workflow_type: "Phantom",
+          seq: 99_999
+        }
+
+        case API.await_child_workflow(bogus) do
+          {:error, failure} -> {:ok, {:got_error, failure}}
+          other -> {:error, {:unexpected, other}}
+        end
+      end
+    end
+
+    test "await_child_workflow with a stale/unknown seq returns a structured error" do
+      assert {:ok, exec} = TestHarness.start_workflow(StaleHandleParent, nil)
+
+      assert {:complete,
+              {:ok, {:got_error, %Temporalex.ApplicationError{type: "UnknownChildWorkflow"}}}} =
+               TestHarness.next(exec)
+    end
+
+    defmodule SignalViaHandleParent do
+      use Temporalex.Workflow
+
+      def run(_) do
+        {:ok, handle} =
+          API.start_child_workflow(__MODULE__.Child, [], workflow_id: "svh-child")
+
+        # Passing the handle struct (not the workflow_id) should resolve
+        # the same way as passing the id.
+        :ok = API.signal_child_workflow(handle, "wake", [:from_handle])
+        {:ok, _} = API.await_child_workflow(handle)
+        {:ok, :done}
+      end
+
+      defmodule Child do
+        use Temporalex.Workflow
+        def run(_), do: {:ok, :child_done}
+      end
+    end
+
+    test "signal_child_workflow accepts a ChildHandle (uses handle.workflow_id)" do
+      assert {:ok, exec} = TestHarness.start_workflow(SignalViaHandleParent, nil)
+
+      assert {:yield, [%Command.StartChildWorkflowExecution{seq: start_seq}]} =
+               TestHarness.next(exec)
+
+      # Start succeeds → handle returned → parent signals via handle.
+      assert {:yield,
+              [
+                %Command.SignalExternalWorkflowExecution{
+                  target: {:child, "svh-child"},
+                  signal_name: "wake",
+                  args: [:from_handle]
+                }
+              ]} =
+               TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecutionStart{
+                 seq: start_seq,
+                 status: {:succeeded, "run-1"}
+               })
+    end
+
+    defmodule CancelViaWorkflowIdParent do
+      @moduledoc """
+      Test the cancel-by-raw-id overload (vs handle). Workflows that
+      kept the id around but didn't keep the handle should still be
+      able to cancel.
+      """
+      use Temporalex.Workflow
+
+      def run(_) do
+        {:ok, _handle} =
+          API.start_child_workflow(__MODULE__.Child, [], workflow_id: "cvi-child")
+
+        :ok = API.cancel_child_workflow("cvi-child")
+        {:ok, :cancelled_by_id}
+      end
+
+      defmodule Child do
+        use Temporalex.Workflow
+        def run(_), do: {:ok, :ignored}
+      end
+    end
+
+    test "cancel_child_workflow accepts a raw workflow_id (no handle needed)" do
+      assert {:ok, exec} = TestHarness.start_workflow(CancelViaWorkflowIdParent, nil)
+
+      assert {:yield, [%Command.StartChildWorkflowExecution{seq: start_seq}]} =
+               TestHarness.next(exec)
+
+      assert {:yield,
+              [
+                %Command.RequestCancelExternalWorkflowExecution{
+                  seq: cancel_seq,
+                  target: {:child, "cvi-child"}
+                }
+              ]} =
+               TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecutionStart{
+                 seq: start_seq,
+                 status: {:succeeded, "run-1"}
+               })
+
+      assert {:complete, {:ok, :cancelled_by_id}} =
+               TestHarness.resolve(exec, %Job.ResolveRequestCancelExternalWorkflow{
+                 seq: cancel_seq,
+                 result: :ok
+               })
+    end
+
     test "await on an already-completed child returns the cached result immediately" do
       assert {:ok, exec} = TestHarness.start_workflow(AwaitAfterCompletionParent, nil)
 

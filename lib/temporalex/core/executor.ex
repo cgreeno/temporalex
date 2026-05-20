@@ -779,6 +779,15 @@ defmodule Temporalex.Core.Executor do
         |> Map.put(:pending, pending)
         |> ready_thread(thread_id, {from, result})
 
+      {%Pending{op: %Op.StartChildWorkflow{}, thread_id: thread_id, from: from}, pending}
+      when not is_nil(thread_id) ->
+        # Start failure / cancellation path — wake the starter with the
+        # error. Successful start uses a different path that creates a
+        # post-start pending entry with thread_id: nil.
+        state
+        |> Map.put(:pending, pending)
+        |> ready_thread(thread_id, {from, result})
+
       {%Pending{op: %Op.SignalChildWorkflow{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)

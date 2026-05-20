@@ -92,6 +92,73 @@ defmodule Temporalex.BackendExtrasTest do
     end
   end
 
+  describe "RequestCancelExternalWorkflowExecution codec" do
+    test "encodes a cancel-child command with the {:child, id} target" do
+      assert {:ok, bytes} =
+               Codec.workflow_completion_to_bytes(
+                 %Completion{
+                   run_id: "cancel-child",
+                   status:
+                     {:ok,
+                      [
+                        %Command.RequestCancelExternalWorkflowExecution{
+                          seq: 0,
+                          thread_id: [],
+                          target: {:child, "the-child"}
+                        }
+                      ]}
+                 },
+                 task_queue: "q"
+               )
+
+      assert is_binary(bytes) and byte_size(bytes) > 0
+      # workflow_id must appear in the encoded proto.
+      assert :binary.match(bytes, "the-child") != :nomatch
+    end
+
+    test "rejects an unknown target tag" do
+      assert {:error, reason} =
+               Codec.workflow_completion_to_bytes(
+                 %Completion{
+                   run_id: "cancel-bad-target",
+                   status:
+                     {:ok,
+                      [
+                        %Command.RequestCancelExternalWorkflowExecution{
+                          seq: 0,
+                          thread_id: [],
+                          target: {:external, "some-id"}
+                        }
+                      ]}
+                 },
+                 task_queue: "q"
+               )
+
+      assert reason =~ "unsupported cancel target"
+    end
+
+    test "rejects a non-tuple target" do
+      assert {:error, reason} =
+               Codec.workflow_completion_to_bytes(
+                 %Completion{
+                   run_id: "cancel-non-tuple",
+                   status:
+                     {:ok,
+                      [
+                        %Command.RequestCancelExternalWorkflowExecution{
+                          seq: 0,
+                          thread_id: [],
+                          target: :just_an_atom
+                        }
+                      ]}
+                 },
+                 task_queue: "q"
+               )
+
+      assert reason =~ "cancel target must be a tagged tuple"
+    end
+  end
+
   describe "StartChildWorkflowExecution codec" do
     test "encodes a child workflow start with defaults" do
       assert {:ok, bytes} =
