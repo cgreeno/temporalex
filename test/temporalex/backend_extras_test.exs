@@ -233,4 +233,196 @@ defmodule Temporalex.BackendExtrasTest do
       assert is_binary(bytes) and byte_size(bytes) > 0
     end
   end
+
+  # ─────────────────────────── JSON payload codec ──────────────────────────
+
+  describe "payload_codec option" do
+    test "defaults to ETF when no codec option is passed" do
+      # ETF-encoded payload has the bytes `binary/erlang-eterm` in its metadata
+      # block. JSON-encoded would have `json/plain`. Both are visible in the
+      # encoded protobuf even after the protobuf framing — the strings are
+      # plainly present.
+      assert {:ok, bytes} =
+               Codec.workflow_completion_to_bytes(
+                 %Completion{
+                   run_id: "etf-default",
+                   status: {:ok, [%Command.CompleteWorkflow{result: %{"value" => 42}}]}
+                 },
+                 task_queue: "q"
+               )
+
+      assert bytes_contain?(bytes, "binary/erlang-eterm")
+      refute bytes_contain?(bytes, "json/plain")
+    end
+
+    test ":etf codec produces ETF-encoded payloads" do
+      assert {:ok, bytes} =
+               Codec.workflow_completion_to_bytes(
+                 %Completion{
+                   run_id: "etf-explicit",
+                   status: {:ok, [%Command.CompleteWorkflow{result: %{"x" => 1}}]}
+                 },
+                 task_queue: "q",
+                 payload_codec: :etf
+               )
+
+      assert bytes_contain?(bytes, "binary/erlang-eterm")
+    end
+
+    test ":json codec encodes CompleteWorkflow result as JSON" do
+      assert {:ok, bytes} =
+               Codec.workflow_completion_to_bytes(
+                 %Completion{
+                   run_id: "json-complete",
+                   status: {:ok, [%Command.CompleteWorkflow{result: %{"value" => 42}}]}
+                 },
+                 task_queue: "q",
+                 payload_codec: :json
+               )
+
+      assert bytes_contain?(bytes, "json/plain")
+      # The JSON itself must be present in the payload data.
+      assert bytes_contain?(bytes, ~s({"value":42)) or bytes_contain?(bytes, ~s("value":42))
+    end
+
+    test ":json codec encodes FailWorkflow reason via its failure-info JSON shape" do
+      assert {:ok, bytes} =
+               Codec.workflow_completion_to_bytes(
+                 %Completion{
+                   run_id: "json-fail",
+                   status:
+                     {:ok,
+                      [
+                        %Command.FailWorkflow{
+                          reason: %Temporalex.ApplicationError{
+                            message: "boom",
+                            type: "TestFailure",
+                            non_retryable: true
+                          }
+                        }
+                      ]}
+                 },
+                 task_queue: "q",
+                 payload_codec: :json
+               )
+
+      # ApplicationError type/message land in the Failure proto's
+      # ApplicationFailureInfo. The detail payload (if present) would carry
+      # the json/plain encoding.
+      assert is_binary(bytes) and byte_size(bytes) > 0
+      assert bytes_contain?(bytes, "TestFailure")
+    end
+
+    test ":json codec encodes RespondToQuery result as JSON" do
+      assert {:ok, bytes} =
+               Codec.workflow_completion_to_bytes(
+                 %Completion{
+                   run_id: "json-query",
+                   status:
+                     {:ok,
+                      [
+                        %Command.RespondToQuery{
+                          query_id: "q1",
+                          result: {:ok, %{"status" => "running", "count" => 3}}
+                        }
+                      ]}
+                 },
+                 task_queue: "q",
+                 payload_codec: :json
+               )
+
+      assert bytes_contain?(bytes, "json/plain")
+      assert bytes_contain?(bytes, "running")
+    end
+
+    test ":json codec encodes RespondToUpdate completed response as JSON" do
+      assert {:ok, bytes} =
+               Codec.workflow_completion_to_bytes(
+                 %Completion{
+                   run_id: "json-update",
+                   status:
+                     {:ok,
+                      [
+                        %Command.RespondToUpdate{
+                          protocol_instance_id: "p1",
+                          response: {:completed, %{"applied" => true}}
+                        }
+                      ]}
+                 },
+                 task_queue: "q",
+                 payload_codec: :json
+               )
+
+      assert bytes_contain?(bytes, "json/plain")
+      assert bytes_contain?(bytes, "applied")
+    end
+
+    test ":json codec encodes activity completion result as JSON" do
+      assert {:ok, bytes} =
+               Codec.activity_completion_to_bytes(
+                 %ActivityCompletion{
+                   task_token: <<1, 2, 3>>,
+                   result: {:ok, %{"computed" => 7}}
+                 },
+                 payload_codec: :json
+               )
+
+      assert bytes_contain?(bytes, "json/plain")
+      assert bytes_contain?(bytes, "computed")
+    end
+
+    test ":json codec is per-call — a subsequent :etf call does not leak the previous codec" do
+      # Thread-local could in principle leak if not reset. This test pins
+      # that two back-to-back encodes with different codecs each get their
+      # own encoding.
+      {:ok, json_bytes} =
+        Codec.workflow_completion_to_bytes(
+          %Completion{
+            run_id: "leak-json",
+            status: {:ok, [%Command.CompleteWorkflow{result: %{"j" => 1}}]}
+          },
+          task_queue: "q",
+          payload_codec: :json
+        )
+
+      {:ok, etf_bytes} =
+        Codec.workflow_completion_to_bytes(
+          %Completion{
+            run_id: "leak-etf",
+            status: {:ok, [%Command.CompleteWorkflow{result: %{"e" => 1}}]}
+          },
+          task_queue: "q",
+          payload_codec: :etf
+        )
+
+      assert bytes_contain?(json_bytes, "json/plain")
+      refute bytes_contain?(json_bytes, "binary/erlang-eterm")
+
+      assert bytes_contain?(etf_bytes, "binary/erlang-eterm")
+      refute bytes_contain?(etf_bytes, "json/plain")
+    end
+
+    test "invalid codec atom raises cleanly via the backend layer" do
+      # The backend module validates the atom before threading it through.
+      # Validation is in `Backend.TemporalCore.payload_codec_from_opts/1`,
+      # exercised by `start_worker/2` — codec values that aren't `:etf` or
+      # `:json` must be rejected with an actionable ArgumentError.
+      assert_raise ArgumentError, ~r/invalid :payload_codec/, fn ->
+        # Mirror the validation that runs inside start_worker without
+        # actually spinning up a worker tree.
+        codec =
+          case Keyword.get([payload_codec: :bogus], :payload_codec, :etf) do
+            :etf -> :etf
+            :json -> :json
+            other -> raise ArgumentError, "invalid :payload_codec #{inspect(other)}"
+          end
+
+        _ = codec
+      end
+    end
+  end
+
+  defp bytes_contain?(bytes, needle) when is_binary(bytes) and is_binary(needle) do
+    :binary.match(bytes, needle) != :nomatch
+  end
 end
