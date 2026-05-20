@@ -58,6 +58,65 @@ defmodule Temporalex.Workflow.API do
   end
 
   @doc """
+  Start a child workflow and return a handle as soon as the child is
+  started by Temporal (does NOT block until completion).
+
+  Use the returned `Temporalex.ChildHandle` to signal, cancel, or
+  `await_child_workflow/1` for the eventual result.
+
+  Returns `{:ok, %Temporalex.ChildHandle{}}` on successful start, or
+  `{:error, %Temporalex.ChildWorkflowFailure{}}` if the start fails.
+  """
+  def start_child_workflow(workflow, input, opts \\ []) when is_list(input) do
+    type =
+      cond do
+        is_binary(workflow) ->
+          workflow
+
+        is_atom(workflow) and function_exported?(workflow, :__workflow_type__, 0) ->
+          workflow.__workflow_type__()
+
+        is_atom(workflow) ->
+          inspect(workflow)
+      end
+
+    call(%Op.StartChildWorkflow{workflow_type: type, input: input, opts: opts})
+  end
+
+  @doc """
+  Block until a child workflow (started via `start_child_workflow/3`)
+  completes. Returns its result tuple — `{:ok, value}`, `{:error, _}`,
+  or `{:cancelled, _}`.
+
+  If the child has already completed, returns the cached result
+  immediately. Otherwise blocks the calling thread until the child
+  reaches a terminal state.
+  """
+  def await_child_workflow(%Temporalex.ChildHandle{seq: seq}) do
+    call(%Op.AwaitChildWorkflow{seq: seq})
+  end
+
+  @doc """
+  Request cancellation of a child workflow started by this workflow.
+
+  Accepts either a `Temporalex.ChildHandle` or a raw workflow id string.
+
+  Cancellation is durable and the call blocks until Temporal confirms
+  the cancel request has been delivered. The child receives the cancel
+  via its `API.cancelled?/0` flag — it's the child's responsibility to
+  observe and act on it.
+  """
+  def cancel_child_workflow(handle_or_id, opts \\ [])
+
+  def cancel_child_workflow(%Temporalex.ChildHandle{workflow_id: id}, opts) do
+    cancel_child_workflow(id, opts)
+  end
+
+  def cancel_child_workflow(workflow_id, opts) when is_binary(workflow_id) do
+    call(%Op.CancelChildWorkflow{workflow_id: workflow_id, opts: opts})
+  end
+
+  @doc """
   Send a signal to a child workflow that was started by this workflow.
 
   `workflow_id` must match the `workflow_id` you used in
@@ -71,7 +130,13 @@ defmodule Temporalex.Workflow.API do
   the child runs asynchronously to the parent; success only means Temporal
   has accepted the signal for delivery.
   """
-  def signal_child_workflow(workflow_id, signal_name, args \\ [], opts \\ [])
+  def signal_child_workflow(handle_or_id, signal_name, args \\ [], opts \\ [])
+
+  def signal_child_workflow(%Temporalex.ChildHandle{workflow_id: id}, signal_name, args, opts) do
+    signal_child_workflow(id, signal_name, args, opts)
+  end
+
+  def signal_child_workflow(workflow_id, signal_name, args, opts)
       when is_binary(workflow_id) and is_binary(signal_name) and is_list(args) do
     call(%Op.SignalChildWorkflow{
       workflow_id: workflow_id,

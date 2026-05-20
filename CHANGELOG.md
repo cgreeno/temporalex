@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.2
+
+### Non-blocking child workflows + cancel
+
+- **`API.start_child_workflow/3`** returns a `%Temporalex.ChildHandle{}`
+  as soon as the child is started by Temporal (does NOT block until
+  completion). The parent can then signal, cancel, or `await_child_workflow/1`
+  the result on its own schedule.
+- **`API.await_child_workflow/1`** blocks until the child reaches a
+  terminal state and returns the result tuple. If the child completed
+  before `await_child_workflow/1` was called, the cached result is
+  returned immediately (no extra activation).
+- **`API.cancel_child_workflow/1`** sends a durable `RequestCancelExternalWorkflowExecution`
+  to the child by workflow id. Blocks until Temporal confirms delivery.
+- `API.signal_child_workflow/4` and `API.cancel_child_workflow/2` both
+  accept a `ChildHandle` or a raw workflow id, for ergonomics.
+- `API.execute_child_workflow/3` (blocking) stays unchanged — it's the
+  composition of start + await.
+
+### Tests
+
+177 tests pass (172 prior + 5 new — 3 unit + 2 live-Temporal
+integration covering start+signal+await and start+cancel+await).
+
 ## 0.3.1
 
 ### Interop: JSON payload codec

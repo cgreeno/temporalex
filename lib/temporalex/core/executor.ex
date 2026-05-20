@@ -241,6 +241,9 @@ defmodule Temporalex.Core.Executor do
 
         %Job.ResolveSignalExternalWorkflow{seq: seq, result: result} ->
           {query_jobs, resolve_pending(state, seq, result)}
+
+        %Job.ResolveRequestCancelExternalWorkflow{seq: seq, result: result} ->
+          {query_jobs, resolve_pending(state, seq, result)}
       end
 
     apply_jobs(rest, query_jobs, state)
@@ -496,6 +499,75 @@ defmodule Temporalex.Core.Executor do
     |> Map.update!(:next_seq, &(&1 + 1))
   end
 
+  defp handle_workflow_op(state, from, thread_id, %Op.StartChildWorkflow{} = op) do
+    seq = state.next_seq
+
+    workflow_id =
+      Keyword.get(op.opts, :workflow_id, "child-#{seq}-#{state.run_id || "run"}")
+
+    command = %Command.StartChildWorkflowExecution{
+      seq: seq,
+      thread_id: thread_id,
+      workflow_type: op.workflow_type,
+      workflow_id: workflow_id,
+      input: op.input,
+      opts: op.opts
+    }
+
+    state
+    |> append_command(command)
+    |> put_pending(seq, thread_id, from, op)
+    |> block_thread(thread_id)
+    |> Map.update!(:next_seq, &(&1 + 1))
+  end
+
+  defp handle_workflow_op(state, from, thread_id, %Op.AwaitChildWorkflow{seq: seq}) do
+    case Map.fetch(state.pending, seq) do
+      {:ok, %Pending{completion: completion}} when not is_nil(completion) ->
+        # Child already completed; deliver cached result immediately.
+        # Thread keeps running (no block).
+        GenServer.reply(from, completion)
+        %{state | pending: Map.delete(state.pending, seq)}
+
+      {:ok, %Pending{} = pending} ->
+        # Child still running; register awaiter and block this thread.
+        updated = %{pending | awaiter: {thread_id, from}}
+
+        %{state | pending: Map.put(state.pending, seq, updated)}
+        |> block_thread(thread_id)
+
+      :error ->
+        # Unknown seq — handle is stale or wasn't created via start_child.
+        GenServer.reply(
+          from,
+          {:error,
+           %Temporalex.ApplicationError{
+             message: "no pending child workflow for seq #{seq}",
+             type: "UnknownChildWorkflow",
+             non_retryable: true
+           }}
+        )
+
+        state
+    end
+  end
+
+  defp handle_workflow_op(state, from, thread_id, %Op.CancelChildWorkflow{} = op) do
+    seq = state.next_seq
+
+    command = %Command.RequestCancelExternalWorkflowExecution{
+      seq: seq,
+      thread_id: thread_id,
+      target: {:child, op.workflow_id}
+    }
+
+    state
+    |> append_command(command)
+    |> put_pending(seq, thread_id, from, op)
+    |> block_thread(thread_id)
+    |> Map.update!(:next_seq, &(&1 + 1))
+  end
+
   defp handle_workflow_op(state, from, thread_id, %Op.Sleep{} = op) do
     seq = state.next_seq
     command = %Command.StartTimer{seq: seq, thread_id: thread_id, duration_ms: op.duration_ms}
@@ -712,6 +784,11 @@ defmodule Temporalex.Core.Executor do
         |> Map.put(:pending, pending)
         |> ready_thread(thread_id, {from, result})
 
+      {%Pending{op: %Op.CancelChildWorkflow{}, thread_id: thread_id, from: from}, pending} ->
+        state
+        |> Map.put(:pending, pending)
+        |> ready_thread(thread_id, {from, result})
+
       {%Pending{op: %Op.Sleep{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)
@@ -724,11 +801,50 @@ defmodule Temporalex.Core.Executor do
     end
   end
 
-  # Child workflow start resolution. Succeeded leaves the pending alive so the
-  # parent thread keeps waiting for the final ResolveChildWorkflowExecution
-  # job. Failed/cancelled wake the parent immediately with a structured error.
-  defp resolve_child_start(state, _seq, {:succeeded, _run_id}) do
-    state
+  # Child workflow start resolution. Behaviour depends on whether the
+  # parent used the blocking `execute_child_workflow/3` or the non-blocking
+  # `start_child_workflow/3`.
+  #
+  # ExecuteChildWorkflow: success leaves pending alive (parent is still
+  # waiting for completion). Failure/cancellation wake the parent.
+  #
+  # StartChildWorkflow: success wakes the starter with a ChildHandle and
+  # the pending stays alive so an eventual AwaitChildWorkflow can claim
+  # the completion. Failure/cancellation wake the starter with an error
+  # and the pending is removed.
+  defp resolve_child_start(state, seq, {:succeeded, run_id}) do
+    case Map.fetch(state.pending, seq) do
+      {:ok, %Pending{op: %Op.StartChildWorkflow{} = op, thread_id: thread_id, from: from}} ->
+        workflow_id =
+          Keyword.get(op.opts, :workflow_id, "child-#{seq}-#{state.run_id || "run"}")
+
+        handle = %Temporalex.ChildHandle{
+          workflow_id: workflow_id,
+          run_id: run_id,
+          workflow_type: op.workflow_type,
+          seq: seq
+        }
+
+        # Pending stays alive (no `from` so completion resolution will cache
+        # or deliver to a registered awaiter).
+        updated = %Pending{
+          seq: seq,
+          thread_id: nil,
+          from: nil,
+          op: op,
+          awaiter: nil,
+          completion: nil
+        }
+
+        %{state | pending: Map.put(state.pending, seq, updated)}
+        |> ready_thread(thread_id, {from, {:ok, handle}})
+
+      _ ->
+        # ExecuteChildWorkflow path (or unknown): keep waiting for the
+        # eventual ResolveChildWorkflowExecution, matching the prior
+        # blocking semantics.
+        state
+    end
   end
 
   defp resolve_child_start(state, seq, {:failed, info}) do
@@ -752,7 +868,22 @@ defmodule Temporalex.Core.Executor do
   end
 
   defp resolve_child_completion(state, seq, result) do
-    resolve_pending(state, seq, result)
+    case Map.fetch(state.pending, seq) do
+      {:ok, %Pending{op: %Op.StartChildWorkflow{}, awaiter: {thread_id, from}}} ->
+        # Someone is already awaiting — wake them, drop the pending.
+        %{state | pending: Map.delete(state.pending, seq)}
+        |> ready_thread(thread_id, {from, result})
+
+      {:ok, %Pending{op: %Op.StartChildWorkflow{}} = pending} ->
+        # Non-blocking start, no awaiter yet — cache the completion for a
+        # future AwaitChildWorkflow call.
+        updated = %{pending | completion: result}
+        %{state | pending: Map.put(state.pending, seq, updated)}
+
+      _ ->
+        # ExecuteChildWorkflow blocking path — existing behaviour.
+        resolve_pending(state, seq, result)
+    end
   end
 
   defp receive_signal(state, %Job.SignalReceived{} = signal) do

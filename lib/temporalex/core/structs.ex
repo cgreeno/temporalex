@@ -88,7 +88,11 @@ end
 defmodule Temporalex.Core.Pending do
   @moduledoc false
 
-  defstruct [:seq, :thread_id, :from, :op]
+  # awaiter / completion are used only by non-blocking start_child_workflow:
+  # after the start resolves, the pending stays alive until an
+  # Op.AwaitChildWorkflow claims the completion (or until the completion
+  # arrives and is cached for a future await).
+  defstruct [:seq, :thread_id, :from, :op, :awaiter, :completion]
 end
 
 defmodule Temporalex.Core.ParallelScope do
@@ -199,6 +203,12 @@ defmodule Temporalex.Core.Job.ResolveSignalExternalWorkflow do
   defstruct [:seq, :result]
 end
 
+defmodule Temporalex.Core.Job.ResolveRequestCancelExternalWorkflow do
+  @moduledoc false
+  # result: :ok | {:error, failure}
+  defstruct [:seq, :result]
+end
+
 defmodule Temporalex.Core.Command.ScheduleActivity do
   @moduledoc false
   defstruct [:seq, :thread_id, :activity_id, :type, input: [], opts: []]
@@ -218,6 +228,12 @@ defmodule Temporalex.Core.Command.SignalExternalWorkflowExecution do
   @moduledoc false
   # target: {:child, workflow_id}
   defstruct [:seq, :thread_id, :target, :signal_name, args: [], opts: []]
+end
+
+defmodule Temporalex.Core.Command.RequestCancelExternalWorkflowExecution do
+  @moduledoc false
+  # target: {:child, workflow_id}
+  defstruct [:seq, :thread_id, :target]
 end
 
 defmodule Temporalex.Core.Command.StartTimer do
@@ -318,6 +334,21 @@ end
 defmodule Temporalex.Core.Op.SignalChildWorkflow do
   @moduledoc false
   defstruct [:workflow_id, :signal_name, args: [], opts: []]
+end
+
+defmodule Temporalex.Core.Op.StartChildWorkflow do
+  @moduledoc false
+  defstruct [:workflow_type, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Op.AwaitChildWorkflow do
+  @moduledoc false
+  defstruct [:seq]
+end
+
+defmodule Temporalex.Core.Op.CancelChildWorkflow do
+  @moduledoc false
+  defstruct [:workflow_id, opts: []]
 end
 
 defmodule Temporalex.Core.Op.Sleep do

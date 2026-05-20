@@ -25,13 +25,14 @@ use temporalio_common::protos::coresdk::workflow_activation::{
     workflow_activation_job,
 };
 use temporalio_common::protos::coresdk::child_workflow::ParentClosePolicy;
+use temporalio_common::protos::coresdk::common::NamespacedWorkflowExecution;
 use temporalio_common::protos::coresdk::workflow_commands::{
     ActivityCancellationType, CancelTimer, CancelWorkflowExecution, CompleteWorkflowExecution,
     ContinueAsNewWorkflowExecution, FailWorkflowExecution, QueryResult, QuerySuccess,
-    ScheduleActivity, ScheduleLocalActivity, SetPatchMarker, SignalExternalWorkflowExecution,
-    StartChildWorkflowExecution, StartTimer, UpdateResponse, UpsertWorkflowSearchAttributes,
-    WorkflowCommand, query_result, signal_external_workflow_execution, update_response,
-    workflow_command,
+    RequestCancelExternalWorkflowExecution, ScheduleActivity, ScheduleLocalActivity,
+    SetPatchMarker, SignalExternalWorkflowExecution, StartChildWorkflowExecution, StartTimer,
+    UpdateResponse, UpsertWorkflowSearchAttributes, WorkflowCommand, query_result,
+    signal_external_workflow_execution, update_response, workflow_command,
 };
 use temporalio_common::protos::coresdk::workflow_completion::{
     Failure as WorkflowCompletionFailure, Success as WorkflowCompletionSuccess,
@@ -1801,6 +1802,18 @@ fn activation_job_to_term<'a>(
                 result() => result_term,
             )
         }
+        workflow_activation_job::Variant::ResolveRequestCancelExternalWorkflow(resolution) => {
+            let result_term = match resolution.failure.as_ref() {
+                None => ok().encode(env),
+                Some(failure) => (error(), failure_to_term(env, Some(failure))?).encode(env),
+            };
+
+            put_fields!(
+                make_struct(env, "Elixir.Temporalex.Core.Job.ResolveRequestCancelExternalWorkflow")?,
+                seq() => resolution.seq as i64,
+                result() => result_term,
+            )
+        }
         other => Err(anyhow!(
             "unsupported workflow activation job from Temporal Core: {other:?}"
         )),
@@ -2170,6 +2183,33 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
                     args: terms_list_to_payloads(map_get(command, args())?)?,
                     headers: HashMap::new(),
                     target: Some(target),
+                },
+            )
+        }
+        "Elixir.Temporalex.Core.Command.RequestCancelExternalWorkflowExecution" => {
+            let target_term = map_get(command, target())?;
+            // {:child, workflow_id} — child workflows live in the same
+            // namespace as the parent. Run id left empty so the latest
+            // run of that workflow id is targeted.
+            let (tag, value) = target_term
+                .decode::<(Atom, Term)>()
+                .map_err(|_| anyhow!("cancel target must be a tagged tuple"))?;
+
+            if tag != child() {
+                return Err(anyhow!("unsupported cancel target tag: {tag:?}"));
+            }
+
+            let workflow_id: String = decode_term(value)?;
+
+            workflow_command::Variant::RequestCancelExternalWorkflowExecution(
+                RequestCancelExternalWorkflowExecution {
+                    seq: map_get_i64(command, seq())? as u32,
+                    workflow_execution: Some(NamespacedWorkflowExecution {
+                        namespace: String::new(),
+                        workflow_id,
+                        run_id: String::new(),
+                    }),
+                    reason: String::new(),
                 },
             )
         }

@@ -185,7 +185,10 @@ async handler spawned within a scope must complete before the scope returns.
 | `API.parallel(fns)` | Cooperatively scheduled fan-out. Results in input order. |
 | `API.update_state(fn)` | Atomically transform the enclosing phase's state from inside an `{:async, fn, _}` handler. |
 | `API.execute_child_workflow(mod, input, opts)` | Start a child workflow, block until it completes. |
-| `API.signal_child_workflow(id, name, args)` | Send a durable signal to a child workflow. |
+| `API.start_child_workflow(mod, input, opts)` | Start a child non-blocking; returns a `ChildHandle`. |
+| `API.await_child_workflow(handle)` | Block until a started child completes. |
+| `API.signal_child_workflow(handle_or_id, name, args)` | Send a durable signal to a child workflow. |
+| `API.cancel_child_workflow(handle_or_id)` | Request cancellation of a child workflow. |
 
 Full details, return-value contracts, and the determinism rationale:
 

@@ -847,6 +847,148 @@ defmodule Temporalex.CoreExtrasTest do
       end
     end
 
+    defmodule StartAndAwaitParent do
+      use Temporalex.Workflow
+
+      def run(_) do
+        {:ok, handle} = API.start_child_workflow(__MODULE__.Child, [42], workflow_id: "swa-child")
+        {:ok, result} = API.await_child_workflow(handle)
+        {:ok, {:awaited, result}}
+      end
+
+      defmodule Child do
+        use Temporalex.Workflow
+        def run(value), do: {:ok, value * 2}
+      end
+    end
+
+    test "start_child_workflow returns a handle, await_child_workflow blocks until completion" do
+      assert {:ok, exec} = TestHarness.start_workflow(StartAndAwaitParent, nil)
+
+      # Parent emits StartChildWorkflowExecution.
+      assert {:yield, [%Command.StartChildWorkflowExecution{seq: seq, workflow_id: "swa-child"}]} =
+               TestHarness.next(exec)
+
+      # Start succeeds → parent receives a ChildHandle and proceeds to
+      # await_child_workflow. No new command emitted (await is a pure block).
+      assert {:yield, []} =
+               TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecutionStart{
+                 seq: seq,
+                 status: {:succeeded, "child-run-1"}
+               })
+
+      # Completion fires → await unblocks with the result.
+      assert {:complete, {:ok, {:awaited, 84}}} =
+               TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecution{
+                 seq: seq,
+                 result: {:ok, 84}
+               })
+    end
+
+    defmodule StartThenCancelParent do
+      use Temporalex.Workflow
+
+      def run(_) do
+        {:ok, handle} = API.start_child_workflow(__MODULE__.Child, [], workflow_id: "stc-child")
+        :ok = API.cancel_child_workflow(handle)
+        {:ok, await_result} = {API.await_child_workflow(handle), :tagged}
+        {:ok, {:cancelled_then_awaited, await_result}}
+      end
+
+      defmodule Child do
+        use Temporalex.Workflow
+        def run(_), do: {:ok, :done}
+      end
+    end
+
+    test "cancel_child_workflow emits RequestCancelExternalWorkflowExecution" do
+      assert {:ok, exec} = TestHarness.start_workflow(StartThenCancelParent, nil)
+
+      # Start command first.
+      assert {:yield, [%Command.StartChildWorkflowExecution{seq: start_seq}]} =
+               TestHarness.next(exec)
+
+      # Start succeeds → parent gets handle → immediately calls
+      # cancel_child_workflow which emits the cancel command in the same
+      # yield (no intermediate empty yield).
+      assert {:yield,
+              [
+                %Command.RequestCancelExternalWorkflowExecution{
+                  seq: cancel_seq,
+                  target: {:child, "stc-child"}
+                }
+              ]} =
+               TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecutionStart{
+                 seq: start_seq,
+                 status: {:succeeded, "stc-run-1"}
+               })
+
+      # Cancel resolution succeeds, parent unblocks and calls await.
+      assert {:yield, []} =
+               TestHarness.resolve(exec, %Job.ResolveRequestCancelExternalWorkflow{
+                 seq: cancel_seq,
+                 result: :ok
+               })
+
+      # Child completion (e.g. cancelled) resolves the await.
+      assert {:complete, _} =
+               TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecution{
+                 seq: start_seq,
+                 result: {:cancelled, %Temporalex.CancelledError{message: "cancelled"}}
+               })
+    end
+
+    defmodule AwaitAfterCompletionParent do
+      @moduledoc """
+      Tests the "already completed" path: the child finishes BEFORE the
+      parent awaits. The executor caches the result; the await returns
+      immediately without blocking.
+      """
+      use Temporalex.Workflow
+
+      def run(_) do
+        {:ok, handle} = API.start_child_workflow(__MODULE__.Child, [], workflow_id: "aac-child")
+        :ok = API.sleep(1_000)
+        {:ok, result} = API.await_child_workflow(handle)
+        {:ok, {:cached, result}}
+      end
+
+      defmodule Child do
+        use Temporalex.Workflow
+        def run(_), do: {:ok, :ready}
+      end
+    end
+
+    test "await on an already-completed child returns the cached result immediately" do
+      assert {:ok, exec} = TestHarness.start_workflow(AwaitAfterCompletionParent, nil)
+
+      # Parent first emits StartChildWorkflowExecution and blocks on the
+      # start resolution.
+      assert {:yield, [%Command.StartChildWorkflowExecution{seq: start_seq}]} =
+               TestHarness.next(exec)
+
+      # Start succeeds → parent gets handle, then calls API.sleep → emits
+      # the timer command in the next yield.
+      assert {:yield, [%Command.StartTimer{seq: timer_seq}]} =
+               TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecutionStart{
+                 seq: start_seq,
+                 status: {:succeeded, "aac-run-1"}
+               })
+
+      # Child completion arrives before the timer fires — gets cached on
+      # the pending entry, no commands emitted.
+      assert {:yield, []} =
+               TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecution{
+                 seq: start_seq,
+                 result: {:ok, :ready}
+               })
+
+      # Timer fires → parent's await_child_workflow finds the cached
+      # completion and returns immediately, workflow completes.
+      assert {:complete, {:ok, {:cached, :ready}}} =
+               TestHarness.resolve(exec, %Job.TimerFired{seq: timer_seq})
+    end
+
     test "signal_child_workflow inside an async update handler works" do
       assert {:ok, exec} =
                TestHarness.start_workflow(SignalingFromAsyncUpdateWorkflow, nil)
