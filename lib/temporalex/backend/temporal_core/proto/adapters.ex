@@ -4,32 +4,22 @@ defmodule Temporalex.Backend.TemporalCore.Proto.Adapters do
   @nanos_per_second 1_000_000_000
   @nanos_per_millisecond 1_000_000
 
-  def adapters do
+  def projections do
     [
-      %{
-        fqn: :"google.protobuf.Timestamp",
-        to_proto: {__MODULE__, :datetime_to_proto},
-        from_proto: {__MODULE__, :datetime_from_proto},
-        type: quote(do: DateTime.t())
-      },
-      %{
-        fqn: :"google.protobuf.Duration",
-        to_proto: {__MODULE__, :duration_ms_to_proto},
-        from_proto: {__MODULE__, :duration_ms_from_proto},
-        type: quote(do: non_neg_integer())
-      },
-      %{
-        fqn: :"temporal.api.common.v1.ActivityType",
-        to_proto: {__MODULE__, :type_name_to_proto},
-        from_proto: {__MODULE__, :type_name_from_proto},
-        type: quote(do: String.t())
-      },
-      %{
-        fqn: :"temporal.api.common.v1.WorkflowType",
-        to_proto: {__MODULE__, :type_name_to_proto},
-        from_proto: {__MODULE__, :type_name_from_proto},
-        type: quote(do: String.t())
-      }
+      {:"google.protobuf.Timestamp",
+       adapter: %MiniPB.Adapter{
+         to_proto: {__MODULE__, :datetime_to_proto},
+         from_proto: {__MODULE__, :datetime_from_proto},
+         type: quote(do: DateTime.t())
+       }},
+      {:"google.protobuf.Duration",
+       adapter: %MiniPB.Adapter{
+         to_proto: {__MODULE__, :duration_ms_to_proto},
+         from_proto: {__MODULE__, :duration_ms_from_proto},
+         type: quote(do: non_neg_integer())
+       }},
+      {:"temporal.api.common.v1.ActivityType", unwrap: :name},
+      {:"temporal.api.common.v1.WorkflowType", unwrap: :name}
     ]
   end
 
@@ -65,6 +55,10 @@ defmodule Temporalex.Backend.TemporalCore.Proto.Adapters do
 
   def datetime_from_proto(value), do: {:error, {:invalid_timestamp_message, value}}
 
+  # A nil duration encodes as an absent field: MiniPB elides message fields whose
+  # adapter yields nil, which is how optional Duration timeouts are omitted.
+  def duration_ms_to_proto(nil), do: {:ok, nil}
+
   def duration_ms_to_proto(milliseconds) when is_integer(milliseconds) and milliseconds >= 0 do
     {:ok,
      %{
@@ -92,10 +86,4 @@ defmodule Temporalex.Backend.TemporalCore.Proto.Adapters do
   end
 
   def duration_ms_from_proto(value), do: {:error, {:invalid_duration_message, value}}
-
-  def type_name_to_proto(name) when is_binary(name), do: {:ok, %{name: name}}
-  def type_name_to_proto(value), do: {:error, {:invalid_type_name, value}}
-
-  def type_name_from_proto(message) when is_map(message), do: {:ok, Map.get(message, :name, "")}
-  def type_name_from_proto(value), do: {:error, {:invalid_type_name_message, value}}
 end

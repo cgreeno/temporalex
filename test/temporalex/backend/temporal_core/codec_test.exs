@@ -272,7 +272,7 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
   end
 
   defp encode!(message, proto) do
-    {:ok, iodata} = Schema.encode(message, proto)
-    IO.iodata_to_binary(iodata)
+    {:ok, binary} = Schema.encode(proto, message)
+    binary
   end
 end
