@@ -7,13 +7,13 @@ defmodule Temporalex.Backend.TemporalCore.Proto.Adapters do
   def projections do
     [
       {:"google.protobuf.Timestamp",
-       adapter: %MiniPB.Adapter{
+       adapter: %PB.Adapter{
          to_proto: {__MODULE__, :datetime_to_proto},
          from_proto: {__MODULE__, :datetime_from_proto},
          type: quote(do: DateTime.t())
        }},
       {:"google.protobuf.Duration",
-       adapter: %MiniPB.Adapter{
+       adapter: %PB.Adapter{
          to_proto: {__MODULE__, :duration_ms_to_proto},
          from_proto: {__MODULE__, :duration_ms_from_proto},
          type: quote(do: non_neg_integer())
@@ -55,8 +55,9 @@ defmodule Temporalex.Backend.TemporalCore.Proto.Adapters do
 
   def datetime_from_proto(value), do: {:error, {:invalid_timestamp_message, value}}
 
-  # A nil duration encodes as an absent field: MiniPB elides message fields whose
-  # adapter yields nil, which is how optional Duration timeouts are omitted.
+  # Optional Duration timeouts are omitted by dropping the field from the proto map
+  # before encoding (see Codec.drop_nil/1); PB routes a nil here into the adapter
+  # rather than eliding it, so callers must not leave the key present as nil.
   def duration_ms_to_proto(nil), do: {:ok, nil}
 
   def duration_ms_to_proto(milliseconds) when is_integer(milliseconds) and milliseconds >= 0 do
