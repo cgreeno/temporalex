@@ -1,10 +1,11 @@
 defmodule Temporalex.BackendConformanceTest do
   use ExUnit.Case, async: false
 
+  alias Temporalex.Backend.TemporalCore.Codec
   alias Temporalex.Backend.Test, as: TestBackend
+  alias Temporalex.Core.Activation
   alias Temporalex.Core.ActivityCompletion
   alias Temporalex.Core.ActivityTask
-  alias Temporalex.Core.Activation
   alias Temporalex.Core.Command
   alias Temporalex.Core.Completion
 
@@ -79,7 +80,7 @@ defmodule Temporalex.BackendConformanceTest do
 
   test "TemporalCore codec encodes core completions without leaking native resources" do
     assert {:ok, workflow_bytes} =
-             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+             Codec.workflow_completion_to_bytes(
                %Completion{
                  run_id: "run-codec",
                  status:
@@ -96,9 +97,10 @@ defmodule Temporalex.BackendConformanceTest do
     assert byte_size(workflow_bytes) > 0
 
     assert {:ok, activity_bytes} =
-             Temporalex.Backend.TemporalCore.Codec.activity_completion_to_bytes(
-               %ActivityCompletion{task_token: <<1, 2, 3>>, result: {:ok, :done}}
-             )
+             Codec.activity_completion_to_bytes(%ActivityCompletion{
+               task_token: <<1, 2, 3>>,
+               result: {:ok, :done}
+             })
 
     assert is_binary(activity_bytes)
     assert byte_size(activity_bytes) > 0
@@ -106,7 +108,7 @@ defmodule Temporalex.BackendConformanceTest do
 
   test "TemporalCore codec rejects invalid duration and retry options" do
     assert {:error, timer_reason} =
-             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+             Codec.workflow_completion_to_bytes(
                %Completion{
                  run_id: "run-invalid-timer",
                  status: {:ok, [%Command.StartTimer{seq: 0, duration_ms: -1}]}
@@ -117,7 +119,7 @@ defmodule Temporalex.BackendConformanceTest do
     assert timer_reason =~ "timer duration must be non-negative"
 
     assert {:error, activity_reason} =
-             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+             Codec.workflow_completion_to_bytes(
                %Completion{
                  run_id: "run-invalid-activity",
                  status:

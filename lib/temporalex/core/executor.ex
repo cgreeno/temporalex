@@ -983,17 +983,15 @@ defmodule Temporalex.Core.Executor do
   defp validate_update(_update, nil, _state), do: :ok
 
   defp validate_update(update, validator, state) do
-    try do
-      case validator.(update.args, state) do
-        :ok -> :ok
-        {:error, reason} -> {:error, reason}
-        other -> {:error, {:invalid_validator_return, other}}
-      end
-    rescue
-      error -> {:error, error}
-    catch
-      kind, reason -> {:error, {kind, reason}}
+    case validator.(update.args, state) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:invalid_validator_return, other}}
     end
+  rescue
+    error -> {:error, error}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   defp respond_to_query(%Job.QueryReceived{} = query, state) do
@@ -1473,18 +1471,16 @@ defmodule Temporalex.Core.Executor do
   end
 
   defp run_thread_fun(executor, thread_id, fun) do
-    try do
-      send(executor, {:temporalex_thread_completed, thread_id, fun.()})
-    rescue
-      error ->
-        send(
-          executor,
-          {:temporalex_thread_failed, thread_id, {:exception, error, __STACKTRACE__}}
-        )
-    catch
-      kind, reason ->
-        send(executor, {:temporalex_thread_failed, thread_id, {kind, reason, __STACKTRACE__}})
-    end
+    send(executor, {:temporalex_thread_completed, thread_id, fun.()})
+  rescue
+    error ->
+      send(
+        executor,
+        {:temporalex_thread_failed, thread_id, {:exception, error, __STACKTRACE__}}
+      )
+  catch
+    kind, reason ->
+      send(executor, {:temporalex_thread_failed, thread_id, {kind, reason, __STACKTRACE__}})
   end
 
   defp put_thread(state, %Thread{} = thread) do
@@ -1671,10 +1667,7 @@ defmodule Temporalex.Core.Executor do
     <<p1::binary-size(4), p2::binary-size(2), p3::binary-size(2), p4::binary-size(2),
       p5::binary-size(6)>> = uuid_bytes
 
-    uuid =
-      [p1, p2, p3, p4, p5]
-      |> Enum.map(&Base.encode16(&1, case: :lower))
-      |> Enum.join("-")
+    uuid = Enum.map_join([p1, p2, p3, p4, p5], "-", &Base.encode16(&1, case: :lower))
 
     {uuid, second}
   end
@@ -1709,14 +1702,12 @@ defmodule Temporalex.Core.Executor do
   defp apply_patch_deprecation(state, id) do
     marker = {id, true}
 
-    cond do
-      MapSet.member?(state.patch_ids, id) or not state.is_replaying ->
-        state
-        |> Map.update!(:patch_ids, &MapSet.put(&1, id))
-        |> emit_patch_marker(marker, id, true)
-
-      true ->
-        state
+    if MapSet.member?(state.patch_ids, id) or not state.is_replaying do
+      state
+      |> Map.update!(:patch_ids, &MapSet.put(&1, id))
+      |> emit_patch_marker(marker, id, true)
+    else
+      state
     end
   end
 

@@ -254,6 +254,19 @@ admission rule applies to any new workflow API: a primitive only enters the
 public surface if it has a precise replay contract and can be tested without
 the real Temporal backend.
 
+Run the quality gates before committing:
+
+```bash
+mix format
+mix test
+mix credo --strict
+mix dialyzer
+```
+
+Credo is configured in [`.credo.exs`](.credo.exs); the few checks that are
+relaxed there (Temporal-style exception names, NIF stub arities, executor
+complexity) carry inline comments explaining why.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

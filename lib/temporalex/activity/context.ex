@@ -23,16 +23,17 @@ defmodule Temporalex.Activity.Context do
             cancel_reason: nil
 
   def heartbeat(%__MODULE__{} = context, details \\ nil) do
+    with :ok <- check_not_cancelled(context),
+         :ok <- submit_heartbeat(context, details) do
+      check_not_cancelled(context)
+    end
+  end
+
+  defp check_not_cancelled(context) do
     if cancelled?(context) do
       {:cancelled, context.cancel_reason || :cancelled}
     else
-      with :ok <- submit_heartbeat(context, details) do
-        if cancelled?(context) do
-          {:cancelled, context.cancel_reason || :cancelled}
-        else
-          :ok
-        end
-      end
+      :ok
     end
   end
 

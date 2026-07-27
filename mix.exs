@@ -12,6 +12,12 @@ defmodule Temporalex.MixProject do
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
+      preferred_cli_env: [credo: :test],
+      dialyzer: [
+        plt_add_apps: [:mix, :ex_unit],
+        plt_core_path: "_build/plts",
+        plt_local_path: "_build/plts"
+      ],
 
       # Hex
       description:
@@ -37,6 +43,8 @@ defmodule Temporalex.MixProject do
   defp deps do
     [
       {:rustler, "~> 0.37", runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end

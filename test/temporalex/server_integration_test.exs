@@ -2,11 +2,11 @@ defmodule Temporalex.ServerIntegrationTest do
   use ExUnit.Case, async: false
 
   alias Temporalex.Backend.Test, as: TestBackend
+  alias Temporalex.Core.Activation
   alias Temporalex.Core.ActivityCompletion
   alias Temporalex.Core.ActivityTask
   alias Temporalex.Core.Command
   alias Temporalex.Core.Job
-  alias Temporalex.Core.Activation
   alias Temporalex.Workflow.API
 
   defmodule Activities do

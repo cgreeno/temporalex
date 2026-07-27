@@ -20,6 +20,13 @@ defmodule Temporalex.Core.Completion do
   """
 
   defstruct run_id: nil, status: {:ok, []}
+
+  @type status :: {:ok, [struct()]} | {:failed, term(), keyword()}
+
+  @type t :: %__MODULE__{
+          run_id: String.t() | nil,
+          status: status()
+        }
 end
 
 defmodule Temporalex.Core.Nondeterminism do
@@ -314,6 +321,11 @@ defmodule Temporalex.Core.ActivityCompletion do
   """
 
   defstruct task_token: nil, result: nil
+
+  @type t :: %__MODULE__{
+          task_token: binary() | nil,
+          result: {:ok, term()} | {:error, term()} | nil
+        }
 end
 
 defmodule Temporalex.Core.Op.ExecuteActivity do
