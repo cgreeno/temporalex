@@ -127,19 +127,10 @@
           #
           {Credo.Check.Refactor.Apply, []},
           {Credo.Check.Refactor.CondStatements, []},
-          # The executor is the deterministic replay engine — its dispatch
-          # functions are inherently branchy, and refactoring them for a lint
-          # score risks replay compatibility. The CLI test helper parses
-          # free-form CLI output.
-          {Credo.Check.Refactor.CyclomaticComplexity,
-           [
-             files: %{
-               excluded: [
-                 "lib/temporalex/core/executor.ex",
-                 "test/temporalex/integration/cli_driven_test.exs"
-               ]
-             }
-           ]},
+          # A few inherently-branchy functions (executor job dispatch, CLI
+          # output parsing) carry inline credo:disable-for-next-line comments
+          # so the rest of their files stay checked.
+          {Credo.Check.Refactor.CyclomaticComplexity, []},
           {Credo.Check.Refactor.FilterCount, []},
           {Credo.Check.Refactor.FilterFilter, []},
           # NIF stubs must mirror the Rust function signatures 1:1, so their
@@ -171,10 +162,9 @@
           {Credo.Check.Warning.OperationWithConstantResult, []},
           {Credo.Check.Warning.RaiseInsideRescue, []},
           {Credo.Check.Warning.SpecWithStruct, []},
-          # Executor.State deliberately holds the full workflow state machine
-          # (38 fields); splitting it would obscure the replay model.
-          {Credo.Check.Warning.StructFieldAmount,
-           [files: %{excluded: ["lib/temporalex/core/executor.ex"]}]},
+          # Executor.State (38 fields, deliberate) carries an inline
+          # credo:disable-for-next-line comment at the defstruct site.
+          {Credo.Check.Warning.StructFieldAmount, []},
           {Credo.Check.Warning.UnsafeExec, []},
           {Credo.Check.Warning.UnusedEnumOperation, []},
           {Credo.Check.Warning.UnusedFileOperation, []},

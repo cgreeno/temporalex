@@ -58,6 +58,10 @@ jobs:
       - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
+      - run: mix credo --strict
+      # MIX_ENV is test globally, so dialyxir must be available in :test
+      # (see mix.exs) and the PLTs land under the cached _build/plts.
+      - run: mix dialyzer
 
   test:
     name: Unit Tests

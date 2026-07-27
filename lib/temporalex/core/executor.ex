@@ -29,6 +29,9 @@ defmodule Temporalex.Core.Executor do
   defmodule State do
     @moduledoc false
 
+    # The full workflow state machine lives in one struct by design;
+    # splitting it would obscure the replay model.
+    # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
     defstruct run_id: nil,
               workflow_module: nil,
               workflow_id: nil,
@@ -200,6 +203,8 @@ defmodule Temporalex.Core.Executor do
 
   defp apply_jobs([], query_jobs, state), do: {query_jobs, state}
 
+  # Job dispatch over every activation variant is inherently branchy.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp apply_jobs([job | rest], query_jobs, state) do
     {query_jobs, state} =
       case job do
@@ -755,6 +760,7 @@ defmodule Temporalex.Core.Executor do
     put_thread(state, %{thread | status: :blocked})
   end
 
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp resolve_pending(state, seq, result) do
     case Map.pop(state.pending, seq) do
       {nil, pending} ->

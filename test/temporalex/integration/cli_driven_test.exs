@@ -332,6 +332,8 @@ defmodule Temporalex.CliDrivenIntegrationTest do
     System.cmd("temporal", args ++ ["--address", "127.0.0.1:7233"], stderr_to_stdout: true)
   end
 
+  # Parses free-form CLI output, so the branching is irreducible.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp cli_describe_status(workflow_id) do
     # JSON output gives us a stable machine-readable status enum.
     case cli(["workflow", "describe", "--workflow-id", workflow_id, "--output", "json"]) do

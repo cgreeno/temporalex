@@ -322,9 +322,11 @@ defmodule Temporalex.Core.ActivityCompletion do
 
   defstruct task_token: nil, result: nil
 
+  @type result :: {:ok, term()} | {:error, term()} | {:cancelled, term()} | nil
+
   @type t :: %__MODULE__{
           task_token: binary() | nil,
-          result: {:ok, term()} | {:error, term()} | nil
+          result: result()
         }
 end
 
