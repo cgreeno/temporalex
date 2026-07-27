@@ -10,9 +10,9 @@ defmodule Temporalex.Server do
   use GenServer
 
   alias Temporalex.Activity.Context, as: ActivityContext
+  alias Temporalex.Core.Activation
   alias Temporalex.Core.ActivityCompletion
   alias Temporalex.Core.ActivityTask
-  alias Temporalex.Core.Activation
   alias Temporalex.Core.Completion
   alias Temporalex.Core.Executor
   alias Temporalex.Core.Job
@@ -176,58 +176,64 @@ defmodule Temporalex.Server do
   end
 
   defp route_workflow_activation(activation, state) do
-    with {:ok, executor, state} <- ensure_executor(activation, state) do
-      pending = %{
-        executor: executor,
-        is_replaying: activation.is_replaying,
-        started_at: System.monotonic_time(:millisecond)
-      }
+    case ensure_executor(activation, state) do
+      {:ok, executor, state} ->
+        activate_executor(activation, executor, state)
 
-      state = put_in(state.pending_activations[activation.run_id], pending)
-
-      completion =
-        try do
-          Executor.activate(executor, activation)
-        catch
-          :exit, reason -> failed_completion(activation.run_id, {:executor_exit, reason})
-          kind, reason -> failed_completion(activation.run_id, {kind, reason})
-        end
-
-      state =
-        state
-        |> update_in([Access.key!(:pending_activations)], &Map.delete(&1, activation.run_id))
-        |> submit_workflow_completion(completion)
-
-      if eviction_only?(activation.jobs) do
-        remove_executor(activation.run_id, state)
-      else
-        state
-      end
-    else
       {:error, reason} ->
         completion = failed_completion(activation.run_id, reason)
         submit_workflow_completion(state, completion)
     end
   end
 
+  defp activate_executor(activation, executor, state) do
+    pending = %{
+      executor: executor,
+      is_replaying: activation.is_replaying,
+      started_at: System.monotonic_time(:millisecond)
+    }
+
+    state = put_in(state.pending_activations[activation.run_id], pending)
+
+    completion =
+      try do
+        Executor.activate(executor, activation)
+      catch
+        :exit, reason -> failed_completion(activation.run_id, {:executor_exit, reason})
+        kind, reason -> failed_completion(activation.run_id, {kind, reason})
+      end
+
+    state =
+      state
+      |> update_in([Access.key!(:pending_activations)], &Map.delete(&1, activation.run_id))
+      |> submit_workflow_completion(completion)
+
+    if eviction_only?(activation.jobs) do
+      remove_executor(activation.run_id, state)
+    else
+      state
+    end
+  end
+
   defp ensure_executor(%Activation{} = activation, state) do
     case Map.fetch(state.executors, activation.run_id) do
-      {:ok, executor_info} ->
-        {:ok, executor_info.pid, state}
+      {:ok, executor_info} -> {:ok, executor_info.pid, state}
+      :error -> start_executor_from_init(activation, state)
+    end
+  end
 
-      :error ->
-        case initialize_job(activation.jobs) do
-          nil ->
-            {:error, {:unknown_workflow_run, activation.run_id}}
+  defp start_executor_from_init(activation, state) do
+    case initialize_job(activation.jobs) do
+      nil ->
+        {:error, {:unknown_workflow_run, activation.run_id}}
 
-          %Job.InitializeWorkflow{workflow_type: workflow_type} ->
-            case Map.fetch(state.workflow_map, workflow_type) do
-              {:ok, workflow_module} ->
-                start_executor(state, activation.run_id, workflow_type, workflow_module)
+      %Job.InitializeWorkflow{workflow_type: workflow_type} ->
+        case Map.fetch(state.workflow_map, workflow_type) do
+          {:ok, workflow_module} ->
+            start_executor(state, activation.run_id, workflow_type, workflow_module)
 
-              :error ->
-                {:error, {:unknown_workflow_type, workflow_type}}
-            end
+          :error ->
+            {:error, {:unknown_workflow_type, workflow_type}}
         end
     end
   end

@@ -20,7 +20,7 @@ defmodule Temporalex.ApplicationError do
           details: term() | nil
         }
 
-  @doc "Convenience constructor: `ApplicationError.new(\"boom\", type: \"InvalidSku\", non_retryable: true)`."
+  @doc ~S|Convenience constructor: `ApplicationError.new("boom", type: "InvalidSku", non_retryable: true)`.|
   def new(message, opts \\ []) when is_binary(message) do
     %__MODULE__{
       message: message,

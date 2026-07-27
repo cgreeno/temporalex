@@ -8,9 +8,9 @@ defmodule Temporalex.Backend.Test do
 
   @behaviour Temporalex.Backend
 
+  alias Temporalex.Core.Activation
   alias Temporalex.Core.ActivityCompletion
   alias Temporalex.Core.ActivityTask
-  alias Temporalex.Core.Activation
   alias Temporalex.Core.Completion
 
   defmodule State do
