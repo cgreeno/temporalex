@@ -82,21 +82,21 @@ defmodule Temporalex.Client do
     workflow_id = workflow_id_opt(opts)
 
     with_client_connection(client, :start_workflow, opts, fn %Connection{} = connection, opts ->
-      with {:ok, info} <-
-             connection.backend.start_workflow(
-               connection.backend_state,
-               workflow_type,
-               input,
-               opts
-             ) do
-        {:ok,
-         %Handle{
-           client: client,
-           workflow_id: Map.fetch!(info, :workflow_id),
-           run_id: Map.get(info, :run_id),
-           workflow_type: Map.get(info, :workflow_type, workflow_type)
-         }}
-      else
+      case connection.backend.start_workflow(
+             connection.backend_state,
+             workflow_type,
+             input,
+             opts
+           ) do
+        {:ok, info} ->
+          {:ok,
+           %Handle{
+             client: client,
+             workflow_id: Map.fetch!(info, :workflow_id),
+             run_id: Map.get(info, :run_id),
+             workflow_type: Map.get(info, :workflow_type, workflow_type)
+           }}
+
         {:error, reason} ->
           {:error,
            Error.normalize_client_reason(reason,
@@ -112,13 +112,12 @@ defmodule Temporalex.Client do
   def get_result(%Handle{} = handle, opts \\ []) when is_list(opts) do
     with_client_connection(handle.client, :get_result, opts, fn %Connection{} = connection,
                                                                 opts ->
-      connection.backend
-      |> apply(:get_workflow_result, [
+      connection.backend.get_workflow_result(
         connection.backend_state,
         handle.workflow_id,
         handle.run_id,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :get_result,
         client: handle.client,
@@ -139,15 +138,14 @@ defmodule Temporalex.Client do
       when is_binary(signal_name) and is_list(opts) do
     with_client_connection(handle.client, :signal_workflow, opts, fn %Connection{} = connection,
                                                                      opts ->
-      connection.backend
-      |> apply(:signal_workflow, [
+      connection.backend.signal_workflow(
         connection.backend_state,
         handle.workflow_id,
         handle.run_id,
         signal_name,
         args,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :signal_workflow,
         client: handle.client,
@@ -163,15 +161,14 @@ defmodule Temporalex.Client do
     with_client_connection(client, :signal_workflow, opts, fn %Connection{} = connection, opts ->
       run_id = Keyword.get(opts, :run_id)
 
-      connection.backend
-      |> apply(:signal_workflow, [
+      connection.backend.signal_workflow(
         connection.backend_state,
         workflow_id,
         run_id,
         signal_name,
         args,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :signal_workflow,
         client: client,
@@ -191,15 +188,14 @@ defmodule Temporalex.Client do
       when is_binary(query_name) and is_list(opts) do
     with_client_connection(handle.client, :query_workflow, opts, fn %Connection{} = connection,
                                                                     opts ->
-      connection.backend
-      |> apply(:query_workflow, [
+      connection.backend.query_workflow(
         connection.backend_state,
         handle.workflow_id,
         handle.run_id,
         query_name,
         args,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :query_workflow,
         client: handle.client,
@@ -216,15 +212,14 @@ defmodule Temporalex.Client do
     with_client_connection(client, :query_workflow, opts, fn %Connection{} = connection, opts ->
       run_id = Keyword.get(opts, :run_id)
 
-      connection.backend
-      |> apply(:query_workflow, [
+      connection.backend.query_workflow(
         connection.backend_state,
         workflow_id,
         run_id,
         query_name,
         args,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :query_workflow,
         client: client,
@@ -245,15 +240,14 @@ defmodule Temporalex.Client do
       when is_binary(update_name) and is_list(opts) do
     with_client_connection(handle.client, :update_workflow, opts, fn %Connection{} = connection,
                                                                      opts ->
-      connection.backend
-      |> apply(:update_workflow, [
+      connection.backend.update_workflow(
         connection.backend_state,
         handle.workflow_id,
         handle.run_id,
         update_name,
         args,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :update_workflow,
         client: handle.client,
@@ -270,15 +264,14 @@ defmodule Temporalex.Client do
     with_client_connection(client, :update_workflow, opts, fn %Connection{} = connection, opts ->
       run_id = Keyword.get(opts, :run_id)
 
-      connection.backend
-      |> apply(:update_workflow, [
+      connection.backend.update_workflow(
         connection.backend_state,
         workflow_id,
         run_id,
         update_name,
         args,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :update_workflow,
         client: client,
@@ -292,13 +285,12 @@ defmodule Temporalex.Client do
   def cancel_workflow(%Handle{} = handle, opts \\ []) when is_list(opts) do
     with_client_connection(handle.client, :cancel_workflow, opts, fn %Connection{} = connection,
                                                                      opts ->
-      connection.backend
-      |> apply(:cancel_workflow, [
+      connection.backend.cancel_workflow(
         connection.backend_state,
         handle.workflow_id,
         handle.run_id,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :cancel_workflow,
         client: handle.client,
@@ -313,13 +305,12 @@ defmodule Temporalex.Client do
     with_client_connection(client, :cancel_workflow, opts, fn %Connection{} = connection, opts ->
       run_id = Keyword.get(opts, :run_id)
 
-      connection.backend
-      |> apply(:cancel_workflow, [
+      connection.backend.cancel_workflow(
         connection.backend_state,
         workflow_id,
         run_id,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :cancel_workflow,
         client: client,
@@ -332,13 +323,12 @@ defmodule Temporalex.Client do
   def terminate_workflow(%Handle{} = handle, opts \\ []) when is_list(opts) do
     with_client_connection(handle.client, :terminate_workflow, opts, fn %Connection{} = connection,
                                                                         opts ->
-      connection.backend
-      |> apply(:terminate_workflow, [
+      connection.backend.terminate_workflow(
         connection.backend_state,
         handle.workflow_id,
         handle.run_id,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :terminate_workflow,
         client: handle.client,
@@ -355,13 +345,12 @@ defmodule Temporalex.Client do
                                                                  opts ->
       run_id = Keyword.get(opts, :run_id)
 
-      connection.backend
-      |> apply(:terminate_workflow, [
+      connection.backend.terminate_workflow(
         connection.backend_state,
         workflow_id,
         run_id,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :terminate_workflow,
         client: client,
@@ -374,13 +363,12 @@ defmodule Temporalex.Client do
   def describe_workflow(%Handle{} = handle, opts \\ []) when is_list(opts) do
     with_client_connection(handle.client, :describe_workflow, opts, fn %Connection{} = connection,
                                                                        opts ->
-      connection.backend
-      |> apply(:describe_workflow, [
+      connection.backend.describe_workflow(
         connection.backend_state,
         handle.workflow_id,
         handle.run_id,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :describe_workflow,
         client: handle.client,
@@ -397,13 +385,12 @@ defmodule Temporalex.Client do
                                                                 opts ->
       run_id = Keyword.get(opts, :run_id)
 
-      connection.backend
-      |> apply(:describe_workflow, [
+      connection.backend.describe_workflow(
         connection.backend_state,
         workflow_id,
         run_id,
         opts
-      ])
+      )
       |> normalize_client_result(
         operation: :describe_workflow,
         client: client,

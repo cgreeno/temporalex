@@ -42,7 +42,9 @@ defmodule Temporalex.ErrorPathsTest do
       results =
         API.parallel([
           fn -> {:ok, :left} end,
-          fn -> raise %Temporalex.ApplicationError{message: "mid blew up", type: "MidErr"} end,
+          fn ->
+            raise %Temporalex.Failure.ApplicationError{message: "mid blew up", type: "MidErr"}
+          end,
           fn -> {:ok, :right} end
         ])
 
@@ -62,7 +64,7 @@ defmodule Temporalex.ErrorPathsTest do
       assert Enum.at(results, 2) == {:ok, :right}
 
       # Middle is a tagged failure carrying the exception.
-      assert {:error, %Temporalex.ApplicationError{type: "MidErr"}} = Enum.at(results, 1)
+      assert {:error, %Temporalex.Failure.ApplicationError{type: "MidErr"}} = Enum.at(results, 1)
     end
   end
 
@@ -269,7 +271,7 @@ defmodule Temporalex.ErrorPathsTest do
         {:ok, _} = ok ->
           ok
 
-        {:error, %Temporalex.ApplicationError{type: "InvalidActivityReturn"} = err} ->
+        {:error, %Temporalex.Failure.ApplicationError{type: "InvalidActivityReturn"} = err} ->
           {:ok, {:invalid_return, err.message}}
 
         other ->
@@ -290,10 +292,10 @@ defmodule Temporalex.ErrorPathsTest do
                  seq: seq,
                  result:
                    {:error,
-                    %Temporalex.ApplicationError{
+                    %Temporalex.Failure.ApplicationError{
                       message: "activity returned invalid value: :weird",
                       type: "InvalidActivityReturn",
-                      non_retryable: true
+                      retryable?: false
                     }}
                })
 

@@ -103,12 +103,10 @@ defmodule Temporalex.TestingTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        API.sleep!(60_000)
-        {:ok, :slept}
-      rescue
-        error in CancelledError -> {:cancelled, error}
-      end
+      API.sleep!(60_000)
+      {:ok, :slept}
+    rescue
+      error in CancelledError -> {:cancelled, error}
     end
   end
 

@@ -54,7 +54,6 @@ use temporalio_common::protos::temporal::api::enums::v1::{
     VersioningBehavior, WorkflowExecutionStatus, WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
     WorkflowTaskFailedCause,
 };
-use temporalio_common::protos::temporal::api::enums::v1::TimeoutType;
 use temporalio_common::protos::temporal::api::failure::v1::{
     ActivityFailureInfo, ApplicationFailureInfo, CanceledFailureInfo,
     ChildWorkflowExecutionFailureInfo, Failure, TimeoutFailureInfo, failure,
@@ -264,13 +263,6 @@ rustler::atoms! {
     execution_time_ms,
     close_time_ms,
     non_retryable,
-    timeout_type,
-    cause,
-    retry_state,
-    heartbeat,
-    start_to_close,
-    schedule_to_close,
-    schedule_to_start,
     succeeded,
     request_cancel,
     parent_close_policy,

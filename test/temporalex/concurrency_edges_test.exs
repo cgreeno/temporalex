@@ -105,10 +105,10 @@ defmodule Temporalex.ConcurrencyEdgesTest do
             "boom" => fn _args, state ->
               {:async,
                fn ->
-                 raise %Temporalex.ApplicationError{
+                 raise %Temporalex.Failure.ApplicationError{
                    message: "async raised",
                    type: "AsyncError",
-                   non_retryable: true
+                   retryable?: false
                  }
                end, state}
             end

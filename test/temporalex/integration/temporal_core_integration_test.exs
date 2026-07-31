@@ -131,12 +131,10 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
     use Temporalex.Workflow
 
     def run(parent) do
-      try do
-        _result = Activities.long_cancellable!(parent)
-        {:ok, :activity_completed}
-      rescue
-        error in Temporalex.Failure.CancelledError -> {:cancelled, error}
-      end
+      _result = Activities.long_cancellable!(parent)
+      {:ok, :activity_completed}
+    rescue
+      error in Temporalex.Failure.CancelledError -> {:cancelled, error}
     end
   end
 

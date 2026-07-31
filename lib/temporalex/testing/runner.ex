@@ -230,35 +230,37 @@ defmodule Temporalex.Testing.Runner do
   end
 
   def handle_call({:query, query_type, args, opts}, _from, state) do
-    with :ok <- ensure_queue_empty(state) do
-      query_id = Keyword.get(opts, :query_id, "query-#{System.unique_integer([:positive])}")
+    case ensure_queue_empty(state) do
+      :ok ->
+        query_id = Keyword.get(opts, :query_id, "query-#{System.unique_integer([:positive])}")
 
-      job = %Job.QueryReceived{
-        query_id: query_id,
-        query_type: query_type,
-        args: List.wrap(args),
-        headers: Keyword.get(opts, :headers, %{})
-      }
+        job = %Job.QueryReceived{
+          query_id: query_id,
+          query_type: query_type,
+          args: List.wrap(args),
+          headers: Keyword.get(opts, :headers, %{})
+        }
 
-      state = activate(state, [job], opts)
+        state = activate(state, [job], opts)
 
-      case state.queue do
-        [%Command.RespondToQuery{query_id: ^query_id, result: result} | rest] ->
-          {:reply, result, %{state | queue: rest}}
+        case state.queue do
+          [%Command.RespondToQuery{query_id: ^query_id, result: result} | rest] ->
+            {:reply, result, %{state | queue: rest}}
 
-        [command | _] ->
-          {:reply,
-           {:error,
-            "expected query response #{inspect(query_id)}, but next command is #{inspect(command)}"},
-           state}
+          [command | _] ->
+            {:reply,
+             {:error,
+              "expected query response #{inspect(query_id)}, but next command is #{inspect(command)}"},
+             state}
 
-        [] ->
-          {:reply,
-           {:error, "expected query response #{inspect(query_id)}, but no command was emitted"},
-           state}
-      end
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+          [] ->
+            {:reply,
+             {:error, "expected query response #{inspect(query_id)}, but no command was emitted"},
+             state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -463,17 +465,19 @@ defmodule Temporalex.Testing.Runner do
              state.harness.input,
              state.replay_opts
            ) do
-      Enum.reduce_while(state.transcript, :ok, fn step, _acc ->
-        opts =
-          step.opts
-          |> Keyword.put(:replay, true)
-          |> Keyword.put(:expected_commands, step.commands)
+      Enum.reduce_while(state.transcript, :ok, &replay_step(harness, &1, &2))
+    end
+  end
 
-        case TestHarness.activate(harness, step.jobs, opts) do
-          {:failed, reason} -> {:halt, {:error, reason}}
-          _step -> {:cont, :ok}
-        end
-      end)
+  defp replay_step(harness, step, _acc) do
+    opts =
+      step.opts
+      |> Keyword.put(:replay, true)
+      |> Keyword.put(:expected_commands, step.commands)
+
+    case TestHarness.activate(harness, step.jobs, opts) do
+      {:failed, reason} -> {:halt, {:error, reason}}
+      _step -> {:cont, :ok}
     end
   end
 

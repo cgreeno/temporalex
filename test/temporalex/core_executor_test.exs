@@ -269,13 +269,11 @@ defmodule Temporalex.CoreExecutorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        API.wait_for_signal!("go")
-        {:ok, :not_cancelled}
-      rescue
-        error in CancelledError ->
-          {:ok, %{cancelled?: API.cancelled?(), cancellation: API.cancellation(), error: error}}
-      end
+      API.wait_for_signal!("go")
+      {:ok, :not_cancelled}
+    rescue
+      error in CancelledError ->
+        {:ok, %{cancelled?: API.cancelled?(), cancellation: API.cancellation(), error: error}}
     end
   end
 
@@ -283,12 +281,10 @@ defmodule Temporalex.CoreExecutorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        API.sleep!(60_000)
-        {:ok, :slept}
-      rescue
-        error in CancelledError -> {:cancelled, error}
-      end
+      API.sleep!(60_000)
+      {:ok, :slept}
+    rescue
+      error in CancelledError -> {:cancelled, error}
     end
   end
 
@@ -329,18 +325,16 @@ defmodule Temporalex.CoreExecutorTest do
 
     def run(_) do
       try do
-        try do
-          API.sleep!(60_000)
-          {:ok, :slept}
-        rescue
-          _error in CancelledError ->
-            API.sleep!(1)
-            {:ok, :cleanup_completed}
-        end
+        API.sleep!(60_000)
+        {:ok, :slept}
       rescue
-        error in CancelledError ->
-          {:ok, {:cleanup_blocked, error.message}}
+        _error in CancelledError ->
+          API.sleep!(1)
+          {:ok, :cleanup_completed}
       end
+    rescue
+      error in CancelledError ->
+        {:ok, {:cleanup_blocked, error.message}}
     end
   end
 
@@ -348,16 +342,14 @@ defmodule Temporalex.CoreExecutorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        {:ok, _result} =
-          API.execute_activity!("#{inspect(Activities)}.echo", [:work],
-            cancellation_type: :wait_cancellation_completed
-          )
+      {:ok, _result} =
+        API.execute_activity!("#{inspect(Activities)}.echo", [:work],
+          cancellation_type: :wait_cancellation_completed
+        )
 
-        {:ok, :activity_completed}
-      rescue
-        error in CancelledError -> {:cancelled, error}
-      end
+      {:ok, :activity_completed}
+    rescue
+      error in CancelledError -> {:cancelled, error}
     end
   end
 
@@ -365,16 +357,14 @@ defmodule Temporalex.CoreExecutorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        {:ok, _result} =
-          API.execute_activity!("#{inspect(Activities)}.echo", [:work],
-            cancellation_type: :try_cancel
-          )
+      {:ok, _result} =
+        API.execute_activity!("#{inspect(Activities)}.echo", [:work],
+          cancellation_type: :try_cancel
+        )
 
-        {:ok, :activity_completed}
-      rescue
-        error in CancelledError -> {:cancelled, error}
-      end
+      {:ok, :activity_completed}
+    rescue
+      error in CancelledError -> {:cancelled, error}
     end
   end
 
@@ -395,22 +385,20 @@ defmodule Temporalex.CoreExecutorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        API.parallel!([
-          fn ->
-            API.sleep!(10_000)
-            :a
-          end,
-          fn ->
-            API.sleep!(20_000)
-            :b
-          end
-        ])
+      API.parallel!([
+        fn ->
+          API.sleep!(10_000)
+          :a
+        end,
+        fn ->
+          API.sleep!(20_000)
+          :b
+        end
+      ])
 
-        {:ok, :parallel_completed}
-      rescue
-        error in CancelledError -> {:cancelled, error}
-      end
+      {:ok, :parallel_completed}
+    rescue
+      error in CancelledError -> {:cancelled, error}
     end
   end
 
@@ -418,16 +406,14 @@ defmodule Temporalex.CoreExecutorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        API.phase!(:open,
-          timeout: 60_000,
-          signal: %{"done" => fn _args, state -> {:stop, state} end}
-        )
+      API.phase!(:open,
+        timeout: 60_000,
+        signal: %{"done" => fn _args, state -> {:stop, state} end}
+      )
 
-        {:ok, :phase_completed}
-      rescue
-        error in CancelledError -> {:cancelled, error}
-      end
+      {:ok, :phase_completed}
+    rescue
+      error in CancelledError -> {:cancelled, error}
     end
   end
 

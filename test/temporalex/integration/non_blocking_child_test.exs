@@ -176,7 +176,7 @@ defmodule Temporalex.NonBlockingChildIntegrationTest do
     # The parent's await sees it as {:cancelled, _} or {:error, %CancelledError{}}.
     case child_outcome do
       {:cancelled, _} -> :ok
-      {:error, %Temporalex.CancelledError{}} -> :ok
+      {:error, %Temporalex.Failure.CancelledError{}} -> :ok
       other -> flunk("expected cancellation outcome, got: #{inspect(other)}")
     end
   end

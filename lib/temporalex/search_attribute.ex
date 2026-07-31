@@ -53,6 +53,7 @@ defmodule Temporalex.SearchAttribute do
   def text(value) when is_binary(value), do: %__MODULE__{type: :text, value: value}
 
   @doc false
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def validate!(%__MODULE__{type: type, value: value} = attr) do
     case type do
       :bool when is_boolean(value) -> attr

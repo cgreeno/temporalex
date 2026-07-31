@@ -284,6 +284,6 @@ defmodule Temporalex.SignalChildWorkflowIntegrationTest do
     assert {:ok, result} =
              Temporalex.Client.get_result(handle, timeout: 30_000)
 
-    assert {:error, %Temporalex.ApplicationError{}} = result
+    assert {:error, %Temporalex.Failure.ApplicationError{}} = result
   end
 end

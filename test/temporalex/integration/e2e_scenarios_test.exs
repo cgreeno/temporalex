@@ -29,10 +29,10 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
     defactivity always_fail_non_retryable(),
       start_to_close_timeout: 5_000,
       retry_policy: [maximum_attempts: 5] do
-      raise %Temporalex.ApplicationError{
+      raise %Temporalex.Failure.ApplicationError{
         message: "no retry plz",
         type: "NoRetryEver",
-        non_retryable: true
+        retryable?: false
       }
     end
 
@@ -41,10 +41,10 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
     end
 
     defactivity local_fails(reason), local: true, start_to_close_timeout: 2_000 do
-      raise %Temporalex.ApplicationError{
+      raise %Temporalex.Failure.ApplicationError{
         message: "local fail",
         type: "LocalFail",
-        non_retryable: true,
+        retryable?: false,
         details: reason
       }
     end
@@ -294,7 +294,7 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
   end
 
   describe "retry policy" do
-    test "non_retryable: true on raised error skips retries", %{worker: worker} do
+    test "retryable?: false on raised error skips retries", %{worker: worker} do
       {:ok, handle} =
         Temporalex.Client.start_workflow(worker, RetryWorkflow, nil,
           workflow_id: "retry-#{System.unique_integer([:positive])}",
@@ -302,11 +302,11 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
         )
 
       # Workflow catches the failure on first attempt — confirms no retries.
-      assert {:ok, {:got_failure, %Temporalex.ActivityFailure{cause: cause}}} =
+      assert {:ok, {:got_failure, %Temporalex.Failure.ActivityError{cause: cause}}} =
                Temporalex.Client.get_result(handle, timeout: 15_000)
 
       assert cause.type == "NoRetryEver"
-      assert cause.non_retryable == true
+      assert cause.retryable? == false
     end
   end
 
@@ -323,7 +323,7 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
       # ApplicationError (no outer ActivityFailure wrap, since local-activity
       # resolution doesn't carry the activity-task identity in the same way
       # as remote activities).
-      assert {:ok, {:local_failure, %Temporalex.ApplicationError{} = failure}} =
+      assert {:ok, {:local_failure, %Temporalex.Failure.ApplicationError{} = failure}} =
                Temporalex.Client.get_result(handle, timeout: 15_000)
 
       assert failure.type == "LocalFail"

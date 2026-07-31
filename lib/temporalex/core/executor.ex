@@ -416,6 +416,9 @@ defmodule Temporalex.Core.Executor do
 
   defp wait_for_thread_event(state, _thread_id), do: %{state | running: nil}
 
+  # The receive loop dispatches every executor-thread event variant; the branch
+  # count is inherent to the protocol, so complexity is accepted here.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp wait_for_thread_event_open(state, thread_id) do
     receive do
       {:"$gen_call", from, {:workflow_op, caller_thread_id, op}} ->
@@ -605,7 +608,7 @@ defmodule Temporalex.Core.Executor do
       {:ok, %Pending{completion: completion}} when not is_nil(completion) ->
         # Child already completed; deliver cached result immediately.
         # Thread keeps running (no block).
-        GenServer.reply(from, completion)
+        reply_ok(from, completion)
         %{state | pending: Map.delete(state.pending, seq)}
 
       {:ok, %Pending{} = pending} ->
@@ -617,13 +620,15 @@ defmodule Temporalex.Core.Executor do
 
       :error ->
         # Unknown seq — handle is stale or wasn't created via start_child.
-        GenServer.reply(
+        # Deliver the error as the op result (op-level :ok envelope) so the
+        # awaiting workflow sees `{:error, ...}` as the value of the call.
+        reply_ok(
           from,
           {:error,
-           %Temporalex.ApplicationError{
+           %Temporalex.Failure.ApplicationError{
              message: "no pending child workflow for seq #{seq}",
              type: "UnknownChildWorkflow",
-             non_retryable: true
+             retryable?: false
            }}
         )
 
@@ -1024,12 +1029,12 @@ defmodule Temporalex.Core.Executor do
       {%Pending{op: %Op.ExecuteLocalActivity{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)
-        |> ready_thread(thread_id, {from, result})
+        |> ready_thread(thread_id, {from, op_ok(result)})
 
       {%Pending{op: %Op.ExecuteChildWorkflow{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)
-        |> ready_thread(thread_id, {from, result})
+        |> ready_thread(thread_id, {from, op_ok(result)})
 
       {%Pending{op: %Op.StartChildWorkflow{}, thread_id: thread_id, from: from}, pending}
       when not is_nil(thread_id) ->
@@ -1038,17 +1043,17 @@ defmodule Temporalex.Core.Executor do
         # post-start pending entry with thread_id: nil.
         state
         |> Map.put(:pending, pending)
-        |> ready_thread(thread_id, {from, result})
+        |> ready_thread(thread_id, {from, op_ok(result)})
 
       {%Pending{op: %Op.SignalChildWorkflow{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)
-        |> ready_thread(thread_id, {from, result})
+        |> ready_thread(thread_id, {from, op_ok(result)})
 
       {%Pending{op: %Op.CancelChildWorkflow{}, thread_id: thread_id, from: from}, pending} ->
         state
         |> Map.put(:pending, pending)
-        |> ready_thread(thread_id, {from, result})
+        |> ready_thread(thread_id, {from, op_ok(result)})
 
       {%Pending{op: %Op.Sleep{}, thread_id: thread_id, from: from}, pending} ->
         state
@@ -1098,7 +1103,7 @@ defmodule Temporalex.Core.Executor do
         }
 
         %{state | pending: Map.put(state.pending, seq, updated)}
-        |> ready_thread(thread_id, {from, {:ok, handle}})
+        |> ready_thread(thread_id, {from, op_ok({:ok, handle})})
 
       _ ->
         # ExecuteChildWorkflow path (or unknown): keep waiting for the
@@ -1109,14 +1114,14 @@ defmodule Temporalex.Core.Executor do
   end
 
   defp resolve_child_start(state, seq, {:failed, info}) do
-    failure = %Temporalex.ChildWorkflowFailure{
+    failure = %Temporalex.Failure.WorkflowExecutionError{
       message: "failed to start child workflow",
       workflow_id: info[:workflow_id],
       workflow_type: info[:workflow_type],
-      cause: %Temporalex.ApplicationError{
+      cause: %Temporalex.Failure.ApplicationError{
         message: "child workflow start failure: #{info[:cause]}",
         type: "ChildWorkflowStartFailed",
-        non_retryable: true,
+        retryable?: false,
         details: info[:cause]
       }
     }
@@ -1133,7 +1138,7 @@ defmodule Temporalex.Core.Executor do
       {:ok, %Pending{op: %Op.StartChildWorkflow{}, awaiter: {thread_id, from}}} ->
         # Someone is already awaiting — wake them, drop the pending.
         %{state | pending: Map.delete(state.pending, seq)}
-        |> ready_thread(thread_id, {from, result})
+        |> ready_thread(thread_id, {from, op_ok(result)})
 
       {:ok, %Pending{op: %Op.StartChildWorkflow{}} = pending} ->
         # Non-blocking start, no awaiter yet — cache the completion for a
@@ -1144,6 +1149,9 @@ defmodule Temporalex.Core.Executor do
       _ ->
         # ExecuteChildWorkflow blocking path — existing behaviour.
         resolve_pending(state, seq, result)
+    end
+  end
+
   defp apply_workflow_cancellation(state, reason) do
     cancellation = state.cancellation || cancellation_from_reason(reason)
 
@@ -1658,16 +1666,14 @@ defmodule Temporalex.Core.Executor do
 
     case thread.kind do
       :root ->
-        case unwrap_cancelled_failure(reason) do
-          {:ok, cancellation} ->
-            append_command(state, %Command.CancelWorkflow{reason: cancellation})
-
-          :error ->
-            append_command(state, %Command.FailWorkflow{reason: root_failure_reason(reason)})
-        end
+        fail_root_thread(state, reason, unwrapped)
 
       :parallel_branch ->
-        complete_parallel_branch(state, thread, {:error, unwrapped})
+        # Parallel branch results are consumed by workflow code. Structured
+        # Temporalex.Failure.* causes are surfaced bare; generic exceptions keep
+        # their `{:exception, struct, stacktrace}` envelope so branch handlers
+        # retain the stacktrace for diagnosis.
+        complete_parallel_branch(state, thread, {:error, branch_failure_reason(reason)})
 
       :phase_dispatch ->
         fail_phase_dispatch(state, thread, unwrapped)
@@ -1676,32 +1682,41 @@ defmodule Temporalex.Core.Executor do
         complete_async_signal(state, thread)
 
       :async_update_handler ->
-        complete_async_update(state, thread, {:rejected, update_rejection_reason(reason)})
+        complete_async_update(state, thread, {:rejected, unwrapped})
     end
   end
 
-  defp root_failure_reason(reason) do
-    case unwrap_structured_failure(reason) do
-      {:ok, failure} -> failure
-      :error -> {:exception, reason}
+  defp fail_root_thread(state, reason, unwrapped) do
+    case unwrap_cancelled_failure(reason) do
+      {:ok, cancellation} ->
+        append_command(state, %Command.CancelWorkflow{reason: cancellation})
+
+      :error ->
+        # Root failures surface as the underlying struct (bare exception or
+        # structured Temporalex.Failure) so the Rust encoder can map them to
+        # the right Temporal Failure variant.
+        append_command(state, %Command.FailWorkflow{reason: unwrapped})
     end
   end
 
-  defp update_rejection_reason(reason) do
+  defp branch_failure_reason(reason) do
     case unwrap_structured_failure(reason) do
       {:ok, failure} -> failure
       :error -> reason
     end
   end
 
-  defp unwrap_structured_failure(
-         {:exception, %Temporalex.Failure.ApplicationError{} = error, _stack}
-       ),
-       do: {:ok, error}
+  @failure_structs [
+    Temporalex.Failure.ApplicationError,
+    Temporalex.Failure.CancelledError,
+    Temporalex.Failure.TimeoutError,
+    Temporalex.Failure.ActivityError,
+    Temporalex.Failure.WorkflowExecutionError,
+    Temporalex.Failure.UnknownError
+  ]
 
-  defp unwrap_structured_failure(
-         {:exception, %Temporalex.Failure.CancelledError{} = error, _stack}
-       ),
+  defp unwrap_structured_failure({:exception, %mod{} = error, _stack})
+       when mod in @failure_structs,
        do: {:ok, error}
 
   defp unwrap_structured_failure(_reason), do: :error
@@ -1723,6 +1738,10 @@ defmodule Temporalex.Core.Executor do
 
   defp complete_root_thread(state, {:cancelled, reason}) do
     append_command(state, %Command.CancelWorkflow{reason: cancellation_from_reason(reason)})
+  end
+
+  defp complete_root_thread(state, {:continue_as_new, input}) do
+    append_command(state, %Command.ContinueAsNew{input: input})
   end
 
   defp complete_root_thread(state, other) do
@@ -2242,21 +2261,11 @@ defmodule Temporalex.Core.Executor do
   defp trace_thread(%State{trace_guard: nil} = state, _thread), do: state
 
   defp trace_thread(state, %Thread{} = thread) do
-    try do
-      case TraceGuard.trace_thread(state.trace_guard, thread.pid, thread.id) do
-        :ok ->
-          state
+    case TraceGuard.trace_thread(state.trace_guard, thread.pid, thread.id) do
+      :ok ->
+        state
 
-        {:error, reason} ->
-          runtime_abort(
-            state,
-            %RuntimeError{
-              message: "failed to trace workflow thread #{inspect(thread.id)}: #{inspect(reason)}"
-            }
-          )
-      end
-    catch
-      :exit, reason ->
+      {:error, reason} ->
         runtime_abort(
           state,
           %RuntimeError{
@@ -2264,16 +2273,22 @@ defmodule Temporalex.Core.Executor do
           }
         )
     end
+  catch
+    :exit, reason ->
+      runtime_abort(
+        state,
+        %RuntimeError{
+          message: "failed to trace workflow thread #{inspect(thread.id)}: #{inspect(reason)}"
+        }
+      )
   end
 
   defp untrace_all(nil), do: :ok
 
   defp untrace_all(trace_guard) do
-    try do
-      TraceGuard.untrace_all(trace_guard)
-    catch
-      :exit, _reason -> :ok
-    end
+    TraceGuard.untrace_all(trace_guard)
+  catch
+    :exit, _reason -> :ok
   end
 
   defp normalize_safe_mode(value) when value in [nil, false, :off], do: :off

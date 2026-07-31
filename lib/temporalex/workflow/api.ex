@@ -26,11 +26,7 @@ defmodule Temporalex.Workflow.API do
   ]
 
   def execute_activity(type, input, opts \\ []) when is_binary(type) and is_list(input) do
-    case call(%Op.ExecuteActivity{type: type, input: input, opts: opts}) do
-      {:ok, result} -> result
-      {:cancelled, error} -> {:cancelled, error}
-      {:error, reason} -> raise_error(reason)
-    end
+    unwrap_op(%Op.ExecuteActivity{type: type, input: input, opts: opts})
   end
 
   def execute_activity!(type, input, opts \\ []) when is_binary(type) and is_list(input) do
@@ -51,7 +47,17 @@ defmodule Temporalex.Workflow.API do
   task supervisor; Temporal Core records a marker so replay is correct.
   """
   def execute_local_activity(type, input, opts \\ []) when is_binary(type) and is_list(input) do
-    call(%Op.ExecuteLocalActivity{type: type, input: input, opts: opts})
+    unwrap_op(%Op.ExecuteLocalActivity{type: type, input: input, opts: opts})
+  end
+
+  def execute_local_activity!(type, input, opts \\ [])
+      when is_binary(type) and is_list(input) do
+    case execute_local_activity(type, input, opts) do
+      {:ok, result} -> result
+      {:error, reason} -> raise_error(reason)
+      {:cancelled, error} -> raise cancellation_error(error)
+      other -> raise "Temporalex local activity returned invalid result: #{inspect(other)}"
+    end
   end
 
   @doc """
@@ -68,8 +74,8 @@ defmodule Temporalex.Workflow.API do
   - `:parent_close_policy` — `:terminate` (default), `:abandon`, `:request_cancel`
   - `:workflow_id_reuse_policy` — `:allow_duplicate` (default), `:allow_duplicate_failed_only`, `:reject_duplicate`, `:terminate_if_running`
 
-  Returns `{:ok, result}` on completion, `{:error, %Temporalex.ChildWorkflowFailure{...}}` on
-  child failure or start failure, `{:cancelled, ...}` on cancellation.
+  Returns `{:ok, result}` on completion, `{:error, %Temporalex.Failure.WorkflowExecutionError{...}}`
+  on child failure or start failure, `{:cancelled, ...}` on cancellation.
   """
   def execute_child_workflow(workflow, input, opts \\ []) when is_list(input) do
     type =
@@ -84,7 +90,7 @@ defmodule Temporalex.Workflow.API do
           inspect(workflow)
       end
 
-    call(%Op.ExecuteChildWorkflow{workflow_type: type, input: input, opts: opts})
+    unwrap_op(%Op.ExecuteChildWorkflow{workflow_type: type, input: input, opts: opts})
   end
 
   @doc """
@@ -95,7 +101,7 @@ defmodule Temporalex.Workflow.API do
   `await_child_workflow/1` for the eventual result.
 
   Returns `{:ok, %Temporalex.ChildHandle{}}` on successful start, or
-  `{:error, %Temporalex.ChildWorkflowFailure{}}` if the start fails.
+  `{:error, %Temporalex.Failure.WorkflowExecutionError{}}` if the start fails.
   """
   def start_child_workflow(workflow, input, opts \\ []) when is_list(input) do
     type =
@@ -110,7 +116,7 @@ defmodule Temporalex.Workflow.API do
           inspect(workflow)
       end
 
-    call(%Op.StartChildWorkflow{workflow_type: type, input: input, opts: opts})
+    unwrap_op(%Op.StartChildWorkflow{workflow_type: type, input: input, opts: opts})
   end
 
   @doc """
@@ -123,7 +129,7 @@ defmodule Temporalex.Workflow.API do
   reaches a terminal state.
   """
   def await_child_workflow(%Temporalex.ChildHandle{seq: seq}) do
-    call(%Op.AwaitChildWorkflow{seq: seq})
+    unwrap_op(%Op.AwaitChildWorkflow{seq: seq})
   end
 
   @doc """
@@ -143,7 +149,7 @@ defmodule Temporalex.Workflow.API do
   end
 
   def cancel_child_workflow(workflow_id, opts) when is_binary(workflow_id) do
-    call(%Op.CancelChildWorkflow{workflow_id: workflow_id, opts: opts})
+    unwrap_op(%Op.CancelChildWorkflow{workflow_id: workflow_id, opts: opts})
   end
 
   @doc """
@@ -153,7 +159,7 @@ defmodule Temporalex.Workflow.API do
   `execute_child_workflow/3`. The signal is sent durably — the call
   blocks until Temporal confirms delivery (or fails).
 
-  Returns `:ok` on successful delivery, `{:error, %Temporalex.ApplicationError{}}`
+  Returns `:ok` on successful delivery, `{:error, %Temporalex.Failure.ApplicationError{}}`
   if the target workflow doesn't exist or the signal can't be delivered.
 
   This is a "fire and confirm delivery" primitive: the signal handler in
@@ -168,7 +174,7 @@ defmodule Temporalex.Workflow.API do
 
   def signal_child_workflow(workflow_id, signal_name, args, opts)
       when is_binary(workflow_id) and is_binary(signal_name) and is_list(args) do
-    call(%Op.SignalChildWorkflow{
+    unwrap_op(%Op.SignalChildWorkflow{
       workflow_id: workflow_id,
       signal_name: signal_name,
       args: args,
@@ -200,6 +206,7 @@ defmodule Temporalex.Workflow.API do
     call!(%Op.WaitForSignal{name: name})
   end
 
+  @spec continue_as_new!(term()) :: no_return()
   @spec continue_as_new!(term(), keyword()) :: no_return()
   def continue_as_new!(input, opts \\ []) when is_list(opts) do
     opts = normalize_continue_as_new_opts!(opts)
@@ -267,11 +274,7 @@ defmodule Temporalex.Workflow.API do
   end
 
   def parallel(funs) when is_list(funs) do
-    case call(%Op.Parallel{funs: funs}) do
-      {:ok, results} -> {:ok, results}
-      {:cancelled, error} -> {:cancelled, error}
-      {:error, reason} -> raise_error(reason)
-    end
+    unwrap_op(%Op.Parallel{funs: funs})
   end
 
   def parallel!(funs) when is_list(funs) do
@@ -281,7 +284,7 @@ defmodule Temporalex.Workflow.API do
   def phase(initial_state, opts) when is_list(opts) do
     case call(%Op.Phase{initial_state: initial_state, opts: opts}) do
       {:ok, {:timeout, state}} -> {:timeout, state}
-      {:ok, state} -> {:ok, state}
+      {:ok, state} -> state
       {:cancelled, error} -> {:cancelled, error}
       {:error, reason} -> raise_error(reason)
     end
@@ -381,6 +384,18 @@ defmodule Temporalex.Workflow.API do
       Keyword.update!(opts, key, fun)
     else
       opts
+    end
+  end
+
+  # Resolve an op through the executor, unwrapping the op-reply envelope:
+  # `:ok` yields the op's value (itself an activity/child result tuple),
+  # cancellation surfaces as `{:cancelled, error}`, and an op-level `:error`
+  # (executor/runtime failure, not an activity returning `{:error, _}`) raises.
+  defp unwrap_op(op) do
+    case call(op) do
+      {:ok, result} -> result
+      {:cancelled, error} -> {:cancelled, error}
+      {:error, reason} -> raise_error(reason)
     end
   end
 

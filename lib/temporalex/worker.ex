@@ -13,7 +13,8 @@ defmodule Temporalex.Worker do
   @impl Supervisor
   def init(opts) do
     worker_name = Keyword.fetch!(opts, :name)
-    Keyword.fetch!(opts, :client)
+    # Required — raises a clear KeyError if a caller omits the owning client.
+    _client = Keyword.fetch!(opts, :client)
 
     server_name = server_name(worker_name)
     executor_supervisor_name = executor_supervisor_name(worker_name)

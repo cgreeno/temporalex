@@ -25,10 +25,10 @@ defmodule Temporalex.ProtocolEdgesIntegrationTest do
         backoff_coefficient: 1.0,
         maximum_attempts: 3
       ] do
-      raise %Temporalex.ApplicationError{
+      raise %Temporalex.Failure.ApplicationError{
         message: "retryable failure",
         type: "TransientError",
-        non_retryable: false
+        retryable?: true
       }
     end
   end
@@ -120,10 +120,10 @@ defmodule Temporalex.ProtocolEdgesIntegrationTest do
             "do_and_fail" => fn _args, state ->
               {:async,
                fn ->
-                 raise %Temporalex.ApplicationError{
+                 raise %Temporalex.Failure.ApplicationError{
                    message: "post-accept failure",
                    type: "PostAcceptFail",
-                   non_retryable: true
+                   retryable?: false
                  }
                end, state}
             end
@@ -213,10 +213,10 @@ defmodule Temporalex.ProtocolEdgesIntegrationTest do
 
       # After 3 retries, the activity failure surfaces. Workflow catches it
       # and completes with the captured failure.
-      assert {:ok, {:failed_after_retries, %Temporalex.ActivityFailure{} = failure}} =
+      assert {:ok, {:failed_after_retries, %Temporalex.Failure.ActivityError{} = failure}} =
                Temporalex.Client.get_result(handle, timeout: 30_000)
 
-      assert %Temporalex.ApplicationError{type: "TransientError"} = failure.cause
+      assert %Temporalex.Failure.ApplicationError{type: "TransientError"} = failure.cause
     end
   end
 

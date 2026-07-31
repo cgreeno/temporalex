@@ -46,7 +46,8 @@ defmodule Temporalex.Backend.TemporalCore do
       :namespace,
       :task_queue,
       :start_timeout,
-      :shutdown_timeout
+      :shutdown_timeout,
+      payload_codec: :etf
     ]
   end
 
@@ -121,7 +122,8 @@ defmodule Temporalex.Backend.TemporalCore do
          namespace: client_state.namespace,
          task_queue: task_queue,
          start_timeout: start_timeout,
-         shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @default_shutdown_timeout)
+         shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @default_shutdown_timeout),
+         payload_codec: client_state.payload_codec
        }}
     else
       {:error, reason} ->
@@ -141,7 +143,7 @@ defmodule Temporalex.Backend.TemporalCore do
   end
 
   @impl Temporalex.Backend
-def complete_activity_task(%WorkerState{} = state, %ActivityCompletion{} = completion) do
+  def complete_activity_task(%WorkerState{} = state, %ActivityCompletion{} = completion) do
     with {:ok, bytes} <-
            Codec.activity_completion_to_bytes(completion, payload_codec: state.payload_codec) do
       Native.complete_activity_task(state.worker, bytes, state.owner_pid)
@@ -165,15 +167,16 @@ def complete_activity_task(%WorkerState{} = state, %ActivityCompletion{} = compl
   def shutdown_worker(%WorkerState{} = state) do
     Native.initiate_shutdown(state.worker)
 
-    with :ok <- Native.shutdown_worker(state.worker, self()) do
-      case await_shutdown(state.shutdown_timeout) do
-        :ok ->
-          :ok
+    case Native.shutdown_worker(state.worker, self()) do
+      :ok ->
+        case await_shutdown(state.shutdown_timeout) do
+          :ok ->
+            :ok
 
-        {:error, reason} ->
-          {:error, Error.normalize_client_reason(reason, operation: :shutdown_worker)}
-      end
-    else
+          {:error, reason} ->
+            {:error, Error.normalize_client_reason(reason, operation: :shutdown_worker)}
+        end
+
       {:error, reason} ->
         {:error, Error.normalize_client_reason(reason, operation: :shutdown_worker)}
     end

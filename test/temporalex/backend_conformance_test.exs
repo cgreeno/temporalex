@@ -62,10 +62,10 @@ defmodule Temporalex.BackendConformanceTest do
       task_token: "token",
       result:
         {:error,
-         %Temporalex.ApplicationError{
+         %Temporalex.Failure.ApplicationError{
            message: "unknown activity type: missing",
            type: "UnknownActivityType",
-           non_retryable: true,
+           retryable?: false,
            details: "missing"
          }}
     }
@@ -143,7 +143,7 @@ defmodule Temporalex.BackendConformanceTest do
       )
 
     assert {:ok, workflow_bytes} =
-             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+             Codec.workflow_completion_to_bytes(
                %Completion{
                  run_id: "run-structured-failure-codec",
                  status:
@@ -172,7 +172,7 @@ defmodule Temporalex.BackendConformanceTest do
     }
 
     assert {:ok, activity_failure_workflow_bytes} =
-             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+             Codec.workflow_completion_to_bytes(
                %Completion{
                  run_id: "run-activity-failure-codec",
                  status: {:ok, [%Command.FailWorkflow{reason: activity_failure}]}
@@ -184,9 +184,10 @@ defmodule Temporalex.BackendConformanceTest do
     assert byte_size(activity_failure_workflow_bytes) > 0
 
     assert {:ok, activity_bytes} =
-             Temporalex.Backend.TemporalCore.Codec.activity_completion_to_bytes(
-               %ActivityCompletion{task_token: <<1, 2, 3>>, result: {:error, failure}}
-             )
+             Codec.activity_completion_to_bytes(%ActivityCompletion{
+               task_token: <<1, 2, 3>>,
+               result: {:error, failure}
+             })
 
     assert is_binary(activity_bytes)
     assert byte_size(activity_bytes) > 0
@@ -230,7 +231,7 @@ defmodule Temporalex.BackendConformanceTest do
     assert activity_reason =~ "retry_policy.initial_interval must be non-negative"
 
     assert {:error, backoff_reason} =
-             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+             Codec.workflow_completion_to_bytes(
                %Completion{
                  run_id: "run-invalid-backoff",
                  status:
@@ -255,7 +256,7 @@ defmodule Temporalex.BackendConformanceTest do
     assert backoff_reason =~ "retry_policy.backoff_coefficient must be 1.0 or larger"
 
     assert {:error, zero_backoff_reason} =
-             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+             Codec.workflow_completion_to_bytes(
                %Completion{
                  run_id: "run-invalid-zero-backoff",
                  status:
@@ -280,7 +281,7 @@ defmodule Temporalex.BackendConformanceTest do
     assert zero_backoff_reason =~ "retry_policy.backoff_coefficient must be 1.0 or larger"
 
     assert {:error, continue_reason} =
-             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+             Codec.workflow_completion_to_bytes(
                %Completion{
                  run_id: "run-invalid-continue-as-new",
                  status:
@@ -301,7 +302,7 @@ defmodule Temporalex.BackendConformanceTest do
 
   test "TemporalCore codec rejects invalid search attribute values" do
     assert {:error, reason} =
-             Temporalex.Backend.TemporalCore.Codec.workflow_completion_to_bytes(
+             Codec.workflow_completion_to_bytes(
                %Completion{
                  run_id: "run-invalid-search-attrs",
                  status:

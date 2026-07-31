@@ -2,7 +2,7 @@ defmodule Temporalex.ChildWorkflowIntegrationTest do
   @moduledoc """
   Verifies `API.execute_child_workflow/3` against a live Temporal dev server:
   parent starts child, blocks until result, surfaces failures as
-  `%Temporalex.ChildWorkflowFailure{}` with the cause preserved.
+  `%Temporalex.Failure.WorkflowExecutionError{}` with the cause preserved.
 
   Connects to a Temporal dev server at 127.0.0.1:7233. Skipped by
   default; run with `mix test --include external`.
@@ -18,10 +18,10 @@ defmodule Temporalex.ChildWorkflowIntegrationTest do
     def run({:succeed, value}), do: {:ok, {:child_value, value}}
 
     def run({:fail, type, message}) do
-      raise %Temporalex.ApplicationError{
+      raise %Temporalex.Failure.ApplicationError{
         message: message,
         type: type,
-        non_retryable: true
+        retryable?: false
       }
     end
   end
@@ -109,11 +109,11 @@ defmodule Temporalex.ChildWorkflowIntegrationTest do
     assert {:ok, {:got_failure, failure}} =
              Temporalex.Client.get_result(handle, timeout: 30_000)
 
-    assert %Temporalex.ChildWorkflowFailure{cause: cause} = failure
-    assert %Temporalex.ApplicationError{} = cause
+    assert %Temporalex.Failure.WorkflowExecutionError{cause: cause} = failure
+    assert %Temporalex.Failure.ApplicationError{} = cause
     assert cause.type == "BadInput"
     assert cause.message == "child rejected"
-    assert cause.non_retryable == true
+    assert cause.retryable? == false
   end
 
   defp temporal_available? do

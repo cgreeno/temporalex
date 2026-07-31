@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — breaking
+
+### Failure vocabulary unified on `Temporalex.Failure.*`
+
+The legacy `Temporalex.*` failure structs are removed in favour of the
+structured failure model under `Temporalex.Failure.*` (the vocabulary the
+Rust NIF encodes and decodes). Migration map:
+
+| Removed (`Temporalex.*`)      | Replacement (`Temporalex.Failure.*`) | Field change              |
+| ----------------------------- | ------------------------------------ | ------------------------- |
+| `ApplicationError`            | `Failure.ApplicationError`           | `non_retryable: b` → `retryable?: not b` |
+| `CancelledError`              | `Failure.CancelledError`             | —                         |
+| `TimeoutError`                | `Failure.TimeoutError`               | —                         |
+| `ActivityFailure`             | `Failure.ActivityError`              | —                         |
+| `ChildWorkflowFailure`        | `Failure.WorkflowExecutionError`     | —                         |
+
+`Temporalex.NondeterminismError` is retained (no `Failure.*` equivalent).
+Activity/workflow code that raised or matched the old structs must switch to
+the `Failure.*` structs; `retryable?: false` replaces `non_retryable: true`.
+`Failure` details are a list of detail payloads (use `Failure.application/2`,
+which `List.wrap`s them).
+
 ## 0.3.2
 
 ### Non-blocking child workflows + cancel

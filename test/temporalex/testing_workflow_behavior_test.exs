@@ -63,18 +63,16 @@ defmodule Temporalex.TestingWorkflowBehaviorTest do
 
     def run(_) do
       try do
-        try do
-          API.sleep!(60_000)
-          {:ok, :slept}
-        rescue
-          _error in CancelledError ->
-            API.sleep!(1)
-            {:ok, :cleanup_completed}
-        end
+        API.sleep!(60_000)
+        {:ok, :slept}
       rescue
-        error in CancelledError ->
-          {:ok, {:cleanup_blocked, error.message}}
+        _error in CancelledError ->
+          API.sleep!(1)
+          {:ok, :cleanup_completed}
       end
+    rescue
+      error in CancelledError ->
+        {:ok, {:cleanup_blocked, error.message}}
     end
   end
 
@@ -82,15 +80,13 @@ defmodule Temporalex.TestingWorkflowBehaviorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        API.execute_activity!("#{inspect(Activities)}.echo", [:work],
-          cancellation_type: :wait_cancellation_completed
-        )
+      API.execute_activity!("#{inspect(Activities)}.echo", [:work],
+        cancellation_type: :wait_cancellation_completed
+      )
 
-        {:ok, :activity_completed}
-      rescue
-        error in CancelledError -> {:cancelled, error}
-      end
+      {:ok, :activity_completed}
+    rescue
+      error in CancelledError -> {:cancelled, error}
     end
   end
 
@@ -98,15 +94,13 @@ defmodule Temporalex.TestingWorkflowBehaviorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        API.execute_activity!("#{inspect(Activities)}.echo", [:work],
-          cancellation_type: :try_cancel
-        )
+      API.execute_activity!("#{inspect(Activities)}.echo", [:work],
+        cancellation_type: :try_cancel
+      )
 
-        {:ok, :activity_completed}
-      rescue
-        error in CancelledError -> {:cancelled, error}
-      end
+      {:ok, :activity_completed}
+    rescue
+      error in CancelledError -> {:cancelled, error}
     end
   end
 
@@ -114,13 +108,11 @@ defmodule Temporalex.TestingWorkflowBehaviorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        API.execute_activity!("#{inspect(Activities)}.echo", [:work], cancellation_type: :abandon)
+      API.execute_activity!("#{inspect(Activities)}.echo", [:work], cancellation_type: :abandon)
 
-        {:ok, :activity_completed}
-      rescue
-        error in CancelledError -> {:cancelled, error}
-      end
+      {:ok, :activity_completed}
+    rescue
+      error in CancelledError -> {:cancelled, error}
     end
   end
 
@@ -128,22 +120,20 @@ defmodule Temporalex.TestingWorkflowBehaviorTest do
     use Temporalex.Workflow
 
     def run(_) do
-      try do
-        API.parallel!([
-          fn ->
-            API.sleep!(10_000)
-            :a
-          end,
-          fn ->
-            API.sleep!(20_000)
-            :b
-          end
-        ])
+      API.parallel!([
+        fn ->
+          API.sleep!(10_000)
+          :a
+        end,
+        fn ->
+          API.sleep!(20_000)
+          :b
+        end
+      ])
 
-        {:ok, :parallel_completed}
-      rescue
-        error in CancelledError -> {:cancelled, error}
-      end
+      {:ok, :parallel_completed}
+    rescue
+      error in CancelledError -> {:cancelled, error}
     end
   end
 

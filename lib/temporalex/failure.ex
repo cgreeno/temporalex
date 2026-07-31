@@ -107,6 +107,8 @@ defmodule Temporalex.Failure do
   end
 
   @doc "Raise an application failure."
+  @spec application!(term()) :: no_return()
+  @spec application!(term(), keyword()) :: no_return()
   def application!(message, opts \\ []) do
     raise application(message, opts)
   end

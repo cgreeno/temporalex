@@ -413,19 +413,19 @@ defmodule Temporalex.Core.TraceGuard do
   end
 
   defp exported_mfas(modules) do
-    modules
-    |> Enum.flat_map(fn module ->
-      case Code.ensure_loaded(module) do
-        {:module, ^module} ->
-          module
-          |> apply(:module_info, [:exports])
-          |> Enum.reject(fn {function, _arity} -> function == :module_info end)
-          |> Enum.map(fn {function, arity} -> {module, function, arity} end)
+    Enum.flat_map(modules, &module_exports/1)
+  end
 
-        _ ->
-          []
-      end
-    end)
+  defp module_exports(module) do
+    case Code.ensure_loaded(module) do
+      {:module, ^module} ->
+        module.module_info(:exports)
+        |> Enum.reject(fn {function, _arity} -> function == :module_info end)
+        |> Enum.map(fn {function, arity} -> {module, function, arity} end)
+
+      _ ->
+        []
+    end
   end
 
   defp preload_runtime_modules do

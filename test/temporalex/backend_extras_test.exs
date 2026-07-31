@@ -241,11 +241,11 @@ defmodule Temporalex.BackendExtrasTest do
                  task_token: <<1, 2, 3>>,
                  result:
                    {:error,
-                    %Temporalex.ApplicationError{
+                    %Temporalex.Failure.ApplicationError{
                       message: "bad input",
                       type: "InvalidInput",
-                      non_retryable: true,
-                      details: %{field: "amount"}
+                      retryable?: false,
+                      details: [%{field: "amount"}]
                     }}
                })
 
@@ -256,7 +256,8 @@ defmodule Temporalex.BackendExtrasTest do
       assert {:ok, bytes} =
                Codec.activity_completion_to_bytes(%ActivityCompletion{
                  task_token: <<4, 5, 6>>,
-                 result: {:cancelled, %Temporalex.CancelledError{message: "user cancelled"}}
+                 result:
+                   {:cancelled, %Temporalex.Failure.CancelledError{message: "user cancelled"}}
                })
 
       assert is_binary(bytes) and byte_size(bytes) > 0
@@ -268,7 +269,7 @@ defmodule Temporalex.BackendExtrasTest do
                  task_token: <<7, 8, 9>>,
                  result:
                    {:error,
-                    %Temporalex.TimeoutError{
+                    %Temporalex.Failure.TimeoutError{
                       message: "took too long",
                       timeout_type: :start_to_close
                     }}
@@ -282,7 +283,8 @@ defmodule Temporalex.BackendExtrasTest do
         assert {:ok, _bytes} =
                  Codec.activity_completion_to_bytes(%ActivityCompletion{
                    task_token: <<0>>,
-                   result: {:error, %Temporalex.TimeoutError{message: "to", timeout_type: tt}}
+                   result:
+                     {:error, %Temporalex.Failure.TimeoutError{message: "to", timeout_type: tt}}
                  }),
                "failed for timeout_type=#{tt}"
       end
@@ -361,10 +363,10 @@ defmodule Temporalex.BackendExtrasTest do
                      {:ok,
                       [
                         %Command.FailWorkflow{
-                          reason: %Temporalex.ApplicationError{
+                          reason: %Temporalex.Failure.ApplicationError{
                             message: "boom",
                             type: "TestFailure",
-                            non_retryable: true
+                            retryable?: false
                           }
                         }
                       ]}

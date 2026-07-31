@@ -19,10 +19,10 @@ defmodule Temporalex.StructuredErrorsIntegrationTest do
     defactivity raise_application_error(message, type),
       start_to_close_timeout: 5_000,
       retry_policy: [maximum_attempts: 1] do
-      raise %Temporalex.ApplicationError{
+      raise %Temporalex.Failure.ApplicationError{
         message: message,
         type: type,
-        non_retryable: true,
+        retryable?: false,
         details: %{shopper_id: "S-001"}
       }
     end
@@ -113,11 +113,11 @@ defmodule Temporalex.StructuredErrorsIntegrationTest do
     assert {:ok, {:got_failure, failure}} =
              Temporalex.Client.get_result(handle, timeout: 15_000)
 
-    assert %Temporalex.ActivityFailure{cause: cause} = failure
-    assert %Temporalex.ApplicationError{} = cause
+    assert %Temporalex.Failure.ActivityError{cause: cause} = failure
+    assert %Temporalex.Failure.ApplicationError{} = cause
     assert cause.type == "InvalidSku"
     assert cause.message == "invalid sku"
-    assert cause.non_retryable == true
+    assert cause.retryable? == false
   end
 
   test "Bare {:error, reason} from activity wraps into ApplicationError with the reason as details",
@@ -136,8 +136,8 @@ defmodule Temporalex.StructuredErrorsIntegrationTest do
     assert {:ok, {:got_failure, failure}} =
              Temporalex.Client.get_result(handle, timeout: 15_000)
 
-    assert %Temporalex.ActivityFailure{cause: cause} = failure
-    assert %Temporalex.ApplicationError{} = cause
+    assert %Temporalex.Failure.ActivityError{cause: cause} = failure
+    assert %Temporalex.Failure.ApplicationError{} = cause
     assert cause.type == "ApplicationError"
     # message reflects the inspected reason
     assert cause.message == ":insufficient_funds"
@@ -159,8 +159,8 @@ defmodule Temporalex.StructuredErrorsIntegrationTest do
     assert {:ok, {:got_failure, failure}} =
              Temporalex.Client.get_result(handle, timeout: 15_000)
 
-    assert %Temporalex.ActivityFailure{cause: cause} = failure
-    assert %Temporalex.ApplicationError{} = cause
+    assert %Temporalex.Failure.ActivityError{cause: cause} = failure
+    assert %Temporalex.Failure.ApplicationError{} = cause
     assert cause.type == "RuntimeError"
     assert cause.message == "boom"
   end
