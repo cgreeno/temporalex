@@ -13,6 +13,9 @@ defmodule Temporalex.Worker do
   @impl Supervisor
   def init(opts) do
     worker_name = Keyword.fetch!(opts, :name)
+    # Required — raises a clear KeyError if a caller omits the owning client.
+    _client = Keyword.fetch!(opts, :client)
+
     server_name = server_name(worker_name)
     executor_supervisor_name = executor_supervisor_name(worker_name)
     activity_supervisor_name = activity_supervisor_name(worker_name)
@@ -29,7 +32,7 @@ defmodule Temporalex.Worker do
       {Temporalex.Server, server_opts}
     ]
 
-    Supervisor.init(children, strategy: :rest_for_one)
+    Supervisor.init(children, strategy: :one_for_all)
   end
 
   def server_name(worker_name), do: Module.concat(worker_name, Server)

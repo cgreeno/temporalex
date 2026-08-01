@@ -74,7 +74,10 @@ defmodule Temporalex.CliDrivenIntegrationTest do
     def handle_query("got", _args, state), do: {:reply, state}
 
     def run(input) do
-      API.publish_state({:got_input, input})
+      # Publish the decoded input directly. Query results round-trip through
+      # the JSON codec, which has no lossless tuple representation, so we
+      # observe the decoded map itself rather than a tagged tuple.
+      API.publish_state(input)
       :ok = API.sleep(60_000)
       {:ok, input}
     end
@@ -90,28 +93,39 @@ defmodule Temporalex.CliDrivenIntegrationTest do
     end
 
     worker_name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client_name = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
     task_queue = "cli-driven-#{System.unique_integer([:positive])}"
+
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: "http://127.0.0.1:7233",
+        namespace: "default",
+        task_queue: task_queue,
+        payload_codec: :json
+      )
 
     {:ok, worker_pid} =
       Temporalex.Worker.start_link(
         name: worker_name,
-        backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
-        namespace: "default",
+        client: client_name,
         task_queue: task_queue,
         workflows: [SleepingWorkflow, SignalWaitingWorkflow, JsonInputWorkflow],
         activities: []
       )
 
     on_exit(fn ->
-      try do
-        if Process.alive?(worker_pid), do: Supervisor.stop(worker_pid, :normal, 5_000)
-      catch
-        :exit, _ -> :ok
+      for pid <- [worker_pid, client_pid] do
+        try do
+          if Process.alive?(pid), do: Supervisor.stop(pid, :normal, 5_000)
+        catch
+          :exit, _ -> :ok
+        end
       end
     end)
 
-    {:ok, worker: worker_name, task_queue: task_queue}
+    {:ok, client: client_name, worker: worker_name, task_queue: task_queue}
   end
 
   test "CLI starts a workflow on our worker's task queue", %{task_queue: tq} do
@@ -241,7 +255,7 @@ defmodule Temporalex.CliDrivenIntegrationTest do
   end
 
   test "CLI starts a workflow with a JSON input; worker decodes it via payload metadata",
-       %{worker: worker, task_queue: tq} do
+       %{client: client, task_queue: tq} do
     # The temporal CLI's --input sends a JSON-encoded payload with
     # encoding metadata "json/plain". Our worker's payload_to_term
     # auto-detects this and decodes it to an Elixir term.
@@ -264,7 +278,7 @@ defmodule Temporalex.CliDrivenIntegrationTest do
     assert exit_code == 0, "CLI start failed: #{output}"
 
     handle = %Temporalex.Client.Handle{
-      worker: worker,
+      client: client,
       workflow_id: workflow_id,
       run_id: nil,
       workflow_type: JsonInputWorkflow.__workflow_type__()
@@ -274,7 +288,7 @@ defmodule Temporalex.CliDrivenIntegrationTest do
     assert eventually(
              fn ->
                case Temporalex.Client.query_workflow(handle, "got", [], timeout: 2_000) do
-                 {:ok, {:got_input, decoded}} ->
+                 {:ok, decoded} ->
                    decoded == %{"order_id" => 42, "items" => ["a", "b"]}
 
                  _ ->

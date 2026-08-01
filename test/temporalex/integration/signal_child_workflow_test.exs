@@ -21,7 +21,7 @@ defmodule Temporalex.SignalChildWorkflowIntegrationTest do
     alias Temporalex.Workflow.API
 
     def run(_) do
-      payload = API.wait_for_signal("go")
+      payload = API.wait_for_signal!("go")
       {:ok, {:received, payload}}
     end
   end
@@ -173,14 +173,22 @@ defmodule Temporalex.SignalChildWorkflowIntegrationTest do
     end
 
     worker_name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client_name = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
     task_queue = "signal-child-#{System.unique_integer([:positive])}"
+
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: "http://127.0.0.1:7233",
+        namespace: "default",
+        task_queue: task_queue
+      )
 
     {:ok, worker_pid} =
       Temporalex.Worker.start_link(
         name: worker_name,
-        backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
-        namespace: "default",
+        client: client_name,
         task_queue: task_queue,
         workflows: [
           SignalReceiver,
@@ -196,12 +204,13 @@ defmodule Temporalex.SignalChildWorkflowIntegrationTest do
     on_exit(fn ->
       try do
         if Process.alive?(worker_pid), do: Supervisor.stop(worker_pid, :normal, 5_000)
+        if Process.alive?(client_pid), do: GenServer.stop(client_pid, :normal, 5_000)
       catch
         :exit, _ -> :ok
       end
     end)
 
-    {:ok, worker: worker_name}
+    {:ok, client: client_name, worker: worker_name}
   end
 
   defp temporal_available? do
@@ -215,11 +224,11 @@ defmodule Temporalex.SignalChildWorkflowIntegrationTest do
     end
   end
 
-  test "parent signals running child and child consumes signal", %{worker: worker} do
+  test "parent signals running child and child consumes signal", %{client: client} do
     workflow_id = "scwfp-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, SignalingParent, :hello,
+      Temporalex.Client.start_workflow(client, SignalingParent, :hello,
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -229,12 +238,12 @@ defmodule Temporalex.SignalChildWorkflowIntegrationTest do
   end
 
   test "parent sends multiple signals in order; child accumulates and returns them", %{
-    worker: worker
+    client: client
   } do
     workflow_id = "msc-parent-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, MultiSignalingParent, nil,
+      Temporalex.Client.start_workflow(client, MultiSignalingParent, nil,
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -247,11 +256,11 @@ defmodule Temporalex.SignalChildWorkflowIntegrationTest do
     assert accumulated == [[:first], [:second], [:third]]
   end
 
-  test "rich Elixir term as signal payload round-trips through Temporal intact", %{worker: worker} do
+  test "rich Elixir term as signal payload round-trips through Temporal intact", %{client: client} do
     workflow_id = "rpc-parent-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, RichPayloadParent, nil,
+      Temporalex.Client.start_workflow(client, RichPayloadParent, nil,
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -269,12 +278,12 @@ defmodule Temporalex.SignalChildWorkflowIntegrationTest do
   end
 
   test "signal to a nonexistent child surfaces a delivery failure to the parent", %{
-    worker: worker
+    client: client
   } do
     workflow_id = "snp-parent-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, SignalNonexistentParent, nil,
+      Temporalex.Client.start_workflow(client, SignalNonexistentParent, nil,
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -284,6 +293,6 @@ defmodule Temporalex.SignalChildWorkflowIntegrationTest do
     assert {:ok, result} =
              Temporalex.Client.get_result(handle, timeout: 30_000)
 
-    assert {:error, %Temporalex.ApplicationError{}} = result
+    assert {:error, %Temporalex.Failure.ApplicationError{}} = result
   end
 end

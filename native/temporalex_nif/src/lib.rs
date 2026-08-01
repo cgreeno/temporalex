@@ -4,6 +4,7 @@ use rustler::types::elixir_struct::{get_ex_struct_name, make_ex_struct};
 use rustler::types::list::ListIterator;
 use rustler::{Atom, Binary, Env, LocalPid, MapIterator, Monitor, NewBinary, OwnedEnv};
 use rustler::{Decoder, Encoder, Resource, ResourceArc, Term};
+use serde_json::{Number as JsonNumber, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use temporalio_client::{
@@ -12,7 +13,10 @@ use temporalio_client::{
     WorkflowExecuteUpdateOptions, WorkflowExecutionDescription, WorkflowExecutionInfo,
     WorkflowGetResultOptions, WorkflowHandle, WorkflowQueryOptions, WorkflowSignalOptions,
     WorkflowStartOptions, WorkflowTerminateOptions,
-    errors::{WorkflowGetResultError, WorkflowQueryError, WorkflowStartError, WorkflowUpdateError},
+    errors::{
+        WorkflowGetResultError, WorkflowInteractionError, WorkflowQueryError, WorkflowStartError,
+        WorkflowUpdateError,
+    },
 };
 use temporalio_common::data_converters::RawValue;
 use temporalio_common::protos::coresdk::activity_result::{
@@ -20,6 +24,7 @@ use temporalio_common::protos::coresdk::activity_result::{
     Success as ActivitySuccess, activity_execution_result, activity_resolution,
 };
 use temporalio_common::protos::coresdk::activity_task::{ActivityTask, activity_task};
+use temporalio_common::protos::coresdk::common::VersioningIntent;
 use temporalio_common::protos::coresdk::workflow_activation::{
     WorkflowActivation, WorkflowActivationJob, remove_from_cache::EvictionReason,
     workflow_activation_job,
@@ -29,10 +34,11 @@ use temporalio_common::protos::coresdk::common::NamespacedWorkflowExecution;
 use temporalio_common::protos::coresdk::workflow_commands::{
     ActivityCancellationType, CancelTimer, CancelWorkflowExecution, CompleteWorkflowExecution,
     ContinueAsNewWorkflowExecution, FailWorkflowExecution, QueryResult, QuerySuccess,
-    RequestCancelExternalWorkflowExecution, ScheduleActivity, ScheduleLocalActivity,
-    SetPatchMarker, SignalExternalWorkflowExecution, StartChildWorkflowExecution, StartTimer,
-    UpdateResponse, UpsertWorkflowSearchAttributes, WorkflowCommand, query_result,
-    signal_external_workflow_execution, update_response, workflow_command,
+    RequestCancelActivity, RequestCancelExternalWorkflowExecution, ScheduleActivity,
+    ScheduleLocalActivity, SetPatchMarker, SignalExternalWorkflowExecution,
+    StartChildWorkflowExecution, StartTimer, UpdateResponse, UpsertWorkflowSearchAttributes,
+    WorkflowCommand, query_result, signal_external_workflow_execution, update_response,
+    workflow_command,
 };
 use temporalio_common::protos::coresdk::workflow_completion::{
     Failure as WorkflowCompletionFailure, Success as WorkflowCompletionSuccess,
@@ -40,15 +46,17 @@ use temporalio_common::protos::coresdk::workflow_completion::{
 };
 use temporalio_common::protos::coresdk::{ActivityHeartbeat, ActivityTaskCompletion};
 use temporalio_common::protos::temporal::api::common::v1::{
-    Header, Payload, Payloads, RetryPolicy, SearchAttributes,
+    ActivityType, Header, Payload, Payloads, RetryPolicy, SearchAttributes, WorkflowExecution,
+    WorkflowType,
 };
 use temporalio_common::protos::temporal::api::enums::v1::{
+    ContinueAsNewVersioningBehavior, QueryRejectCondition, RetryState, TimeoutType,
     VersioningBehavior, WorkflowExecutionStatus, WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
     WorkflowTaskFailedCause,
 };
-use temporalio_common::protos::temporal::api::enums::v1::TimeoutType;
 use temporalio_common::protos::temporal::api::failure::v1::{
-    ApplicationFailureInfo, CanceledFailureInfo, Failure, TimeoutFailureInfo, failure,
+    ActivityFailureInfo, ApplicationFailureInfo, CanceledFailureInfo,
+    ChildWorkflowExecutionFailureInfo, Failure, TimeoutFailureInfo, failure,
 };
 use temporalio_common::worker::WorkerTaskTypes;
 use temporalio_sdk_core::{
@@ -111,6 +119,7 @@ rustler::atoms! {
     workflow_id,
     arguments,
     headers,
+    memo,
     attrs,
     workflow_info,
     randomness_seed,
@@ -139,8 +148,16 @@ rustler::atoms! {
     variant,
     cancel_reason,
     source,
+    stack_trace,
+    cause,
     details,
     type_atom = "type",
+    value,
+    retryable_question = "retryable?",
+    timeout_type,
+    last_heartbeat_details,
+    retry_state,
+    failure_type,
     force_cause,
     timeout,
     start_to_close_timeout,
@@ -154,6 +171,7 @@ rustler::atoms! {
     signal,
     query,
     update,
+    exception,
     workflow_signalled,
     workflow_queried,
     workflow_updated,
@@ -165,8 +183,31 @@ rustler::atoms! {
     continued_as_new,
     running,
     paused,
+    in_progress,
+    non_retryable_failure,
+    maximum_attempts_reached,
+    retry_policy_not_set,
+    internal_server_error,
+    cancel_requested,
+    start_to_close,
+    schedule_to_start,
+    schedule_to_close,
+    heartbeat,
+    activity_failure,
+    child_workflow_failure,
+    timeout_failure,
+    cancelled_failure,
+    terminated_failure,
+    server_failure,
+    reset_workflow_failure,
+    nexus_operation_failure,
+    nexus_handler_failure,
+    unknown_failure,
     already_started,
     not_found,
+    payload_conversion,
+    invalid_options,
+    rpc,
     execution_timeout,
     workflow_execution_timeout,
     run_timeout,
@@ -180,6 +221,8 @@ rustler::atoms! {
     workflow_id_reuse_policy,
     id_conflict_policy,
     workflow_id_conflict_policy,
+    query_reject_condition,
+    reject_condition,
     request_id,
     update_id,
     initial_interval,
@@ -191,6 +234,13 @@ rustler::atoms! {
     try_cancel,
     wait_cancellation_completed,
     abandon,
+    bool_atom = "bool",
+    datetime,
+    double,
+    int,
+    keyword,
+    keyword_list,
+    text,
     allow_duplicate,
     allow_duplicate_failed_only,
     reject_duplicate,
@@ -198,19 +248,21 @@ rustler::atoms! {
     fail,
     use_existing,
     terminate_existing,
+    none,
+    not_open,
+    not_completed_cleanly,
     static_summary,
     static_details,
+    versioning_intent,
+    compatible,
+    default_atom = "default",
+    initial_versioning_behavior,
+    auto_upgrade,
+    use_ramping_version,
     start_time_ms,
     execution_time_ms,
     close_time_ms,
     non_retryable,
-    timeout_type,
-    cause,
-    retry_state,
-    heartbeat,
-    start_to_close,
-    schedule_to_close,
-    schedule_to_start,
     succeeded,
     request_cancel,
     parent_close_policy,
@@ -757,7 +809,13 @@ fn start_workflow<'a>(
     let start_options = match workflow_start_options(task_queue, workflow_id.clone(), opts) {
         Ok(options) => options,
         Err(err) => {
-            send_immediate_ref_error(env, reference, &pid, workflow_started(), format!("{err:#}"));
+            send_immediate_ref_error(
+                env,
+                reference,
+                &pid,
+                workflow_started(),
+                error_reason(env, invalid_options(), format!("{err:#}")),
+            );
             return ok();
         }
     };
@@ -839,7 +897,11 @@ fn get_workflow_result(
                 Ok(payloads) => match payloads.into_iter().next() {
                     Some(payload) => match payload_to_term(env, &payload) {
                         Ok(term) => (ok(), term).encode(env),
-                        Err(err) => (error(), format!("{err:#}")).encode(env),
+                        Err(err) => (
+                            error(),
+                            error_reason(env, payload_conversion(), format!("{err:#}")),
+                        )
+                            .encode(env),
                     },
                     None => (ok(), nil()).encode(env),
                 },
@@ -872,7 +934,7 @@ fn signal_workflow<'a>(
                 reference,
                 &pid,
                 workflow_signalled(),
-                format!("{err:#}"),
+                error_reason(env, payload_conversion(), format!("{err:#}")),
             );
             return ok();
         }
@@ -885,7 +947,7 @@ fn signal_workflow<'a>(
                 reference,
                 &pid,
                 workflow_signalled(),
-                format!("{err:#}"),
+                error_reason(env, invalid_options(), format!("{err:#}")),
             );
             return ok();
         }
@@ -897,14 +959,16 @@ fn signal_workflow<'a>(
 
     handle.spawn(async move {
         let result = async {
-            let wf = untyped_handle(connection, namespace, workflow_id, run_id)?;
+            let wf = untyped_handle(connection, namespace, workflow_id, run_id)
+                .map_err(WorkflowInteractionResult::Other)?;
             wf.signal(
                 UntypedSignal::<UntypedWorkflow>::new(signal_name),
                 RawValue::new(payloads),
                 options,
             )
-            .await?;
-            Ok::<_, anyhow::Error>(())
+            .await
+            .map_err(WorkflowInteractionResult::Interaction)?;
+            Ok::<_, WorkflowInteractionResult>(())
         }
         .await;
 
@@ -915,7 +979,7 @@ fn signal_workflow<'a>(
             workflow_signalled(),
             |env| match result {
                 Ok(()) => (ok(), ok()).encode(env),
-                Err(err) => (error(), format!("{err:#}")).encode(env),
+                Err(err) => (error(), workflow_interaction_error_to_term(env, err)).encode(env),
             },
         );
     });
@@ -939,14 +1003,26 @@ fn query_workflow<'a>(
     let payloads = match terms_list_to_payloads(args_term) {
         Ok(payloads) => payloads,
         Err(err) => {
-            send_immediate_ref_error(env, reference, &pid, workflow_queried(), format!("{err:#}"));
+            send_immediate_ref_error(
+                env,
+                reference,
+                &pid,
+                workflow_queried(),
+                error_reason(env, payload_conversion(), format!("{err:#}")),
+            );
             return ok();
         }
     };
     let options = match query_options(opts) {
         Ok(options) => options,
         Err(err) => {
-            send_immediate_ref_error(env, reference, &pid, workflow_queried(), format!("{err:#}"));
+            send_immediate_ref_error(
+                env,
+                reference,
+                &pid,
+                workflow_queried(),
+                error_reason(env, invalid_options(), format!("{err:#}")),
+            );
             return ok();
         }
     };
@@ -1002,14 +1078,26 @@ fn update_workflow<'a>(
     let payloads = match terms_list_to_payloads(args_term) {
         Ok(payloads) => payloads,
         Err(err) => {
-            send_immediate_ref_error(env, reference, &pid, workflow_updated(), format!("{err:#}"));
+            send_immediate_ref_error(
+                env,
+                reference,
+                &pid,
+                workflow_updated(),
+                error_reason(env, payload_conversion(), format!("{err:#}")),
+            );
             return ok();
         }
     };
     let options = match update_options(opts) {
         Ok(options) => options,
         Err(err) => {
-            send_immediate_ref_error(env, reference, &pid, workflow_updated(), format!("{err:#}"));
+            send_immediate_ref_error(
+                env,
+                reference,
+                &pid,
+                workflow_updated(),
+                error_reason(env, invalid_options(), format!("{err:#}")),
+            );
             return ok();
         }
     };
@@ -1067,12 +1155,15 @@ fn cancel_workflow(
 
     handle.spawn(async move {
         let result = async {
-            let wf = untyped_handle(connection, namespace, workflow_id, run_id)?;
+            let wf = untyped_handle(connection, namespace, workflow_id, run_id)
+                .map_err(WorkflowInteractionResult::Other)?;
             let mut options = WorkflowCancelOptions::default();
             options.reason = reason_text;
             options.request_id = request_id_text;
-            wf.cancel(options).await?;
-            Ok::<_, anyhow::Error>(())
+            wf.cancel(options)
+                .await
+                .map_err(WorkflowInteractionResult::Interaction)?;
+            Ok::<_, WorkflowInteractionResult>(())
         }
         .await;
 
@@ -1083,7 +1174,7 @@ fn cancel_workflow(
             workflow_cancelled(),
             |env| match result {
                 Ok(()) => (ok(), ok()).encode(env),
-                Err(err) => (error(), format!("{err:#}")).encode(env),
+                Err(err) => (error(), workflow_interaction_error_to_term(env, err)).encode(env),
             },
         );
     });
@@ -1116,12 +1207,15 @@ fn terminate_workflow(
 
     handle.spawn(async move {
         let result = async {
-            let wf = untyped_handle(connection, namespace, workflow_id, run_id)?;
+            let wf = untyped_handle(connection, namespace, workflow_id, run_id)
+                .map_err(WorkflowInteractionResult::Other)?;
             let mut options = WorkflowTerminateOptions::default();
             options.reason = reason_text;
             options.details = details;
-            wf.terminate(options).await?;
-            Ok::<_, anyhow::Error>(())
+            wf.terminate(options)
+                .await
+                .map_err(WorkflowInteractionResult::Interaction)?;
+            Ok::<_, WorkflowInteractionResult>(())
         }
         .await;
 
@@ -1132,7 +1226,7 @@ fn terminate_workflow(
             workflow_terminated(),
             |env| match result {
                 Ok(()) => (ok(), ok()).encode(env),
-                Err(err) => (error(), format!("{err:#}")).encode(env),
+                Err(err) => (error(), workflow_interaction_error_to_term(env, err)).encode(env),
             },
         );
     });
@@ -1156,9 +1250,13 @@ fn describe_workflow(
 
     handle.spawn(async move {
         let result = async {
-            let wf = untyped_handle(connection, namespace, workflow_id, run_id)?;
-            let description = wf.describe(WorkflowDescribeOptions::default()).await?;
-            Ok::<_, anyhow::Error>(description)
+            let wf = untyped_handle(connection, namespace, workflow_id, run_id)
+                .map_err(WorkflowInteractionResult::Other)?;
+            let description = wf
+                .describe(WorkflowDescribeOptions::default())
+                .await
+                .map_err(WorkflowInteractionResult::Interaction)?;
+            Ok::<_, WorkflowInteractionResult>(description)
         }
         .await;
 
@@ -1170,9 +1268,13 @@ fn describe_workflow(
             |env| match result {
                 Ok(description) => match workflow_description_to_term(env, &description) {
                     Ok(term) => (ok(), term).encode(env),
-                    Err(err) => (error(), format!("{err:#}")).encode(env),
+                    Err(err) => (
+                        error(),
+                        error_reason(env, payload_conversion(), format!("{err:#}")),
+                    )
+                        .encode(env),
                 },
-                Err(err) => (error(), format!("{err:#}")).encode(env),
+                Err(err) => (error(), workflow_interaction_error_to_term(env, err)).encode(env),
             },
         );
     });
@@ -1295,7 +1397,7 @@ fn send_immediate_ref_error<'a>(
     reference: Term<'a>,
     pid: &LocalPid,
     tag: Atom,
-    reason: String,
+    reason: Term<'a>,
 ) {
     let _ = env.send(pid, (tag, reference, (error(), reason)));
 }
@@ -1317,6 +1419,11 @@ enum QueryWorkflowResult {
 
 enum UpdateWorkflowResult {
     Update(WorkflowUpdateError),
+    Other(anyhow::Error),
+}
+
+enum WorkflowInteractionResult {
+    Interaction(WorkflowInteractionError),
     Other(anyhow::Error),
 }
 
@@ -1342,10 +1449,18 @@ fn payload_result_to_term<'a>(env: Env<'a>, payloads: Vec<Payload>) -> Term<'a> 
     match payloads.into_iter().next() {
         Some(payload) => match payload_to_term(env, &payload) {
             Ok(term) => (ok(), term).encode(env),
-            Err(err) => (error(), format!("{err:#}")).encode(env),
+            Err(err) => (
+                error(),
+                error_reason(env, payload_conversion(), format!("{err:#}")),
+            )
+                .encode(env),
         },
         None => (ok(), nil()).encode(env),
     }
+}
+
+fn error_reason<'a>(env: Env<'a>, tag: Atom, message: String) -> Term<'a> {
+    (tag, string_term(env, message)).encode(env)
 }
 
 fn workflow_start_error_to_term<'a>(env: Env<'a>, err: StartWorkflowResult) -> Term<'a> {
@@ -1356,8 +1471,14 @@ fn workflow_start_error_to_term<'a>(env: Env<'a>, err: StartWorkflowResult) -> T
                 .unwrap_or_else(|| nil().encode(env));
             (already_started(), run_id_term).encode(env)
         }
-        StartWorkflowResult::Start(err) => string_term(env, format!("{err:#}")),
-        StartWorkflowResult::Other(reason) => string_term(env, reason),
+        StartWorkflowResult::Start(WorkflowStartError::PayloadConversion(err)) => {
+            error_reason(env, payload_conversion(), format!("{err:#}"))
+        }
+        StartWorkflowResult::Start(WorkflowStartError::Rpc(err)) => {
+            error_reason(env, rpc(), format!("{err:#}"))
+        }
+        StartWorkflowResult::Start(err) => error_reason(env, rpc(), format!("{err:#}")),
+        StartWorkflowResult::Other(reason) => error_reason(env, rpc(), reason),
     }
 }
 
@@ -1366,19 +1487,19 @@ fn get_workflow_result_error_to_term<'a>(env: Env<'a>, err: GetWorkflowResult) -
         GetWorkflowResult::Get(WorkflowGetResultError::Failed(failure)) => {
             match failure_to_term(env, Some(failure.as_ref())) {
                 Ok(term) => (failed(), term).encode(env),
-                Err(err) => string_term(env, format!("{err:#}")),
+                Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
         }
         GetWorkflowResult::Get(WorkflowGetResultError::Cancelled { details }) => {
             match payloads_to_terms(env, &details) {
                 Ok(terms) => (cancelled(), terms).encode(env),
-                Err(err) => string_term(env, format!("{err:#}")),
+                Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
         }
         GetWorkflowResult::Get(WorkflowGetResultError::Terminated { details }) => {
             match payloads_to_terms(env, &details) {
                 Ok(terms) => (terminated(), terms).encode(env),
-                Err(err) => string_term(env, format!("{err:#}")),
+                Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
         }
         GetWorkflowResult::Get(WorkflowGetResultError::TimedOut) => timed_out().encode(env),
@@ -1386,8 +1507,14 @@ fn get_workflow_result_error_to_term<'a>(env: Env<'a>, err: GetWorkflowResult) -
             continued_as_new().encode(env)
         }
         GetWorkflowResult::Get(WorkflowGetResultError::NotFound(_)) => not_found().encode(env),
-        GetWorkflowResult::Get(err) => string_term(env, format!("{err:#}")),
-        GetWorkflowResult::Other(err) => string_term(env, format!("{err:#}")),
+        GetWorkflowResult::Get(WorkflowGetResultError::PayloadConversion(err)) => {
+            error_reason(env, payload_conversion(), format!("{err:#}"))
+        }
+        GetWorkflowResult::Get(WorkflowGetResultError::Rpc(err)) => {
+            error_reason(env, rpc(), format!("{err:#}"))
+        }
+        GetWorkflowResult::Get(err) => error_reason(env, rpc(), format!("{err:#}")),
+        GetWorkflowResult::Other(err) => error_reason(env, rpc(), format!("{err:#}")),
     }
 }
 
@@ -1399,8 +1526,14 @@ fn query_workflow_error_to_term<'a>(env: Env<'a>, err: QueryWorkflowResult) -> T
             (rejected(), workflow_status_atom(status)).encode(env)
         }
         QueryWorkflowResult::Query(WorkflowQueryError::NotFound(_)) => not_found().encode(env),
-        QueryWorkflowResult::Query(err) => string_term(env, format!("{err:#}")),
-        QueryWorkflowResult::Other(err) => string_term(env, format!("{err:#}")),
+        QueryWorkflowResult::Query(WorkflowQueryError::PayloadConversion(err)) => {
+            error_reason(env, payload_conversion(), format!("{err:#}"))
+        }
+        QueryWorkflowResult::Query(WorkflowQueryError::Rpc(err)) => {
+            error_reason(env, rpc(), format!("{err:#}"))
+        }
+        QueryWorkflowResult::Query(err) => error_reason(env, rpc(), format!("{err:#}")),
+        QueryWorkflowResult::Other(err) => error_reason(env, rpc(), format!("{err:#}")),
     }
 }
 
@@ -1409,12 +1542,37 @@ fn update_workflow_error_to_term<'a>(env: Env<'a>, err: UpdateWorkflowResult) ->
         UpdateWorkflowResult::Update(WorkflowUpdateError::Failed(failure)) => {
             match failure_to_term(env, Some(failure.as_ref())) {
                 Ok(term) => (failed(), term).encode(env),
-                Err(err) => string_term(env, format!("{err:#}")),
+                Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
         }
         UpdateWorkflowResult::Update(WorkflowUpdateError::NotFound(_)) => not_found().encode(env),
-        UpdateWorkflowResult::Update(err) => string_term(env, format!("{err:#}")),
-        UpdateWorkflowResult::Other(err) => string_term(env, format!("{err:#}")),
+        UpdateWorkflowResult::Update(WorkflowUpdateError::PayloadConversion(err)) => {
+            error_reason(env, payload_conversion(), format!("{err:#}"))
+        }
+        UpdateWorkflowResult::Update(WorkflowUpdateError::Rpc(err)) => {
+            error_reason(env, rpc(), format!("{err:#}"))
+        }
+        UpdateWorkflowResult::Update(err) => error_reason(env, rpc(), format!("{err:#}")),
+        UpdateWorkflowResult::Other(err) => error_reason(env, rpc(), format!("{err:#}")),
+    }
+}
+
+fn workflow_interaction_error_to_term<'a>(
+    env: Env<'a>,
+    err: WorkflowInteractionResult,
+) -> Term<'a> {
+    match err {
+        WorkflowInteractionResult::Interaction(WorkflowInteractionError::NotFound(_)) => {
+            not_found().encode(env)
+        }
+        WorkflowInteractionResult::Interaction(WorkflowInteractionError::PayloadConversion(
+            err,
+        )) => error_reason(env, payload_conversion(), format!("{err:#}")),
+        WorkflowInteractionResult::Interaction(WorkflowInteractionError::Rpc(err)) => {
+            error_reason(env, rpc(), format!("{err:#}"))
+        }
+        WorkflowInteractionResult::Interaction(err) => error_reason(env, rpc(), format!("{err:#}")),
+        WorkflowInteractionResult::Other(err) => error_reason(env, rpc(), format!("{err:#}")),
     }
 }
 
@@ -1550,6 +1708,14 @@ fn term_to_json_value(term: Term) -> serde_json::Value {
         return serde_json::Value::Object(obj);
     }
     serde_json::Value::String(format!("<unsupported term: {:?}>", term))
+}
+
+fn json_payload_from_value(value: JsonValue) -> anyhow::Result<Payload> {
+    Ok(Payload {
+        metadata: HashMap::from([("encoding".to_string(), JSON_ENCODING.to_vec())]),
+        data: serde_json::to_vec(&value)?,
+        external_payloads: vec![],
+    })
 }
 
 fn payload_to_term<'a>(env: Env<'a>, payload: &Payload) -> anyhow::Result<Term<'a>> {
@@ -2001,7 +2167,7 @@ fn workflow_completion_from_term(
                         failure: Some(failure_from_term(
                             reason_term,
                             "Temporalex activation failure",
-                        )),
+                        )?),
                         force_cause: force_cause as i32,
                     },
                 )),
@@ -2038,6 +2204,11 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
         }
         "Elixir.Temporalex.Core.Command.CancelTimer" => {
             workflow_command::Variant::CancelTimer(CancelTimer {
+                seq: map_get_i64(command, seq())? as u32,
+            })
+        }
+        "Elixir.Temporalex.Core.Command.RequestCancelActivity" => {
+            workflow_command::Variant::RequestCancelActivity(RequestCancelActivity {
                 seq: map_get_i64(command, seq())? as u32,
             })
         }
@@ -2223,25 +2394,37 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
                 failure: Some(failure_from_term(
                     map_get(command, reason())?,
                     "Temporalex workflow failure",
-                )),
+                )?),
             })
         }
         "Elixir.Temporalex.Core.Command.ContinueAsNew" => {
-            let opts_or_command = command.map_get(opts_atom()).unwrap_or(command);
-            let workflow_type = keyword_get_string(opts_or_command, workflow_type())
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let task_queue = keyword_get_string(opts_or_command, task_queue())
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| default_task_queue.to_string());
+            let opts = map_get(command, opts_atom())?;
+            let workflow_type =
+                map_get_optional_string(command, workflow_type())?.unwrap_or_default();
+            let task_queue = map_get_optional_string(command, task_queue())?.unwrap_or_default();
 
             workflow_command::Variant::ContinueAsNewWorkflowExecution(
                 ContinueAsNewWorkflowExecution {
                     workflow_type,
                     task_queue,
-                    arguments: vec![payload_from_term(map_get(command, args())?)],
+                    arguments: vec![payload_from_term(map_get(command, input())?)],
+                    workflow_run_timeout: proto_duration_option_from_opts(
+                        opts,
+                        &[run_timeout(), workflow_run_timeout()],
+                    )?,
+                    workflow_task_timeout: proto_duration_option_from_opts(
+                        opts,
+                        &[task_timeout(), workflow_task_timeout()],
+                    )?,
+                    memo: keyword_get_payload_map(opts, memo())?,
+                    headers: keyword_get_payload_map(opts, headers())?,
+                    search_attributes: search_attributes_option_from_opts(opts)?
+                        .map(|indexed_fields| SearchAttributes { indexed_fields }),
+                    retry_policy: retry_policy_from_opts(opts)?,
+                    versioning_intent: versioning_intent_from_opts(opts)? as i32,
+                    initial_versioning_behavior: continue_as_new_versioning_behavior_from_opts(
+                        opts,
+                    )? as i32,
                     ..Default::default()
                 },
             )
@@ -2269,7 +2452,7 @@ fn command_from_term(command: Term, default_task_queue: &str) -> anyhow::Result<
             workflow_command::Variant::UpsertWorkflowSearchAttributes(
                 UpsertWorkflowSearchAttributes {
                     search_attributes: Some(SearchAttributes {
-                        indexed_fields: term_to_payload_map(map_get(command, attrs())?)?,
+                        indexed_fields: term_to_search_attributes_map(map_get(command, attrs())?)?,
                     }),
                 },
             )
@@ -2298,13 +2481,13 @@ fn activity_completion_from_term(completion: Term) -> anyhow::Result<ActivityTas
         } else if tag == error() {
             ActivityExecutionResult {
                 status: Some(activity_execution_result::Status::Failed(ActivityFailure {
-                    failure: Some(failure_from_term(value, "Temporalex activity failure")),
+                    failure: Some(failure_from_term(value, "Temporalex activity failure")?),
                 })),
             }
         } else if tag == cancelled() {
             ActivityExecutionResult {
                 status: Some(activity_execution_result::Status::Cancelled(Cancellation {
-                    failure: Some(cancelled_failure_from_term(value)),
+                    failure: Some(cancelled_failure_from_term(value)?),
                 })),
             }
         } else {
@@ -2340,7 +2523,7 @@ fn query_result_from_term(command: Term) -> anyhow::Result<QueryResult> {
                 variant: Some(query_result::Variant::Failed(failure_from_term(
                     value,
                     "Temporalex query failure",
-                ))),
+                )?)),
             });
         }
     }
@@ -2363,7 +2546,7 @@ fn update_response_from_term(command: Term) -> anyhow::Result<UpdateResponse> {
             update_response::Response::Rejected(failure_from_term(
                 value,
                 "Temporalex update rejected",
-            ))
+            )?)
         } else {
             return Err(anyhow!("unsupported update response tag"));
         }
@@ -2377,18 +2560,66 @@ fn update_response_from_term(command: Term) -> anyhow::Result<UpdateResponse> {
     })
 }
 
-fn failure_from_term(term: Term, default_message: &str) -> Failure {
-    if let Some(failure) = failure_from_error_struct(term) {
-        return failure;
+fn failure_from_term(term: Term, default_message: &str) -> anyhow::Result<Failure> {
+    if let Ok((tag, error_term, _stacktrace)) = term.decode::<(Atom, Term, Term)>()
+        && tag == exception()
+    {
+        return failure_from_term(error_term, default_message);
     }
 
+    match struct_module_name(term).as_deref() {
+        Some("Elixir.Temporalex.Failure.ApplicationError") => {
+            application_failure_from_struct(term, default_message)
+        }
+        Some("Elixir.Temporalex.Failure.CancelledError") => cancelled_failure_from_term(term),
+        Some("Elixir.Temporalex.Failure.TimeoutError") => {
+            timeout_failure_from_struct(term, default_message)
+        }
+        Some("Elixir.Temporalex.Failure.ActivityError") => {
+            activity_failure_from_struct(term, default_message)
+        }
+        Some("Elixir.Temporalex.Failure.WorkflowExecutionError") => {
+            child_workflow_failure_from_struct(term, default_message)
+        }
+        _ => Ok(untyped_application_failure_from_term(term, default_message)),
+    }
+}
+
+fn application_failure_from_struct(term: Term, default_message: &str) -> anyhow::Result<Failure> {
+    let message = map_get_optional_string(term, message())?
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| default_message.to_string());
+    let failure_type = map_get_optional_string(term, type_atom())?
+        .filter(|failure_type| !failure_type.is_empty())
+        .unwrap_or_else(|| "Temporalex.ApplicationError".to_string());
+    let retryable = map_get_optional_bool(term, retryable_question())?.unwrap_or(true);
+    let details = map_get_payloads_list(term, details())?;
+
+    Ok(Failure {
+        message,
+        source: map_get_optional_string(term, source())?
+            .unwrap_or_else(|| "Temporalex".to_string()),
+        stack_trace: map_get_optional_string(term, stack_trace())?.unwrap_or_default(),
+        failure_info: Some(failure::FailureInfo::ApplicationFailureInfo(
+            ApplicationFailureInfo {
+                r#type: failure_type,
+                non_retryable: !retryable,
+                details: Some(Payloads { payloads: details }),
+                ..Default::default()
+            },
+        )),
+        cause: failure_cause_from_map(term)?,
+        ..Default::default()
+    })
+}
+
+fn untyped_application_failure_from_term(term: Term, default_message: &str) -> Failure {
     let message = term
         .decode::<String>()
         .ok()
         .filter(|message| !message.is_empty())
         .unwrap_or_else(|| default_message.to_string());
 
-    let details_payload = payload_from_term(term);
     Failure {
         message,
         source: "Temporalex".to_string(),
@@ -2397,7 +2628,7 @@ fn failure_from_term(term: Term, default_message: &str) -> Failure {
                 r#type: "ApplicationError".to_string(),
                 non_retryable: false,
                 details: Some(Payloads {
-                    payloads: vec![details_payload],
+                    payloads: vec![payload_from_term(term)],
                 }),
                 ..Default::default()
             },
@@ -2406,118 +2637,28 @@ fn failure_from_term(term: Term, default_message: &str) -> Failure {
     }
 }
 
-/// Convert a Temporalex error struct (ApplicationError, CancelledError,
-/// TimeoutError) into a Temporal Failure proto with the matching
-/// FailureInfo variant. Returns `None` for any other term.
-fn failure_from_error_struct(term: Term) -> Option<Failure> {
-    let module_atom = get_ex_struct_name(term).ok()?;
-    let env = term.get_env();
-    let module = module_atom.to_term(env).atom_to_string().ok()?;
-
-    match module.as_str() {
-        "Elixir.Temporalex.ApplicationError" => {
-            let message = decode_optional_string(term, message());
-            let type_name = decode_optional_string(term, type_atom());
-            let non_retryable = decode_optional_bool(term, non_retryable()).unwrap_or(false);
-            let details_payloads = optional_details_payloads(term);
-
-            Some(Failure {
-                message: message.unwrap_or_else(|| "ApplicationError".to_string()),
-                source: "Temporalex".to_string(),
-                failure_info: Some(failure::FailureInfo::ApplicationFailureInfo(
-                    ApplicationFailureInfo {
-                        r#type: type_name.unwrap_or_else(|| "ApplicationError".to_string()),
-                        non_retryable,
-                        details: details_payloads,
-                        ..Default::default()
-                    },
-                )),
-                ..Default::default()
-            })
-        }
-
-        "Elixir.Temporalex.CancelledError" => {
-            let message = decode_optional_string(term, message());
-            let details_payloads = optional_details_payloads(term);
-
-            Some(Failure {
-                message: message.unwrap_or_else(|| "cancelled".to_string()),
-                source: "Temporalex".to_string(),
-                failure_info: Some(failure::FailureInfo::CanceledFailureInfo(
-                    CanceledFailureInfo {
-                        details: details_payloads,
-                        ..Default::default()
-                    },
-                )),
-                ..Default::default()
-            })
-        }
-
-        "Elixir.Temporalex.TimeoutError" => {
-            let message = decode_optional_string(term, message());
-            let tt_atom_string = map_get(term, timeout_type())
-                .ok()
-                .and_then(|t| t.atom_to_string().ok());
-            let timeout_type = tt_atom_string
-                .as_deref()
-                .map(timeout_type_from_str)
-                .unwrap_or(TimeoutType::Unspecified);
-
-            Some(Failure {
-                message: message.unwrap_or_else(|| "timed out".to_string()),
-                source: "Temporalex".to_string(),
-                failure_info: Some(failure::FailureInfo::TimeoutFailureInfo(
-                    TimeoutFailureInfo {
-                        timeout_type: timeout_type as i32,
-                        ..Default::default()
-                    },
-                )),
-                ..Default::default()
-            })
-        }
-
-        _ => None,
-    }
-}
-
-fn decode_optional_string(term: Term, key: Atom) -> Option<String> {
-    let value = map_get(term, key).ok()?;
-    if value.decode::<Atom>().ok() == Some(nil()) {
-        return None;
-    }
-    value.decode::<String>().ok()
-}
-
-fn decode_optional_bool(term: Term, key: Atom) -> Option<bool> {
-    map_get(term, key).ok()?.decode::<bool>().ok()
-}
-
-fn optional_details_payloads(term: Term) -> Option<Payloads> {
-    let details = map_get(term, details()).ok()?;
-    if details.decode::<Atom>().ok() == Some(nil()) {
-        return None;
-    }
-    Some(Payloads {
-        payloads: vec![payload_from_term(details)],
-    })
-}
-
-fn timeout_type_from_str(name: &str) -> TimeoutType {
-    match name {
-        "start_to_close" => TimeoutType::StartToClose,
-        "schedule_to_close" => TimeoutType::ScheduleToClose,
-        "schedule_to_start" => TimeoutType::ScheduleToStart,
-        "heartbeat" => TimeoutType::Heartbeat,
-        _ => TimeoutType::Unspecified,
-    }
-}
-
-fn cancelled_failure_from_term(term: Term) -> Failure {
-    if let Some(failure) = failure_from_error_struct(term) {
-        return failure;
+fn cancelled_failure_from_term(term: Term) -> anyhow::Result<Failure> {
+    if let Some("Elixir.Temporalex.Failure.CancelledError") = struct_module_name(term).as_deref() {
+        return Ok(Failure {
+            message: map_get_optional_string(term, message())?
+                .unwrap_or_else(|| "Temporalex activity cancelled".to_string()),
+            source: map_get_optional_string(term, source())?
+                .unwrap_or_else(|| "Temporalex".to_string()),
+            stack_trace: map_get_optional_string(term, stack_trace())?.unwrap_or_default(),
+            failure_info: Some(failure::FailureInfo::CanceledFailureInfo(
+                CanceledFailureInfo {
+                    details: Some(Payloads {
+                        payloads: map_get_payloads_list(term, details())?,
+                    }),
+                    identity: map_get_optional_string(term, identity())?.unwrap_or_default(),
+                },
+            )),
+            cause: failure_cause_from_map(term)?,
+            ..Default::default()
+        });
     }
 
-    Failure {
+    Ok(Failure {
         message: "Temporalex activity cancelled".to_string(),
         source: "Temporalex".to_string(),
         failure_info: Some(failure::FailureInfo::CanceledFailureInfo(
@@ -2529,7 +2670,103 @@ fn cancelled_failure_from_term(term: Term) -> Failure {
             },
         )),
         ..Default::default()
-    }
+    })
+}
+
+fn timeout_failure_from_struct(term: Term, default_message: &str) -> anyhow::Result<Failure> {
+    Ok(Failure {
+        message: map_get_optional_string(term, message())?
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| default_message.to_string()),
+        source: map_get_optional_string(term, source())?
+            .unwrap_or_else(|| "Temporalex".to_string()),
+        stack_trace: map_get_optional_string(term, stack_trace())?.unwrap_or_default(),
+        failure_info: Some(failure::FailureInfo::TimeoutFailureInfo(
+            TimeoutFailureInfo {
+                timeout_type: timeout_type_from_atom(map_get_optional_atom(term, timeout_type())?)
+                    as i32,
+                last_heartbeat_details: Some(Payloads {
+                    payloads: map_get_payloads_list(term, last_heartbeat_details())?,
+                }),
+            },
+        )),
+        cause: failure_cause_from_map(term)?,
+        ..Default::default()
+    })
+}
+
+fn activity_failure_from_struct(term: Term, default_message: &str) -> anyhow::Result<Failure> {
+    let activity_type_name = map_get_optional_string(term, activity_type())?.unwrap_or_default();
+
+    Ok(Failure {
+        message: map_get_optional_string(term, message())?
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| default_message.to_string()),
+        source: map_get_optional_string(term, source())?
+            .unwrap_or_else(|| "Temporalex".to_string()),
+        stack_trace: map_get_optional_string(term, stack_trace())?.unwrap_or_default(),
+        failure_info: Some(failure::FailureInfo::ActivityFailureInfo(
+            ActivityFailureInfo {
+                identity: map_get_optional_string(term, identity())?.unwrap_or_default(),
+                activity_type: if activity_type_name.is_empty() {
+                    None
+                } else {
+                    Some(ActivityType {
+                        name: activity_type_name,
+                    })
+                },
+                activity_id: map_get_optional_string(term, activity_id())?.unwrap_or_default(),
+                retry_state: retry_state_from_atom(map_get_optional_atom(term, retry_state())?)
+                    as i32,
+                ..Default::default()
+            },
+        )),
+        cause: failure_cause_from_map(term)?,
+        ..Default::default()
+    })
+}
+
+fn child_workflow_failure_from_struct(
+    term: Term,
+    default_message: &str,
+) -> anyhow::Result<Failure> {
+    let workflow_id = map_get_optional_string(term, workflow_id())?.unwrap_or_default();
+    let run_id = map_get_optional_string(term, run_id())?.unwrap_or_default();
+    let workflow_type_name = map_get_optional_string(term, workflow_type())?.unwrap_or_default();
+
+    Ok(Failure {
+        message: map_get_optional_string(term, message())?
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| default_message.to_string()),
+        source: map_get_optional_string(term, source())?
+            .unwrap_or_else(|| "Temporalex".to_string()),
+        stack_trace: map_get_optional_string(term, stack_trace())?.unwrap_or_default(),
+        failure_info: Some(failure::FailureInfo::ChildWorkflowExecutionFailureInfo(
+            ChildWorkflowExecutionFailureInfo {
+                namespace: map_get_optional_string(term, namespace())?.unwrap_or_default(),
+                workflow_execution: if workflow_id.is_empty() && run_id.is_empty() {
+                    None
+                } else {
+                    Some(WorkflowExecution {
+                        workflow_id,
+                        run_id,
+                    })
+                },
+                workflow_type: if workflow_type_name.is_empty() {
+                    None
+                } else {
+                    Some(WorkflowType {
+                        name: workflow_type_name,
+                    })
+                },
+                retry_state: retry_state_from_atom(map_get_optional_atom(term, retry_state())?)
+                    as i32,
+                ..Default::default()
+            },
+        )),
+        cause: failure_cause_from_map(term)?,
+        ..Default::default()
+    })
 }
 
 fn failure_to_term<'a>(env: Env<'a>, failure: Option<&Failure>) -> anyhow::Result<Term<'a>> {
@@ -2537,127 +2774,197 @@ fn failure_to_term<'a>(env: Env<'a>, failure: Option<&Failure>) -> anyhow::Resul
         return Ok(nil().encode(env));
     };
 
-    let msg = failure.message.clone();
-    let cause_term = if let Some(cause) = failure.cause.as_deref() {
-        failure_to_term(env, Some(cause))?
-    } else {
-        nil().encode(env)
-    };
+    let cause_term = failure_to_term(env, failure.cause.as_deref())?;
 
     match &failure.failure_info {
-        Some(failure::FailureInfo::ApplicationFailureInfo(info)) => {
-            let details_term = first_payload_to_term(env, info.details.as_ref())?;
-            put_fields!(
-                make_struct(env, "Elixir.Temporalex.ApplicationError")?,
-                message() => msg,
-                type_atom() => info.r#type.clone(),
-                non_retryable() => info.non_retryable,
-                details() => details_term,
-            )
-        }
-
-        Some(failure::FailureInfo::CanceledFailureInfo(info)) => {
-            let details_term = first_payload_to_term(env, info.details.as_ref())?;
-            put_fields!(
-                make_struct(env, "Elixir.Temporalex.CancelledError")?,
-                message() => msg,
-                details() => details_term,
-            )
-        }
-
-        Some(failure::FailureInfo::TimeoutFailureInfo(info)) => {
-            let tt = TimeoutType::try_from(info.timeout_type).unwrap_or(TimeoutType::Unspecified);
-            put_fields!(
-                make_struct(env, "Elixir.Temporalex.TimeoutError")?,
-                message() => msg,
-                timeout_type() => timeout_type_atom(tt),
-                details() => nil(),
-            )
-        }
-
-        Some(failure::FailureInfo::ActivityFailureInfo(info)) => {
-            put_fields!(
-                make_struct(env, "Elixir.Temporalex.ActivityFailure")?,
-                message() => msg,
-                activity_id() => info.activity_id.clone(),
-                activity_type() => info
-                    .activity_type
-                    .as_ref()
-                    .map(|t| t.name.clone())
-                    .unwrap_or_default(),
-                attempt() => nil(),
-                retry_state() => retry_state_atom(info.retry_state),
-                cause() => cause_term,
-            )
-        }
-
+        Some(failure::FailureInfo::ApplicationFailureInfo(info)) => put_fields!(
+            make_struct(env, "Elixir.Temporalex.Failure.ApplicationError")?,
+            message() => failure.message.clone(),
+            source() => failure.source.clone(),
+            stack_trace() => failure.stack_trace.clone(),
+            type_atom() => info.r#type.clone(),
+            details() => payloads_to_terms_option(env, info.details.as_ref())?,
+            retryable_question() => !info.non_retryable,
+            cause() => cause_term,
+        ),
+        Some(failure::FailureInfo::CanceledFailureInfo(info)) => put_fields!(
+            make_struct(env, "Elixir.Temporalex.Failure.CancelledError")?,
+            message() => failure.message.clone(),
+            source() => failure.source.clone(),
+            stack_trace() => failure.stack_trace.clone(),
+            identity() => info.identity.clone(),
+            details() => payloads_to_terms_option(env, info.details.as_ref())?,
+            cause() => cause_term,
+        ),
+        Some(failure::FailureInfo::TimeoutFailureInfo(info)) => put_fields!(
+            make_struct(env, "Elixir.Temporalex.Failure.TimeoutError")?,
+            message() => failure.message.clone(),
+            source() => failure.source.clone(),
+            stack_trace() => failure.stack_trace.clone(),
+            timeout_type() => timeout_type_atom(info.timeout_type()),
+            last_heartbeat_details() => payloads_to_terms_option(env, info.last_heartbeat_details.as_ref())?,
+            cause() => cause_term,
+        ),
+        Some(failure::FailureInfo::ActivityFailureInfo(info)) => put_fields!(
+            make_struct(env, "Elixir.Temporalex.Failure.ActivityError")?,
+            message() => failure.message.clone(),
+            source() => failure.source.clone(),
+            stack_trace() => failure.stack_trace.clone(),
+            identity() => info.identity.clone(),
+            activity_id() => info.activity_id.clone(),
+            activity_type() => info.activity_type.as_ref().map(|activity_type| activity_type.name.clone()).unwrap_or_default(),
+            retry_state() => retry_state_atom(info.retry_state()),
+            cause() => cause_term,
+        ),
         Some(failure::FailureInfo::ChildWorkflowExecutionFailureInfo(info)) => {
+            let execution = info.workflow_execution.as_ref();
             put_fields!(
-                make_struct(env, "Elixir.Temporalex.ChildWorkflowFailure")?,
-                message() => msg,
-                workflow_id() => info
-                    .workflow_execution
-                    .as_ref()
-                    .map(|exec| exec.workflow_id.clone())
-                    .unwrap_or_default(),
-                run_id() => info
-                    .workflow_execution
-                    .as_ref()
-                    .map(|exec| exec.run_id.clone())
-                    .unwrap_or_default(),
-                workflow_type() => info
-                    .workflow_type
-                    .as_ref()
-                    .map(|t| t.name.clone())
-                    .unwrap_or_default(),
+                make_struct(env, "Elixir.Temporalex.Failure.WorkflowExecutionError")?,
+                message() => failure.message.clone(),
+                source() => failure.source.clone(),
+                stack_trace() => failure.stack_trace.clone(),
                 namespace() => info.namespace.clone(),
-                retry_state() => retry_state_atom(info.retry_state),
+                workflow_id() => execution.map(|execution| execution.workflow_id.clone()).unwrap_or_default(),
+                run_id() => execution.map(|execution| execution.run_id.clone()).unwrap_or_default(),
+                workflow_type() => info.workflow_type.as_ref().map(|workflow_type| workflow_type.name.clone()).unwrap_or_default(),
+                retry_state() => retry_state_atom(info.retry_state()),
                 cause() => cause_term,
             )
         }
-
-        // Unknown / server-side failure types collapse to ApplicationError so
-        // workflow code always sees a known struct it can pattern-match on.
-        _ => put_fields!(
-            make_struct(env, "Elixir.Temporalex.ApplicationError")?,
-            message() => msg,
-            type_atom() => failure.source.clone(),
-            non_retryable() => false,
-            details() => nil(),
+        other => put_fields!(
+            make_struct(env, "Elixir.Temporalex.Failure.UnknownError")?,
+            message() => failure.message.clone(),
+            source() => failure.source.clone(),
+            stack_trace() => failure.stack_trace.clone(),
+            failure_type() => failure_info_type_atom(other),
+            cause() => cause_term,
         ),
     }
 }
 
-fn first_payload_to_term<'a>(
-    env: Env<'a>,
-    payloads: Option<&Payloads>,
-) -> anyhow::Result<Term<'a>> {
-    match payloads.and_then(|p| p.payloads.first()) {
-        Some(payload) => payload_to_term(env, payload),
-        None => Ok(nil().encode(env)),
+fn struct_module_name(term: Term) -> Option<String> {
+    get_ex_struct_name(term)
+        .ok()?
+        .to_term(term.get_env())
+        .atom_to_string()
+        .ok()
+}
+
+fn map_get_optional_string(map: Term, key: Atom) -> anyhow::Result<Option<String>> {
+    match map_get(map, key) {
+        Ok(term) if term.decode::<Atom>().ok() == Some(nil()) => Ok(None),
+        Ok(term) => decode_term(term).map(Some),
+        Err(_) => Ok(None),
     }
 }
 
-fn timeout_type_atom(tt: TimeoutType) -> Atom {
-    match tt {
+fn map_get_optional_bool(map: Term, key: Atom) -> anyhow::Result<Option<bool>> {
+    match map_get(map, key) {
+        Ok(term) if term.decode::<Atom>().ok() == Some(nil()) => Ok(None),
+        Ok(term) => decode_term(term).map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+fn map_get_optional_atom(map: Term, key: Atom) -> anyhow::Result<Option<Atom>> {
+    match map_get(map, key) {
+        Ok(term) if term.decode::<Atom>().ok() == Some(nil()) => Ok(None),
+        Ok(term) => decode_term(term).map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+fn map_get_payloads_list(map: Term, key: Atom) -> anyhow::Result<Vec<Payload>> {
+    match map_get(map, key) {
+        Ok(term) if term.decode::<Atom>().ok() == Some(nil()) => Ok(vec![]),
+        Ok(term) => terms_list_to_payloads(term),
+        Err(_) => Ok(vec![]),
+    }
+}
+
+fn failure_cause_from_map(map: Term) -> anyhow::Result<Option<Box<Failure>>> {
+    match map_get(map, cause()) {
+        Ok(term) if term.decode::<Atom>().ok() == Some(nil()) => Ok(None),
+        Ok(term) => failure_from_term(term, "Temporalex caused failure")
+            .map(Box::new)
+            .map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+fn payloads_to_terms_option<'a>(
+    env: Env<'a>,
+    payloads: Option<&Payloads>,
+) -> anyhow::Result<Vec<Term<'a>>> {
+    payloads
+        .map(|payloads| payloads_to_terms(env, &payloads.payloads))
+        .transpose()
+        .map(|terms| terms.unwrap_or_default())
+}
+
+fn retry_state_atom(retry_state: RetryState) -> Atom {
+    match retry_state {
+        RetryState::InProgress => in_progress(),
+        RetryState::NonRetryableFailure => non_retryable_failure(),
+        RetryState::Timeout => timeout(),
+        RetryState::MaximumAttemptsReached => maximum_attempts_reached(),
+        RetryState::RetryPolicyNotSet => retry_policy_not_set(),
+        RetryState::InternalServerError => internal_server_error(),
+        RetryState::CancelRequested => cancel_requested(),
+        RetryState::Unspecified => unspecified(),
+    }
+}
+
+fn retry_state_from_atom(retry_state: Option<Atom>) -> RetryState {
+    match retry_state {
+        Some(atom) if atom == in_progress() => RetryState::InProgress,
+        Some(atom) if atom == non_retryable_failure() => RetryState::NonRetryableFailure,
+        Some(atom) if atom == timeout() => RetryState::Timeout,
+        Some(atom) if atom == maximum_attempts_reached() => RetryState::MaximumAttemptsReached,
+        Some(atom) if atom == retry_policy_not_set() => RetryState::RetryPolicyNotSet,
+        Some(atom) if atom == internal_server_error() => RetryState::InternalServerError,
+        Some(atom) if atom == cancel_requested() => RetryState::CancelRequested,
+        _ => RetryState::Unspecified,
+    }
+}
+
+fn timeout_type_atom(timeout_type: TimeoutType) -> Atom {
+    match timeout_type {
         TimeoutType::StartToClose => start_to_close(),
-        TimeoutType::ScheduleToClose => schedule_to_close(),
         TimeoutType::ScheduleToStart => schedule_to_start(),
+        TimeoutType::ScheduleToClose => schedule_to_close(),
         TimeoutType::Heartbeat => heartbeat(),
         TimeoutType::Unspecified => unspecified(),
     }
 }
 
-fn retry_state_atom(state: i32) -> Atom {
-    // Temporal RetryState enum: 0=Unspecified, 1=InProgress, 2=NonRetryableFailure,
-    // 3=Timeout, 4=MaximumAttemptsReached, 5=RetryPolicyNotSet, 6=InternalServerError,
-    // 7=CancelRequested
-    match state {
-        2 => non_retryable(),
-        3 => timed_out(),
-        4 => maximum_attempts(),
-        7 => cancelled(),
-        _ => unspecified(),
+fn timeout_type_from_atom(timeout_type: Option<Atom>) -> TimeoutType {
+    match timeout_type {
+        Some(atom) if atom == start_to_close() => TimeoutType::StartToClose,
+        Some(atom) if atom == schedule_to_start() => TimeoutType::ScheduleToStart,
+        Some(atom) if atom == schedule_to_close() => TimeoutType::ScheduleToClose,
+        Some(atom) if atom == heartbeat() => TimeoutType::Heartbeat,
+        _ => TimeoutType::Unspecified,
+    }
+}
+
+fn failure_info_type_atom(info: &Option<failure::FailureInfo>) -> Atom {
+    match info {
+        Some(failure::FailureInfo::TimeoutFailureInfo(_)) => timeout_failure(),
+        Some(failure::FailureInfo::CanceledFailureInfo(_)) => cancelled_failure(),
+        Some(failure::FailureInfo::TerminatedFailureInfo(_)) => terminated_failure(),
+        Some(failure::FailureInfo::ServerFailureInfo(_)) => server_failure(),
+        Some(failure::FailureInfo::ResetWorkflowFailureInfo(_)) => reset_workflow_failure(),
+        Some(failure::FailureInfo::ActivityFailureInfo(_)) => activity_failure(),
+        Some(failure::FailureInfo::ChildWorkflowExecutionFailureInfo(_)) => {
+            child_workflow_failure()
+        }
+        Some(failure::FailureInfo::NexusOperationExecutionFailureInfo(_)) => {
+            nexus_operation_failure()
+        }
+        Some(failure::FailureInfo::NexusHandlerFailureInfo(_)) => nexus_handler_failure(),
+        Some(failure::FailureInfo::ApplicationFailureInfo(_)) => failed(),
+        None => unknown_failure(),
     }
 }
 
@@ -2728,6 +3035,10 @@ fn keyword_get_payload_map(opts: Term, key: Atom) -> anyhow::Result<HashMap<Stri
         return Ok(HashMap::new());
     };
 
+    if term.decode::<Atom>().ok() == Some(nil()) {
+        return Ok(HashMap::new());
+    }
+
     term_to_payload_map(term)
 }
 
@@ -2740,6 +3051,102 @@ fn term_to_payload_map(term: Term) -> anyhow::Result<HashMap<String, Payload>> {
     }
 
     Ok(headers)
+}
+
+fn term_to_search_attributes_map(term: Term) -> anyhow::Result<HashMap<String, Payload>> {
+    let iterator =
+        MapIterator::new(term).ok_or_else(|| anyhow!("search_attributes option must be a map"))?;
+    let mut attrs = HashMap::new();
+
+    for (key, value) in iterator {
+        attrs.insert(
+            decode_term::<String>(key)?,
+            search_attribute_payload_from_term(value)?,
+        );
+    }
+
+    Ok(attrs)
+}
+
+fn search_attribute_payload_from_term(term: Term) -> anyhow::Result<Payload> {
+    json_payload_from_value(search_attribute_json_from_term(term)?)
+}
+
+fn search_attribute_json_from_term(term: Term) -> anyhow::Result<JsonValue> {
+    if term.is_map() {
+        if let Ok(type_term) = map_get(term, type_atom()) {
+            let value_term = map_get(term, value())
+                .map_err(|_| anyhow!("typed Search Attribute values must include :value"))?;
+            return typed_search_attribute_json(type_term, value_term);
+        }
+    }
+
+    if let Ok(value) = term.decode::<bool>() {
+        return Ok(JsonValue::Bool(value));
+    }
+
+    if let Ok(value) = term.decode::<i64>() {
+        return Ok(JsonValue::Number(JsonNumber::from(value)));
+    }
+
+    if let Ok(value) = term.decode::<f64>() {
+        return json_number_from_f64(value);
+    }
+
+    if let Ok(value) = term.decode::<String>() {
+        return Ok(JsonValue::String(value));
+    }
+
+    if let Ok(iter) = term.decode::<ListIterator>() {
+        let values = iter
+            .map(decode_term::<String>)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        return Ok(JsonValue::Array(
+            values.into_iter().map(JsonValue::String).collect(),
+        ));
+    }
+
+    Err(anyhow!(
+        "search attribute values must be typed values or JSON-compatible bool, integer, float, string, or string list"
+    ))
+}
+
+fn typed_search_attribute_json(type_term: Term, value_term: Term) -> anyhow::Result<JsonValue> {
+    let type_atom_value: Atom = decode_term(type_term)?;
+
+    if type_atom_value == bool_atom() {
+        Ok(JsonValue::Bool(decode_term(value_term)?))
+    } else if type_atom_value == datetime() {
+        Ok(JsonValue::String(decode_term(value_term)?))
+    } else if type_atom_value == double() {
+        if let Ok(value) = value_term.decode::<f64>() {
+            json_number_from_f64(value)
+        } else {
+            let value: i64 = decode_term(value_term)?;
+            json_number_from_f64(value as f64)
+        }
+    } else if type_atom_value == int() {
+        let value: i64 = decode_term(value_term)?;
+        Ok(JsonValue::Number(JsonNumber::from(value)))
+    } else if type_atom_value == keyword() || type_atom_value == text() {
+        Ok(JsonValue::String(decode_term(value_term)?))
+    } else if type_atom_value == keyword_list() {
+        let iter: ListIterator = decode_term(value_term)?;
+        let values = iter
+            .map(decode_term::<String>)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(JsonValue::Array(
+            values.into_iter().map(JsonValue::String).collect(),
+        ))
+    } else {
+        Err(anyhow!("unsupported Search Attribute type"))
+    }
+}
+
+fn json_number_from_f64(value: f64) -> anyhow::Result<JsonValue> {
+    JsonNumber::from_f64(value)
+        .map(JsonValue::Number)
+        .ok_or_else(|| anyhow!("search attribute double values must be finite"))
 }
 
 fn workflow_start_options(
@@ -2757,7 +3164,7 @@ fn workflow_start_options(
     options.task_timeout =
         duration_option_from_opts(opts, &[task_timeout(), workflow_task_timeout()])?;
     options.cron_schedule = keyword_get_string(opts, cron_schedule())?;
-    options.search_attributes = payload_map_option_from_opts(opts, search_attributes())?;
+    options.search_attributes = search_attributes_option_from_opts(opts)?;
     options.retry_policy = retry_policy_from_opts(opts)?;
     options.header = header_from_opts(opts)?;
     options.static_summary = keyword_get_string(opts, static_summary())?;
@@ -2774,6 +3181,7 @@ fn signal_options(opts: Term) -> anyhow::Result<WorkflowSignalOptions> {
 
 fn query_options(opts: Term) -> anyhow::Result<WorkflowQueryOptions> {
     let mut options = WorkflowQueryOptions::default();
+    options.reject_condition = query_reject_condition_from_opts(opts)?;
     options.header = header_from_opts(opts)?;
     Ok(options)
 }
@@ -2794,18 +3202,17 @@ fn header_from_opts(opts: Term) -> anyhow::Result<Option<Header>> {
     }
 }
 
-fn payload_map_option_from_opts(
+fn search_attributes_option_from_opts(
     opts: Term,
-    key: Atom,
 ) -> anyhow::Result<Option<HashMap<String, Payload>>> {
-    let Some(term) = keyword_get(opts, key)? else {
+    let Some(term) = keyword_get(opts, search_attributes())? else {
         return Ok(None);
     };
 
     if term.decode::<Atom>().ok() == Some(nil()) {
         Ok(None)
     } else {
-        Ok(Some(term_to_payload_map(term)?))
+        Ok(Some(term_to_search_attributes_map(term)?))
     }
 }
 
@@ -2822,12 +3229,15 @@ fn retry_policy_from_opts(opts: Term) -> anyhow::Result<Option<RetryPolicy>> {
 }
 
 fn retry_policy_from_term(term: Term) -> anyhow::Result<RetryPolicy> {
-    let backoff_coefficient = keyword_get_f64(term, backoff_coefficient())?.unwrap_or(0.0);
-    if backoff_coefficient < 0.0 {
+    let backoff_coefficient = keyword_get_f64(term, backoff_coefficient())?;
+    if let Some(value) = backoff_coefficient
+        && value < 1.0
+    {
         return Err(anyhow!(
-            "retry_policy.backoff_coefficient must be non-negative"
+            "retry_policy.backoff_coefficient must be 1.0 or larger"
         ));
     }
+    let backoff_coefficient = backoff_coefficient.unwrap_or(0.0);
 
     let maximum_attempts = keyword_get_i64(term, maximum_attempts())?.unwrap_or(0);
     if maximum_attempts < 0 || maximum_attempts > i32::MAX as i64 {
@@ -2854,6 +3264,52 @@ fn retry_policy_from_term(term: Term) -> anyhow::Result<RetryPolicy> {
         non_retryable_error_types: keyword_get_string_list(term, non_retryable_error_types())?
             .unwrap_or_default(),
     })
+}
+
+fn versioning_intent_from_opts(opts: Term) -> anyhow::Result<VersioningIntent> {
+    let Some(term) = keyword_get(opts, versioning_intent())? else {
+        return Ok(VersioningIntent::Unspecified);
+    };
+
+    if term.decode::<Atom>().ok() == Some(nil()) {
+        return Ok(VersioningIntent::Unspecified);
+    }
+
+    let atom: Atom = decode_term(term)?;
+    if atom == unspecified() {
+        Ok(VersioningIntent::Unspecified)
+    } else if atom == compatible() {
+        Ok(VersioningIntent::Compatible)
+    } else if atom == default_atom() {
+        Ok(VersioningIntent::Default)
+    } else {
+        Err(anyhow!("unsupported continue-as-new versioning_intent"))
+    }
+}
+
+fn continue_as_new_versioning_behavior_from_opts(
+    opts: Term,
+) -> anyhow::Result<ContinueAsNewVersioningBehavior> {
+    let Some(term) = keyword_get(opts, initial_versioning_behavior())? else {
+        return Ok(ContinueAsNewVersioningBehavior::Unspecified);
+    };
+
+    if term.decode::<Atom>().ok() == Some(nil()) {
+        return Ok(ContinueAsNewVersioningBehavior::Unspecified);
+    }
+
+    let atom: Atom = decode_term(term)?;
+    if atom == unspecified() {
+        Ok(ContinueAsNewVersioningBehavior::Unspecified)
+    } else if atom == auto_upgrade() {
+        Ok(ContinueAsNewVersioningBehavior::AutoUpgrade)
+    } else if atom == use_ramping_version() {
+        Ok(ContinueAsNewVersioningBehavior::UseRampingVersion)
+    } else {
+        Err(anyhow!(
+            "unsupported continue-as-new initial_versioning_behavior"
+        ))
+    }
 }
 
 fn activity_cancellation_type_from_opts(opts: Term) -> anyhow::Result<ActivityCancellationType> {
@@ -2937,6 +3393,27 @@ fn workflow_id_conflict_policy_from_opts(opts: Term) -> anyhow::Result<WorkflowI
     }
 }
 
+fn query_reject_condition_from_opts(opts: Term) -> anyhow::Result<Option<QueryRejectCondition>> {
+    let Some(term) =
+        keyword_get(opts, query_reject_condition())?.or(keyword_get(opts, reject_condition())?)
+    else {
+        return Ok(None);
+    };
+
+    let atom: Atom = decode_term(term)?;
+    if atom == none() {
+        Ok(Some(QueryRejectCondition::None))
+    } else if atom == not_open() {
+        Ok(Some(QueryRejectCondition::NotOpen))
+    } else if atom == not_completed_cleanly() {
+        Ok(Some(QueryRejectCondition::NotCompletedCleanly))
+    } else if atom == unspecified() {
+        Ok(Some(QueryRejectCondition::Unspecified))
+    } else {
+        Err(anyhow!("unsupported query reject condition"))
+    }
+}
+
 fn duration_option_from_opts(
     opts: Term,
     keys: &[Atom],
@@ -2947,6 +3424,22 @@ fn duration_option_from_opts(
                 return Err(anyhow!("duration option must be non-negative"));
             }
             return Ok(Some(std::time::Duration::from_millis(ms as u64)));
+        }
+    }
+
+    Ok(None)
+}
+
+fn proto_duration_option_from_opts(
+    opts: Term,
+    keys: &[Atom],
+) -> anyhow::Result<Option<prost_types::Duration>> {
+    for key in keys {
+        if let Some(ms) = keyword_get_i64(opts, *key)? {
+            if ms < 0 {
+                return Err(anyhow!("duration option must be non-negative"));
+            }
+            return Ok(Some(duration_from_ms(ms as u64)));
         }
     }
 

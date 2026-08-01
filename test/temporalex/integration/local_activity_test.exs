@@ -52,14 +52,22 @@ defmodule Temporalex.LocalActivityIntegrationTest do
     end
 
     worker_name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client_name = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
     task_queue = "local-activity-#{System.unique_integer([:positive])}"
+
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: "http://127.0.0.1:7233",
+        namespace: "default",
+        task_queue: task_queue
+      )
 
     {:ok, worker_pid} =
       Temporalex.Worker.start_link(
         name: worker_name,
-        backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
-        namespace: "default",
+        client: client_name,
         task_queue: task_queue,
         workflows: [Workflow],
         activities: [Activities]
@@ -68,19 +76,20 @@ defmodule Temporalex.LocalActivityIntegrationTest do
     on_exit(fn ->
       try do
         if Process.alive?(worker_pid), do: Supervisor.stop(worker_pid, :normal, 5_000)
+        if Process.alive?(client_pid), do: GenServer.stop(client_pid, :normal, 5_000)
       catch
         :exit, _ -> :ok
       end
     end)
 
-    {:ok, worker: worker_name}
+    {:ok, client: client_name, worker: worker_name}
   end
 
-  test "local activity result reaches the workflow", %{worker: worker} do
+  test "local activity result reaches the workflow", %{client: client} do
     workflow_id = "la-local-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, Workflow, {:local, 5},
+      Temporalex.Client.start_workflow(client, Workflow, {:local, 5},
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -88,11 +97,11 @@ defmodule Temporalex.LocalActivityIntegrationTest do
     assert {:ok, 11} = Temporalex.Client.get_result(handle, timeout: 15_000)
   end
 
-  test "regular activity still works (control)", %{worker: worker} do
+  test "regular activity still works (control)", %{client: client} do
     workflow_id = "la-remote-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, Workflow, {:remote, 7},
+      Temporalex.Client.start_workflow(client, Workflow, {:remote, 7},
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -100,11 +109,11 @@ defmodule Temporalex.LocalActivityIntegrationTest do
     assert {:ok, 15} = Temporalex.Client.get_result(handle, timeout: 15_000)
   end
 
-  test "local and remote activities can be mixed in one workflow", %{worker: worker} do
+  test "local and remote activities can be mixed in one workflow", %{client: client} do
     workflow_id = "la-mixed-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, Workflow, {:mixed, 3},
+      Temporalex.Client.start_workflow(client, Workflow, {:mixed, 3},
         workflow_id: workflow_id,
         timeout: 10_000
       )

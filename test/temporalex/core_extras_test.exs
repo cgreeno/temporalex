@@ -39,10 +39,10 @@ defmodule Temporalex.CoreExtrasTest do
 
       assert {:yield, [%Command.StartTimer{seq: timer_seq}]} = TestHarness.next(exec)
 
-      # Activate with cancel job alongside timer fire — workflow returns
-      # {:cancelled, :requested} which the executor emits as a CancelWorkflow
-      # command (not a CompleteWorkflow), so it surfaces as a yield.
-      assert {:yield, [%Command.CancelWorkflow{}]} =
+      # Cancellation interrupts the pending sleep (Hans's cancellation model):
+      # the timer is cancelled and the workflow, observing cancelled?/0, returns
+      # {:cancelled, :after_sleep}. That surfaces as CancelTimer + CancelWorkflow.
+      assert {:yield, [%Command.CancelTimer{}, %Command.CancelWorkflow{}]} =
                TestHarness.activate(exec, [
                  %Job.CancelWorkflow{reason: :requested},
                  %Job.TimerFired{seq: timer_seq}
@@ -53,17 +53,21 @@ defmodule Temporalex.CoreExtrasTest do
       assert {:ok, exec} = TestHarness.start_workflow(CancelAwareWorkflow, nil)
       assert {:yield, [%Command.StartTimer{}]} = TestHarness.next(exec)
 
-      # Cancel before timer fires — workflow stays blocked, no commands.
-      assert {:yield, []} = TestHarness.activate(exec, [%Job.CancelWorkflow{reason: :requested}])
+      # Cancel interrupts the pending sleep (Hans's cancellation model): the
+      # timer is cancelled and the workflow observes cancelled?/0, completing
+      # with a CancelWorkflow command.
+      assert {:yield, [%Command.CancelTimer{}, %Command.CancelWorkflow{}]} =
+               TestHarness.activate(exec, [%Job.CancelWorkflow{reason: :requested}])
     end
 
     defmodule UncancellableWorkflow do
       use Temporalex.Workflow
 
       def run(_) do
-        # Workflow that doesn't check cancelled?/0 — should still complete
-        # successfully even if cancellation is requested mid-flight.
-        :ok = API.sleep(100)
+        # A non-cancellable scope shields the sleep from cancellation (Hans's
+        # cancellation model): the timer resolves normally and the workflow
+        # completes successfully even though cancellation was requested.
+        API.non_cancellable(fn -> :ok = API.sleep(100) end)
         {:ok, :ignored_cancel}
       end
     end
@@ -456,7 +460,11 @@ defmodule Temporalex.CoreExtrasTest do
                  seq: seq,
                  result:
                    {:error,
-                    %Temporalex.ApplicationError{message: "no", type: "X", non_retryable: true}}
+                    %Temporalex.Failure.ApplicationError{
+                      message: "no",
+                      type: "X",
+                      retryable?: false
+                    }}
                })
     end
 
@@ -581,13 +589,13 @@ defmodule Temporalex.CoreExtrasTest do
                  seq: seq,
                  result:
                    {:error,
-                    %Temporalex.ChildWorkflowFailure{
+                    %Temporalex.Failure.WorkflowExecutionError{
                       message: "child failed",
                       workflow_id: "fixed-child-id",
-                      cause: %Temporalex.ApplicationError{
+                      cause: %Temporalex.Failure.ApplicationError{
                         message: "boom",
                         type: "BadInput",
-                        non_retryable: true
+                        retryable?: false
                       }
                     }}
                })
@@ -644,15 +652,16 @@ defmodule Temporalex.CoreExtrasTest do
       assert {:yield, [%Command.SignalExternalWorkflowExecution{seq: seq}]} =
                TestHarness.next(exec)
 
-      assert {:complete, {:ok, {:not_delivered, {:error, %Temporalex.ApplicationError{}}}}} =
+      assert {:complete,
+              {:ok, {:not_delivered, {:error, %Temporalex.Failure.ApplicationError{}}}}} =
                TestHarness.resolve(exec, %Job.ResolveSignalExternalWorkflow{
                  seq: seq,
                  result:
                    {:error,
-                    %Temporalex.ApplicationError{
+                    %Temporalex.Failure.ApplicationError{
                       message: "no such workflow",
                       type: "NotFound",
-                      non_retryable: true
+                      retryable?: false
                     }}
                })
     end
@@ -934,7 +943,7 @@ defmodule Temporalex.CoreExtrasTest do
       assert {:complete, _} =
                TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecution{
                  seq: start_seq,
-                 result: {:cancelled, %Temporalex.CancelledError{message: "cancelled"}}
+                 result: {:cancelled, %Temporalex.Failure.CancelledError{message: "cancelled"}}
                })
     end
 
@@ -985,7 +994,8 @@ defmodule Temporalex.CoreExtrasTest do
       assert {:yield, [%Command.StartChildWorkflowExecution{seq: seq}]} =
                TestHarness.next(exec)
 
-      assert {:complete, {:ok, {:start_failed, %Temporalex.ChildWorkflowFailure{cause: cause}}}} =
+      assert {:complete,
+              {:ok, {:start_failed, %Temporalex.Failure.WorkflowExecutionError{cause: cause}}}} =
                TestHarness.resolve(exec, %Job.ResolveChildWorkflowExecutionStart{
                  seq: seq,
                  status:
@@ -998,7 +1008,7 @@ defmodule Temporalex.CoreExtrasTest do
                })
 
       assert cause.type == "ChildWorkflowStartFailed"
-      assert cause.non_retryable == true
+      assert cause.retryable? == false
     end
 
     defmodule StaleHandleParent do
@@ -1028,7 +1038,8 @@ defmodule Temporalex.CoreExtrasTest do
       assert {:ok, exec} = TestHarness.start_workflow(StaleHandleParent, nil)
 
       assert {:complete,
-              {:ok, {:got_error, %Temporalex.ApplicationError{type: "UnknownChildWorkflow"}}}} =
+              {:ok,
+               {:got_error, %Temporalex.Failure.ApplicationError{type: "UnknownChildWorkflow"}}}} =
                TestHarness.next(exec)
     end
 

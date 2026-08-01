@@ -19,10 +19,10 @@ defmodule Temporalex.StructuredErrorsIntegrationTest do
     defactivity raise_application_error(message, type),
       start_to_close_timeout: 5_000,
       retry_policy: [maximum_attempts: 1] do
-      raise %Temporalex.ApplicationError{
+      raise %Temporalex.Failure.ApplicationError{
         message: message,
         type: type,
-        non_retryable: true,
+        retryable?: false,
         details: %{shopper_id: "S-001"}
       }
     end
@@ -73,14 +73,22 @@ defmodule Temporalex.StructuredErrorsIntegrationTest do
     end
 
     worker_name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client_name = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
     task_queue = "structured-errors-#{System.unique_integer([:positive])}"
+
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: "http://127.0.0.1:7233",
+        namespace: "default",
+        task_queue: task_queue
+      )
 
     {:ok, worker_pid} =
       Temporalex.Worker.start_link(
         name: worker_name,
-        backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
-        namespace: "default",
+        client: client_name,
         task_queue: task_queue,
         workflows: [Workflow],
         activities: [Activities]
@@ -89,21 +97,22 @@ defmodule Temporalex.StructuredErrorsIntegrationTest do
     on_exit(fn ->
       try do
         if Process.alive?(worker_pid), do: Supervisor.stop(worker_pid, :normal, 5_000)
+        if Process.alive?(client_pid), do: GenServer.stop(client_pid, :normal, 5_000)
       catch
         :exit, _ -> :ok
       end
     end)
 
-    {:ok, worker: worker_name}
+    {:ok, client: client_name, worker: worker_name}
   end
 
   test "ApplicationError raised in activity arrives at workflow as %ActivityFailure{cause: %ApplicationError{}}",
-       %{worker: worker} do
+       %{client: client} do
     workflow_id = "se-app-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
       Temporalex.Client.start_workflow(
-        worker,
+        client,
         Workflow,
         {:raise_app, "invalid sku", "InvalidSku"},
         workflow_id: workflow_id,
@@ -113,20 +122,20 @@ defmodule Temporalex.StructuredErrorsIntegrationTest do
     assert {:ok, {:got_failure, failure}} =
              Temporalex.Client.get_result(handle, timeout: 15_000)
 
-    assert %Temporalex.ActivityFailure{cause: cause} = failure
-    assert %Temporalex.ApplicationError{} = cause
+    assert %Temporalex.Failure.ActivityError{cause: cause} = failure
+    assert %Temporalex.Failure.ApplicationError{} = cause
     assert cause.type == "InvalidSku"
     assert cause.message == "invalid sku"
-    assert cause.non_retryable == true
+    assert cause.retryable? == false
   end
 
   test "Bare {:error, reason} from activity wraps into ApplicationError with the reason as details",
-       %{worker: worker} do
+       %{client: client} do
     workflow_id = "se-tup-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
       Temporalex.Client.start_workflow(
-        worker,
+        client,
         Workflow,
         {:return_error, :insufficient_funds},
         workflow_id: workflow_id,
@@ -136,20 +145,20 @@ defmodule Temporalex.StructuredErrorsIntegrationTest do
     assert {:ok, {:got_failure, failure}} =
              Temporalex.Client.get_result(handle, timeout: 15_000)
 
-    assert %Temporalex.ActivityFailure{cause: cause} = failure
-    assert %Temporalex.ApplicationError{} = cause
+    assert %Temporalex.Failure.ActivityError{cause: cause} = failure
+    assert %Temporalex.Failure.ApplicationError{} = cause
     assert cause.type == "ApplicationError"
     # message reflects the inspected reason
     assert cause.message == ":insufficient_funds"
   end
 
   test "Plain RuntimeError raised in activity wraps with type set to exception module name",
-       %{worker: worker} do
+       %{client: client} do
     workflow_id = "se-gen-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
       Temporalex.Client.start_workflow(
-        worker,
+        client,
         Workflow,
         {:raise_generic, "boom"},
         workflow_id: workflow_id,
@@ -159,8 +168,8 @@ defmodule Temporalex.StructuredErrorsIntegrationTest do
     assert {:ok, {:got_failure, failure}} =
              Temporalex.Client.get_result(handle, timeout: 15_000)
 
-    assert %Temporalex.ActivityFailure{cause: cause} = failure
-    assert %Temporalex.ApplicationError{} = cause
+    assert %Temporalex.Failure.ActivityError{cause: cause} = failure
+    assert %Temporalex.Failure.ApplicationError{} = cause
     assert cause.type == "RuntimeError"
     assert cause.message == "boom"
   end

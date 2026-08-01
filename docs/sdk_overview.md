@@ -8,6 +8,7 @@ This document is the architecture map. Detailed contracts live in focused docs:
 |---|---|
 | [programming_model.md](programming_model.md) | Public workflow programming model: activities, workflow API, signals, updates, queries, `phase`, `parallel`, and determinism guidance. |
 | [public_api.md](public_api.md) | Public module-level API: workflow DSL, activity DSL, client API shape, retry policy, and error structs. |
+| [testing.md](testing.md) | Public workflow testing helpers for fast local workflow tests without a Temporal server. |
 | [implementation_principles.md](implementation_principles.md) | Internal implementation rules, invariants, API admission criteria, and review checklist. |
 | [implementation_slice.md](implementation_slice.md) | Core implementation slices: sequential core first, then structured concurrency with `parallel`, `phase`, signals, updates, and queries. |
 | [review_gates.md](review_gates.md) | Completed Slice 1, Slice 2, and native integration review-gate notes, evidence, outcomes, and beta limits. |
@@ -106,7 +107,7 @@ See [backend.md](backend.md) and [temporal_core_mapping.md](temporal_core_mappin
 
 ## Supervision Overview
 
-The current native backend creates a Temporal Core runtime resource for each worker backend state. The library can later move that into a singleton runtime process:
+The native backend creates Temporal Core runtime/client resources in `Temporalex.Client`. Workers receive an explicit client and start pollers from that shared client state.
 
 ```
 Temporalex.Supervisor
@@ -117,12 +118,14 @@ Each user worker instance owns its own worker tree:
 
 ```
 MyApp.Temporal (Supervisor, strategy: :rest_for_one)
-├── MyApp.Temporal.ExecutorSupervisor
-├── MyApp.Temporal.ActivitySupervisor
-└── MyApp.Temporal.Server
+├── MyApp.TemporalClient
+└── MyApp.TemporalWorker (Supervisor, strategy: :one_for_all)
+    ├── MyApp.TemporalWorker.ExecutorSupervisor
+    ├── MyApp.TemporalWorker.ActivitySupervisor
+    └── MyApp.TemporalWorker.Server
 ```
 
-The server owns backend state and monitors each executor. Executors trap exits and link to their runner processes. Activity work runs under the activity supervisor.
+The server owns worker backend state and monitors both the client owner and each executor. Executors trap exits and link to their runner processes. Activity work runs under the activity supervisor.
 
 See [server.md](server.md).
 
@@ -133,7 +136,7 @@ The public workflow model is documented in [programming_model.md](programming_mo
 - Workflows are modules with `run/1`.
 - Activities are defined with `use Temporalex.Activity` and `defactivity`.
 - Workflow code calls activities, sleeps, waits for signals, reads workflow time, publishes query state, and uses deterministic random helpers through `Temporalex.Workflow.API`.
-- `API.parallel/1` and `API.phase/2` are the structured concurrency hosts.
+- `API.parallel/1`/`API.parallel!/1` and `API.phase/2`/`API.phase!/2` are the structured concurrency hosts.
 - Queries read only the last state explicitly published by `API.publish_state/1`.
 - Updates are accepted only while the workflow is inside a matching `API.phase/2`.
 
@@ -170,3 +173,4 @@ Current repository status:
 - `Temporalex.Backend.TemporalCore` is implemented through `Temporalex.Native`, Rustler resources, Temporal Core worker/client calls, native poll loops, protobuf conversion, and ETF payload conversion.
 - `Temporalex.Client` is implemented for Temporal Core-backed workers with workflow start/result, signal, query, update, cancel, terminate, and describe operations.
 - `test/temporalex/integration/temporal_core_integration_test.exs` starts a Temporal dev server and verifies workflow execution, activity execution, heartbeats, invalid client option handling, signal/query/update/describe, termination, and result decoding through the Rust NIF.
+- `test/temporalex/integration/temporal_worker_restart_test.exs` verifies worker restart and real-history replay with the Temporal dev server.

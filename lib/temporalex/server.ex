@@ -21,10 +21,14 @@ defmodule Temporalex.Server do
     @moduledoc false
 
     defstruct name: nil,
+              client: nil,
+              client_pid: nil,
+              client_ref: nil,
               backend: nil,
               backend_state: nil,
               namespace: "default",
               task_queue: "default",
+              workflow_safe_mode: :off,
               workflow_map: %{},
               activity_map: %{},
               executor_supervisor: nil,
@@ -57,23 +61,31 @@ defmodule Temporalex.Server do
 
   @impl GenServer
   def init(opts) do
-    backend = Keyword.get(opts, :backend, Temporalex.Backend.Test)
+    client = Keyword.fetch!(opts, :client)
 
-    state = %State{
-      name: Keyword.fetch!(opts, :name),
-      backend: backend,
-      namespace: Keyword.get(opts, :namespace, "default"),
-      task_queue: Keyword.get(opts, :task_queue, "default"),
-      workflow_map: workflow_map(Keyword.get(opts, :workflows, [])),
-      activity_map: activity_map(Keyword.get(opts, :activities, [])),
-      executor_supervisor: Keyword.fetch!(opts, :executor_supervisor),
-      activity_supervisor: Keyword.fetch!(opts, :activity_supervisor)
-    }
+    with {:ok, connection} <- Temporalex.Client.connection(client),
+         {:ok, backend_state} <-
+           connection.backend.start_worker(connection.backend_state, opts, self()) do
+      client_ref = Process.monitor(connection.pid)
 
-    case backend.start_worker(opts, self()) do
-      {:ok, backend_state} ->
-        {:ok, %{state | backend_state: backend_state}}
+      state = %State{
+        name: Keyword.fetch!(opts, :name),
+        client: client,
+        client_pid: connection.pid,
+        client_ref: client_ref,
+        backend: connection.backend,
+        backend_state: backend_state,
+        namespace: connection.namespace || "default",
+        task_queue: Keyword.get(opts, :task_queue, connection.task_queue || "default"),
+        workflow_safe_mode: Keyword.get(opts, :workflow_safe_mode, :off),
+        workflow_map: workflow_map(Keyword.get(opts, :workflows, [])),
+        activity_map: activity_map(Keyword.get(opts, :activities, [])),
+        executor_supervisor: Keyword.fetch!(opts, :executor_supervisor),
+        activity_supervisor: Keyword.fetch!(opts, :activity_supervisor)
+      }
 
+      {:ok, state}
+    else
       {:error, reason} ->
         {:stop, {:backend_start_failed, reason}}
     end
@@ -108,6 +120,9 @@ defmodule Temporalex.Server do
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     cond do
+      ref == state.client_ref ->
+        {:stop, {:client_down, reason}, state}
+
       Map.has_key?(state.executor_refs, ref) ->
         {:noreply, handle_executor_down(ref, reason, state)}
 
@@ -151,6 +166,10 @@ defmodule Temporalex.Server do
 
   @impl GenServer
   def terminate(_reason, %State{} = state) do
+    if state.client_ref do
+      Process.demonitor(state.client_ref, [:flush])
+    end
+
     if state.backend_state do
       state.backend.shutdown_worker(state.backend_state)
     end
@@ -239,7 +258,10 @@ defmodule Temporalex.Server do
   end
 
   defp start_executor(state, run_id, workflow_type, workflow_module) do
-    child = {Executor, workflow_module: workflow_module, run_id: run_id}
+    child = {
+      Executor,
+      workflow_module: workflow_module, run_id: run_id, safe_mode: state.workflow_safe_mode
+    }
 
     case DynamicSupervisor.start_child(state.executor_supervisor, child) do
       {:ok, pid} ->
@@ -335,11 +357,11 @@ defmodule Temporalex.Server do
           task_token: task.task_token,
           result:
             {:error,
-             %Temporalex.ApplicationError{
+             %Temporalex.Failure.ApplicationError{
                message: "unknown activity type: #{task.activity_type}",
                type: "UnknownActivityType",
-               non_retryable: true,
-               details: task.activity_type
+               retryable?: false,
+               details: [task.activity_type]
              }}
         }
 
@@ -375,11 +397,11 @@ defmodule Temporalex.Server do
           task_token: activity_info.task_token,
           result:
             {:error,
-             %Temporalex.ApplicationError{
+             %Temporalex.Failure.ApplicationError{
                message: "activity process exited: #{inspect(reason)}",
                type: "ActivityExit",
-               non_retryable: false,
-               details: reason
+               retryable?: true,
+               details: [inspect(reason)]
              }}
         }
 
@@ -413,11 +435,21 @@ defmodule Temporalex.Server do
   end
 
   defp submit_activity_completion(state, %ActivityCompletion{} = completion) do
+    completion = %{completion | result: normalize_activity_result(completion.result)}
+
     case state.backend.complete_activity_task(state.backend_state, completion) do
       :ok -> state
       {:error, reason} -> raise "backend activity completion failed: #{inspect(reason)}"
     end
   end
+
+  defp normalize_activity_result({:error, failure}),
+    do: {:error, Temporalex.Failure.normalize(failure)}
+
+  defp normalize_activity_result({:cancelled, failure}),
+    do: {:cancelled, Temporalex.Failure.normalize(failure)}
+
+  defp normalize_activity_result(result), do: result
 
   defp run_activity(activity, task, context) do
     args =
@@ -432,7 +464,7 @@ defmodule Temporalex.Server do
         {:ok, value} ->
           {:ok, value}
 
-        {:error, %Temporalex.ApplicationError{} = err} ->
+        {:error, %Temporalex.Failure.ApplicationError{} = err} ->
           {:error, err}
 
         {:error, reason} ->
@@ -440,51 +472,51 @@ defmodule Temporalex.Server do
 
         other ->
           {:error,
-           %Temporalex.ApplicationError{
+           %Temporalex.Failure.ApplicationError{
              message: "activity returned invalid value: #{inspect(other)}",
              type: "InvalidActivityReturn",
-             non_retryable: true,
-             details: other
+             retryable?: false,
+             details: [inspect(other)]
            }}
       end
     rescue
-      err in Temporalex.ApplicationError ->
+      err in Temporalex.Failure.ApplicationError ->
         {:error, err}
 
       error ->
         {:error,
-         %Temporalex.ApplicationError{
+         %Temporalex.Failure.ApplicationError{
            message: Exception.message(error),
            type: inspect(error.__struct__),
-           non_retryable: false,
-           details: %{exception: error, stacktrace: __STACKTRACE__}
+           retryable?: true,
+           details: [inspect(error), Exception.format_stacktrace(__STACKTRACE__)]
          }}
     catch
       :throw, {:cancelled, reason} ->
         {:cancelled,
-         %Temporalex.CancelledError{
+         %Temporalex.Failure.CancelledError{
            message: "activity cancelled",
-           details: reason
+           details: List.wrap(reason)
          }}
 
       kind, reason ->
         {:error,
-         %Temporalex.ApplicationError{
+         %Temporalex.Failure.ApplicationError{
            message: "activity #{kind}: #{inspect(reason)}",
            type: "ActivityExit",
-           non_retryable: false,
-           details: %{kind: kind, reason: reason, stacktrace: __STACKTRACE__}
+           retryable?: true,
+           details: [inspect(kind), inspect(reason), Exception.format_stacktrace(__STACKTRACE__)]
          }}
     end
   end
 
-  defp application_error_from_reason(%Temporalex.ApplicationError{} = err), do: err
+  defp application_error_from_reason(%Temporalex.Failure.ApplicationError{} = err), do: err
 
   defp application_error_from_reason(reason) do
-    %Temporalex.ApplicationError{
+    %Temporalex.Failure.ApplicationError{
       message: inspect(reason),
       type: "ApplicationError",
-      non_retryable: false,
+      retryable?: true,
       details: reason
     }
   end

@@ -17,7 +17,9 @@ The tests should prove:
 - runner and executor process lifecycle behaves correctly
 - signals, updates, phases, and parallel branches obey the programming model
 
-The test harness should become the foundation for `Temporalex.Testing`, not throwaway test code.
+The test harness is the foundation for `Temporalex.Testing`, the public local
+workflow testing API. The core harness remains lower-level so internal tests can
+assert exact activation/completion structs directly.
 
 ## Harness Shape
 
@@ -158,7 +160,7 @@ Lifecycle tests should exercise real processes:
 
 - runner success becomes `CompleteWorkflow`
 - runner `{:error, reason}` becomes `FailWorkflow`
-- runner `{:continue_as_new, args}` becomes `ContinueAsNew`
+- `API.continue_as_new!/2` becomes terminal `ContinueAsNew`
 - unsupported runner return values become `FailWorkflow`
 - runner crash becomes workflow failure
 - executor crash tears down linked runner
@@ -202,7 +204,7 @@ Example workflow:
 
 ```elixir
 def run(_) do
-  API.parallel([
+  API.parallel!([
     fn -> Activities.Work.run(:a) end,
     fn -> Activities.Work.run(:b) end,
     fn -> Activities.Work.run(:c) end

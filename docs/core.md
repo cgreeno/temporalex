@@ -13,6 +13,7 @@ Scheduler rounds and replay matching are specified in [scheduler_and_replay.md](
 The core owns:
 
 - `Temporalex.Core.Executor`, one GenServer per workflow execution.
+- Optional workflow safe-mode tracing through `Temporalex.Core.TraceGuard`.
 - Runner process lifecycle.
 - The workflow operation protocol used by `Temporalex.Workflow.API` and activity dispatch functions.
 - Replay command matching against activation transcripts.
@@ -105,17 +106,32 @@ Completions are emitted by executors and submitted by the server through the con
 
 A successful completion contains workflow commands. A failed completion means the activation itself could not be processed, for example because of nondeterminism or an unhandled workflow-task failure. This is distinct from `%Temporalex.Core.Command.FailWorkflow{}`, which is a successful activation command that fails the workflow execution.
 
+## Workflow Safe Mode
+
+Executors can run with `safe_mode: :fail | :warn | :off`. Safe mode is hosted by a per-executor `Temporalex.Core.TraceGuard` process which owns an OTP trace session. Only workflow runner and handler processes are traced; trace traffic is consumed by the guard and reduced to structured violations before the executor sees it.
+
+In `:fail` mode, a violation fails the current activation and tears down workflow-owned runner processes through the normal runtime abort path. The core test harness enables this mode by default. Worker/server execution defaults to `:off`; pass `workflow_safe_mode: :fail` or `:warn` to a worker to enable it for real worker executions.
+
+The first guard pass catches:
+
+- unexpected sends from workflow runner processes
+- unexpected receives by workflow runner processes
+- common unsafe calls for time, randomness, filesystem, environment/config, tasks/process spawning, ETS-like mutable stores, ports, OS access, and sleeps
+
+The guard allows the executor protocol, runner completion/failure messages, operation replies, runner start messages, and narrow code-server traffic needed for lazy module loading. Safe mode is a development and test guardrail, not a formal determinism proof.
+
 Common commands:
 
 ```elixir
 %Temporalex.Core.Command.ScheduleActivity{seq: integer(), thread_id: list(), activity_id: String.t(), type: String.t(), input: [term()], opts: keyword()}
 %Temporalex.Core.Command.StartTimer{seq: integer(), thread_id: list(), duration_ms: non_neg_integer()}
 %Temporalex.Core.Command.CancelTimer{seq: integer()}
+%Temporalex.Core.Command.RequestCancelActivity{seq: integer()}
 %Temporalex.Core.Command.SetPatchMarker{id: String.t(), deprecated: boolean()}
 %Temporalex.Core.Command.CompleteWorkflow{result: term()}
 %Temporalex.Core.Command.FailWorkflow{reason: term()}
-%Temporalex.Core.Command.ContinueAsNew{args: term()}
-%Temporalex.Core.Command.CancelWorkflow{}
+%Temporalex.Core.Command.ContinueAsNew{input: term(), workflow_type: String.t(), task_queue: String.t() | nil, opts: keyword()}
+%Temporalex.Core.Command.CancelWorkflow{reason: term()}
 %Temporalex.Core.Command.RespondToUpdate{protocol_instance_id: String.t(), response: :accepted | {:completed, term()} | {:rejected, term()}}
 %Temporalex.Core.Command.RespondToQuery{query_id: String.t(), result: {:ok, term()} | {:error, term()}}
 %Temporalex.Core.Command.UpsertSearchAttributes{attrs: map()}
@@ -165,6 +181,9 @@ Workflow code calls the executor with operations:
 %Temporalex.Core.Op.DeprecatePatch{id: String.t()}
 %Temporalex.Core.Op.WorkflowInfo{}
 %Temporalex.Core.Op.Cancelled{}
+%Temporalex.Core.Op.Cancellation{}
+%Temporalex.Core.Op.EnterNonCancellable{}
+%Temporalex.Core.Op.ExitNonCancellable{}
 %Temporalex.Core.Op.UpsertSearchAttributes{attrs: map()}
 %Temporalex.Core.Op.Now{}
 %Temporalex.Core.Op.Random{}
@@ -179,6 +198,17 @@ All workflow API calls use one protocol shape:
 ```elixir
 GenServer.call(executor, {:workflow_op, thread_id, op}, :infinity)
 ```
+
+Executor replies to workflow operation calls are always wrapped as an internal envelope:
+
+```elixir
+{:temporalex_op_reply, :ok, value}
+{:temporalex_op_reply, :cancelled, %Temporalex.Failure.CancelledError{}}
+{:temporalex_op_reply, :error, reason}
+```
+
+The public workflow API turns those envelopes into non-bang return values or bang-variant
+exceptions. User payloads are never used as control sentinels.
 
 ## Workflow Context
 
@@ -289,8 +319,9 @@ The runner wrapper calls `run/1` and exits with:
 ```elixir
 {:workflow_result, {:ok, result}}
 {:workflow_result, {:error, reason}}
-{:workflow_result, {:continue_as_new, args}}
 ```
+
+Continue-as-new is not a return shape. Workflow code calls `Temporalex.Workflow.API.continue_as_new!/2`, which emits a terminal command and tears down workflow-owned processes without returning to user code.
 
 Any other return shape is an invalid workflow return and becomes a workflow failure command.
 

@@ -54,10 +54,14 @@ defmodule Temporalex.ServerExtrasTest do
 
   setup do
     name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
+
+    start_supervised!({Temporalex.Client, name: client, backend: TestBackend})
 
     start_supervised!(
       {Temporalex.Worker,
        name: name,
+       client: client,
        backend: TestBackend,
        test_owner: self(),
        namespace: "default",
@@ -66,7 +70,7 @@ defmodule Temporalex.ServerExtrasTest do
        activities: [Activities]}
     )
 
-    %{worker: name}
+    %{worker: name, client: client}
   end
 
   describe "concurrent workflow runs on one worker" do
@@ -215,7 +219,7 @@ defmodule Temporalex.ServerExtrasTest do
 
       # Activity completes with the cancelled result.
       assert %Temporalex.Core.ActivityCompletion{
-               result: {:cancelled, %Temporalex.CancelledError{}}
+               result: {:cancelled, %Temporalex.Failure.CancelledError{}}
              } = TestBackend.fetch_activity_completion(worker, token)
     end
   end

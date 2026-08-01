@@ -1,5 +1,6 @@
 defmodule Temporalex.ServerIntegrationTest do
   use ExUnit.Case, async: false
+  import ExUnit.CaptureLog
 
   alias Temporalex.Backend.Test, as: TestBackend
   alias Temporalex.Core.Activation
@@ -56,7 +57,7 @@ defmodule Temporalex.ServerIntegrationTest do
     use Temporalex.Workflow
 
     def run(_) do
-      value = API.wait_for_signal("go")
+      value = API.wait_for_signal!("go")
       {:ok, value}
     end
   end
@@ -75,11 +76,14 @@ defmodule Temporalex.ServerIntegrationTest do
 
   setup do
     name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
+
+    start_supervised!({Temporalex.Client, name: client, backend: TestBackend})
 
     start_supervised!(
       {Temporalex.Worker,
        name: name,
-       backend: TestBackend,
+       client: client,
        test_owner: self(),
        namespace: "default",
        task_queue: "temporalex-test",
@@ -87,7 +91,7 @@ defmodule Temporalex.ServerIntegrationTest do
        activities: [Activities]}
     )
 
-    %{worker: name}
+    %{client: client, worker: name}
   end
 
   test "worker starts the documented server and supervisor tree", %{worker: worker} do
@@ -95,6 +99,38 @@ defmodule Temporalex.ServerIntegrationTest do
     assert is_pid(Process.whereis(Temporalex.Worker.server_name(worker)))
     assert is_pid(Process.whereis(Temporalex.Worker.executor_supervisor_name(worker)))
     assert is_pid(Process.whereis(Temporalex.Worker.activity_supervisor_name(worker)))
+  end
+
+  test "worker stops instead of running with a dead client" do
+    previous = Process.flag(:trap_exit, true)
+    client = Module.concat(__MODULE__, :"ClientDown#{System.unique_integer([:positive])}")
+    worker = Module.concat(__MODULE__, :"WorkerDown#{System.unique_integer([:positive])}")
+
+    try do
+      assert {:ok, client_pid} = Temporalex.Client.start_link(name: client, backend: TestBackend)
+
+      assert {:ok, worker_pid} =
+               Temporalex.Worker.start_link(
+                 name: worker,
+                 client: client,
+                 test_owner: self(),
+                 workflows: [ActivityWorkflow],
+                 activities: []
+               )
+
+      capture_log(fn ->
+        GenServer.stop(client_pid, :normal)
+
+        assert_receive {:EXIT, ^client_pid, :normal}, 1_000
+        assert_receive {:EXIT, ^worker_pid, _reason}, 1_000
+      end)
+
+      refute Process.alive?(worker_pid)
+    after
+      if pid = Process.whereis(worker), do: Supervisor.stop(pid, :normal, 1_000)
+      if pid = Process.whereis(client), do: GenServer.stop(pid, :normal, 1_000)
+      Process.flag(:trap_exit, previous)
+    end
   end
 
   test "server routes workflow activation to an executor and submits completion", %{
@@ -252,7 +288,8 @@ defmodule Temporalex.ServerIntegrationTest do
 
     assert %ActivityCompletion{
              result:
-               {:error, %Temporalex.ApplicationError{details: :bad, type: "ApplicationError"}}
+               {:error,
+                %Temporalex.Failure.ApplicationError{details: [:bad], type: "ApplicationError"}}
            } = TestBackend.fetch_activity_completion(worker, "activity-fail")
 
     TestBackend.send_activity_task(
@@ -263,9 +300,9 @@ defmodule Temporalex.ServerIntegrationTest do
     assert %ActivityCompletion{
              result:
                {:error,
-                %Temporalex.ApplicationError{
+                %Temporalex.Failure.ApplicationError{
                   type: "InvalidActivityReturn",
-                  non_retryable: true
+                  retryable?: false
                 }}
            } = TestBackend.fetch_activity_completion(worker, "activity-invalid")
 
@@ -277,7 +314,7 @@ defmodule Temporalex.ServerIntegrationTest do
     assert %ActivityCompletion{
              result:
                {:error,
-                %Temporalex.ApplicationError{
+                %Temporalex.Failure.ApplicationError{
                   message: "boom",
                   type: "RuntimeError"
                 }}
@@ -305,7 +342,7 @@ defmodule Temporalex.ServerIntegrationTest do
 
     assert %ActivityCompletion{
              task_token: ^token,
-             result: {:cancelled, %Temporalex.CancelledError{details: :cancelled}}
+             result: {:cancelled, %Temporalex.Failure.CancelledError{details: [:cancelled]}}
            } = TestBackend.fetch_activity_completion(worker, token)
   end
 

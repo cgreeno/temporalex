@@ -3,6 +3,8 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
   @moduletag :external
 
+  alias Temporalex.TestSupport.TemporalDevServer
+
   defmodule Activities do
     use Temporalex.Activity
 
@@ -15,6 +17,50 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
       heartbeat_timeout: 10_000 do
       :ok = Temporalex.Activity.Context.heartbeat(ctx, {:heartbeat, value})
       {:ok, {:heartbeat, value}}
+    end
+
+    defactivity long_cancellable(ctx, parent),
+      start_to_close_timeout: 30_000,
+      heartbeat_timeout: 1_000,
+      cancellation_type: :wait_cancellation_completed do
+      send(parent, {:long_cancellable_started, self()})
+      wait_until_cancelled(ctx, parent)
+    end
+
+    defactivity fail_retryable(ctx),
+      start_to_close_timeout: 1_000,
+      schedule_to_close_timeout: 10_000,
+      retry_policy: [initial_interval: 10, maximum_attempts: 2] do
+      {:error,
+       Temporalex.Failure.application("retryable activity failure",
+         type: "RetryableActivityFailure",
+         details: [ctx.attempt],
+         retryable?: true
+       )}
+    end
+
+    defactivity fail_non_retryable(ctx),
+      start_to_close_timeout: 1_000,
+      schedule_to_close_timeout: 10_000,
+      retry_policy: [initial_interval: 10, maximum_attempts: 2] do
+      {:error,
+       Temporalex.Failure.application("non-retryable activity failure",
+         type: "NonRetryableActivityFailure",
+         details: [ctx.attempt],
+         retryable?: false
+       )}
+    end
+
+    defp wait_until_cancelled(ctx, parent) do
+      case Temporalex.Activity.Context.heartbeat(ctx, :working) do
+        :ok ->
+          Process.sleep(50)
+          wait_until_cancelled(ctx, parent)
+
+        {:cancelled, reason} ->
+          send(parent, {:long_cancellable_cancelled, reason})
+          throw({:cancelled, Temporalex.Failure.cancelled("activity cancelled")})
+      end
     end
   end
 
@@ -42,7 +88,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
       API.publish_state(initial)
 
       state =
-        API.phase(initial,
+        API.phase!(initial,
           signal: %{
             "add" => fn [amount], state ->
               state = state + amount
@@ -76,46 +122,173 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
 
     def run(label) do
       API.publish_state({:waiting, label})
-      API.sleep(60_000)
+      API.sleep!(60_000)
       {:ok, {:completed, label}}
     end
   end
 
+  defmodule ActivityCancellationWorkflow do
+    use Temporalex.Workflow
+
+    def run(parent) do
+      _result = Activities.long_cancellable!(parent)
+      {:ok, :activity_completed}
+    rescue
+      error in Temporalex.Failure.CancelledError -> {:cancelled, error}
+    end
+  end
+
+  defmodule SearchAttributeWorkflow do
+    use Temporalex.Workflow
+
+    alias Temporalex.SearchAttribute
+    alias Temporalex.Workflow.API
+
+    def handle_query("state", _args, state), do: {:reply, state}
+
+    def run(label) do
+      :ok =
+        API.upsert_search_attributes(%{
+          "CustomKeywordField" => SearchAttribute.keyword("upserted-#{label}"),
+          "CustomIntField" => SearchAttribute.int(8)
+        })
+
+      API.publish_state(:upserted)
+      API.sleep!(60_000)
+      {:ok, :done}
+    end
+  end
+
+  defmodule ContinueAsNewWorkflow do
+    use Temporalex.Workflow
+
+    alias Temporalex.SearchAttribute
+    alias Temporalex.Workflow.API
+
+    def run(%{count: count, target: target, label: label, task_queue: task_queue} = input)
+        when count < target do
+      API.continue_as_new!(%{input | count: count + 1},
+        task_queue: task_queue,
+        run_timeout: 60_000,
+        task_timeout: 10_000,
+        memo: %{label: label, count: count + 1},
+        headers: %{source: "continue-as-new"},
+        search_attributes: %{
+          "CustomKeywordField" => SearchAttribute.keyword("continued-#{label}"),
+          "CustomIntField" => SearchAttribute.int(count + 1)
+        },
+        retry_policy: [initial_interval: 10, maximum_attempts: 2]
+      )
+
+      {:ok, :unreachable}
+    end
+
+    def run(%{count: count}) do
+      info = API.workflow_info()
+      {:ok, {:continued, count, info.continue_as_new_suggested}}
+    end
+  end
+
+  defmodule FailureWorkflow do
+    use Temporalex.Workflow
+
+    alias Temporalex.Failure
+    alias Temporalex.Workflow.API
+
+    def run(retryable?) do
+      attempt = API.workflow_info().attempt
+
+      {:error,
+       Failure.application("workflow failed",
+         type: "PlannedWorkflowFailure",
+         details: [attempt],
+         retryable?: retryable?
+       )}
+    end
+  end
+
+  defmodule ActivityFailureWorkflow do
+    use Temporalex.Workflow
+
+    def run(:retryable) do
+      fail_with_activity_result(Activities.fail_retryable())
+    end
+
+    def run(:non_retryable) do
+      fail_with_activity_result(Activities.fail_non_retryable())
+    end
+
+    defp fail_with_activity_result({:ok, value}), do: {:ok, value}
+
+    defp fail_with_activity_result({:error, %Temporalex.Failure.ActivityError{} = failure}),
+      do: {:error, failure}
+
+    defp fail_with_activity_result({:error, %Temporalex.Failure.ApplicationError{} = failure}),
+      do: {:error, failure}
+
+    defp fail_with_activity_result({:error, other}), do: {:error, other}
+  end
+
   test "TemporalCore worker runs workflow tasks, activities, and client operations against dev server" do
     temporal =
-      System.find_executable("temporal") || flunk("temporal CLI executable was not found")
-
-    port = free_port()
-    http_port = free_port()
-    metrics_port = free_port()
-
-    temporal_port = start_temporal(temporal, port, http_port, metrics_port)
+      TemporalDevServer.start!(
+        search_attributes: [
+          {"CustomKeywordField", "Keyword"},
+          {"CustomTextField", "Text"},
+          {"CustomIntField", "Int"},
+          {"CustomDoubleField", "Double"},
+          {"CustomBoolField", "Bool"},
+          {"CustomDatetimeField", "Datetime"},
+          {"CustomKeywordListField", "KeywordList"}
+        ]
+      )
 
     try do
-      assert wait_for_health(temporal, port)
-
       worker_name =
         Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
 
+      client_name =
+        Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
+
       task_queue = "temporalex-native-#{System.unique_integer([:positive])}"
+
+      {:ok, client_pid} =
+        Temporalex.Client.start_link(
+          name: client_name,
+          backend: Temporalex.Backend.TemporalCore,
+          target: temporal.target,
+          namespace: "default",
+          task_queue: task_queue,
+          workflow_result_timeout: 30_000
+        )
 
       {:ok, worker_pid} =
         Temporalex.Worker.start_link(
           name: worker_name,
-          backend: Temporalex.Backend.TemporalCore,
-          target: "http://127.0.0.1:#{port}",
-          namespace: "default",
+          client: client_name,
           task_queue: task_queue,
-          workflows: [Workflow, InteractiveWorkflow, WaitingWorkflow],
+          workflows: [
+            Workflow,
+            InteractiveWorkflow,
+            WaitingWorkflow,
+            ActivityCancellationWorkflow,
+            SearchAttributeWorkflow,
+            ContinueAsNewWorkflow,
+            FailureWorkflow,
+            ActivityFailureWorkflow
+          ],
           activities: [Activities],
           max_workflow_pollers: 2,
-          max_activity_pollers: 2,
-          workflow_result_timeout: 30_000
+          max_activity_pollers: 2
         )
 
       try do
-        assert {:error, invalid_start_reason} =
-                 Temporalex.Client.start_workflow(worker_name, Workflow, :invalid_options,
+        assert {:error,
+                %Temporalex.TransportError{
+                  category: :invalid_options,
+                  message: invalid_start_reason
+                }} =
+                 Temporalex.Client.start_workflow(client_name, Workflow, :invalid_options,
                    workflow_id: "temporalex-invalid-#{System.unique_integer([:positive])}",
                    workflow_task_timeout: -1,
                    timeout: 10_000
@@ -127,7 +300,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         workflow_id = "temporalex-native-#{System.unique_integer([:positive])}"
 
         assert {:ok, handle} =
-                 Temporalex.Client.start_workflow(worker_name, Workflow, input,
+                 Temporalex.Client.start_workflow(client_name, Workflow, input,
                    workflow_id: workflow_id,
                    timeout: 10_000
                  )
@@ -142,7 +315,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         interactive_id = "temporalex-interactive-#{System.unique_integer([:positive])}"
 
         assert {:ok, interactive} =
-                 Temporalex.Client.start_workflow(worker_name, InteractiveWorkflow, 0,
+                 Temporalex.Client.start_workflow(client_name, InteractiveWorkflow, 0,
                    workflow_id: interactive_id,
                    workflow_task_timeout: 10_000,
                    id_reuse_policy: :reject_duplicate,
@@ -151,7 +324,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert eventually(fn ->
+        assert TemporalDevServer.eventually(fn ->
                  Temporalex.Client.query_workflow(interactive, "state", [], timeout: 10_000) ==
                    {:ok, 0}
                end)
@@ -159,7 +332,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         assert :ok =
                  Temporalex.Client.signal_workflow(interactive, "add", [2], timeout: 10_000)
 
-        assert eventually(fn ->
+        assert TemporalDevServer.eventually(fn ->
                  Temporalex.Client.query_workflow(interactive, "state", [], timeout: 10_000) ==
                    {:ok, 2}
                end)
@@ -184,12 +357,12 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         terminated_id = "temporalex-terminated-#{System.unique_integer([:positive])}"
 
         assert {:ok, terminated} =
-                 Temporalex.Client.start_workflow(worker_name, WaitingWorkflow, :terminate,
+                 Temporalex.Client.start_workflow(client_name, WaitingWorkflow, :terminate,
                    workflow_id: terminated_id,
                    timeout: 10_000
                  )
 
-        assert eventually(fn ->
+        assert TemporalDevServer.eventually(fn ->
                  Temporalex.Client.query_workflow(terminated, "state", [], timeout: 10_000) ==
                    {:ok, {:waiting, :terminate}}
                end)
@@ -201,113 +374,243 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
                    timeout: 10_000
                  )
 
-        assert {:error, {:terminated, [:terminated_by_test]}} =
+        assert {:error, %Temporalex.WorkflowTerminatedError{details: [:terminated_by_test]}} =
                  Temporalex.Client.get_result(terminated, timeout: 30_000)
+
+        cancelled_timer_id = "temporalex-cancelled-timer-#{System.unique_integer([:positive])}"
+
+        assert {:ok, cancelled_timer} =
+                 Temporalex.Client.start_workflow(client_name, WaitingWorkflow, :cancel_timer,
+                   workflow_id: cancelled_timer_id,
+                   timeout: 10_000
+                 )
+
+        assert TemporalDevServer.eventually(fn ->
+                 Temporalex.Client.query_workflow(cancelled_timer, "state", [], timeout: 10_000) ==
+                   {:ok, {:waiting, :cancel_timer}}
+               end)
+
+        assert :ok =
+                 Temporalex.Client.cancel_workflow(cancelled_timer,
+                   reason: "integration cancellation",
+                   timeout: 10_000
+                 )
+
+        assert {:error, %Temporalex.WorkflowCancelledError{}} =
+                 Temporalex.Client.get_result(cancelled_timer, timeout: 30_000)
+
+        cancelled_activity_id =
+          "temporalex-cancelled-activity-#{System.unique_integer([:positive])}"
+
+        assert {:ok, cancelled_activity} =
+                 Temporalex.Client.start_workflow(
+                   client_name,
+                   ActivityCancellationWorkflow,
+                   self(),
+                   workflow_id: cancelled_activity_id,
+                   timeout: 10_000
+                 )
+
+        assert_receive {:long_cancellable_started, _pid}, 10_000
+
+        assert :ok =
+                 Temporalex.Client.cancel_workflow(cancelled_activity,
+                   reason: "integration activity cancellation",
+                   timeout: 10_000
+                 )
+
+        assert_receive {:long_cancellable_cancelled, _reason}, 15_000
+
+        assert {:error, %Temporalex.WorkflowCancelledError{}} =
+                 Temporalex.Client.get_result(cancelled_activity, timeout: 30_000)
+
+        search_id = "temporalex-search-attrs-#{System.unique_integer([:positive])}"
+        search_label = "search-#{System.unique_integer([:positive])}"
+
+        search_attributes = %{
+          "CustomKeywordField" => Temporalex.SearchAttribute.keyword("started-#{search_label}"),
+          "CustomTextField" => Temporalex.SearchAttribute.text("temporalex search text"),
+          "CustomIntField" => Temporalex.SearchAttribute.int(7),
+          "CustomDoubleField" => Temporalex.SearchAttribute.double(2.5),
+          "CustomBoolField" => Temporalex.SearchAttribute.bool(true),
+          "CustomDatetimeField" => Temporalex.SearchAttribute.datetime(~U[2026-05-08 12:00:00Z]),
+          "CustomKeywordListField" => Temporalex.SearchAttribute.keyword_list(["alpha", "beta"])
+        }
+
+        assert {:ok, search_handle} =
+                 Temporalex.Client.start_workflow(
+                   client_name,
+                   SearchAttributeWorkflow,
+                   search_label,
+                   workflow_id: search_id,
+                   search_attributes: search_attributes,
+                   timeout: 10_000
+                 )
+
+        assert TemporalDevServer.eventually(fn ->
+                 Temporalex.Client.query_workflow(search_handle, "state", [], timeout: 10_000) ==
+                   {:ok, :upserted}
+               end)
+
+        assert TemporalDevServer.eventually(fn ->
+                 TemporalDevServer.workflow_visible?(
+                   temporal,
+                   "CustomKeywordField = 'upserted-#{search_label}' and CustomIntField = 8",
+                   search_id
+                 )
+               end)
+
+        assert :ok =
+                 Temporalex.Client.terminate_workflow(search_handle,
+                   reason: "integration test complete",
+                   timeout: 10_000
+                 )
+
+        continue_id = "temporalex-continue-as-new-#{System.unique_integer([:positive])}"
+        continue_label = "continue-#{System.unique_integer([:positive])}"
+
+        assert {:ok, continue_handle} =
+                 Temporalex.Client.start_workflow(
+                   client_name,
+                   ContinueAsNewWorkflow,
+                   %{count: 0, target: 2, label: continue_label, task_queue: task_queue},
+                   workflow_id: continue_id,
+                   timeout: 10_000
+                 )
+
+        assert {:ok, {:continued, 2, false}} =
+                 Temporalex.Client.get_result(continue_handle, timeout: 30_000)
+
+        assert TemporalDevServer.eventually(fn ->
+                 TemporalDevServer.workflow_visible?(
+                   temporal,
+                   "CustomKeywordField = 'continued-#{continue_label}' and CustomIntField = 2",
+                   continue_id
+                 )
+               end)
+
+        non_retryable_workflow_id =
+          "temporalex-non-retryable-workflow-#{System.unique_integer([:positive])}"
+
+        assert {:ok, non_retryable_workflow} =
+                 Temporalex.Client.start_workflow(client_name, FailureWorkflow, false,
+                   workflow_id: non_retryable_workflow_id,
+                   retry_policy: [initial_interval: 10, maximum_attempts: 2],
+                   timeout: 10_000
+                 )
+
+        assert {:error,
+                %Temporalex.WorkflowFailedError{
+                  cause: %Temporalex.Failure.ApplicationError{} = failure
+                }} =
+                 Temporalex.Client.get_result(non_retryable_workflow, timeout: 30_000)
+
+        assert failure.type == "PlannedWorkflowFailure"
+        assert failure.details == [1]
+        assert failure.retryable? == false
+
+        typed_non_retryable_workflow_id =
+          "temporalex-typed-non-retryable-workflow-#{System.unique_integer([:positive])}"
+
+        assert {:ok, typed_non_retryable_workflow} =
+                 Temporalex.Client.start_workflow(client_name, FailureWorkflow, true,
+                   workflow_id: typed_non_retryable_workflow_id,
+                   retry_policy: [
+                     initial_interval: 10,
+                     maximum_attempts: 2,
+                     non_retryable_error_types: ["PlannedWorkflowFailure"]
+                   ],
+                   timeout: 10_000
+                 )
+
+        assert {:error,
+                %Temporalex.WorkflowFailedError{
+                  cause: %Temporalex.Failure.ApplicationError{} = failure
+                }} =
+                 Temporalex.Client.get_result(typed_non_retryable_workflow, timeout: 30_000)
+
+        assert failure.type == "PlannedWorkflowFailure"
+        assert failure.details == [1]
+        assert failure.retryable? == true
+
+        retryable_workflow_id =
+          "temporalex-retryable-workflow-#{System.unique_integer([:positive])}"
+
+        assert {:ok, retryable_workflow} =
+                 Temporalex.Client.start_workflow(client_name, FailureWorkflow, true,
+                   workflow_id: retryable_workflow_id,
+                   retry_policy: [initial_interval: 10, maximum_attempts: 2],
+                   timeout: 10_000
+                 )
+
+        assert {:error,
+                %Temporalex.WorkflowFailedError{
+                  cause: %Temporalex.Failure.ApplicationError{} = failure
+                }} =
+                 Temporalex.Client.get_result(retryable_workflow, timeout: 30_000)
+
+        assert failure.type == "PlannedWorkflowFailure"
+        assert failure.details == [2]
+        assert failure.retryable? == true
+
+        non_retryable_activity_id =
+          "temporalex-non-retryable-activity-#{System.unique_integer([:positive])}"
+
+        assert {:ok, non_retryable_activity} =
+                 Temporalex.Client.start_workflow(
+                   client_name,
+                   ActivityFailureWorkflow,
+                   :non_retryable,
+                   workflow_id: non_retryable_activity_id,
+                   timeout: 10_000
+                 )
+
+        assert {:error,
+                %Temporalex.WorkflowFailedError{
+                  cause: %Temporalex.Failure.ActivityError{} = failure
+                }} =
+                 Temporalex.Client.get_result(non_retryable_activity, timeout: 30_000)
+
+        assert failure.retry_state == :non_retryable_failure
+        assert %Temporalex.Failure.ApplicationError{} = cause = failure.cause
+        assert cause.type == "NonRetryableActivityFailure"
+        assert cause.details == [1]
+        assert cause.retryable? == false
+
+        retryable_activity_id =
+          "temporalex-retryable-activity-#{System.unique_integer([:positive])}"
+
+        assert {:ok, retryable_activity} =
+                 Temporalex.Client.start_workflow(
+                   client_name,
+                   ActivityFailureWorkflow,
+                   :retryable,
+                   workflow_id: retryable_activity_id,
+                   timeout: 10_000
+                 )
+
+        assert {:error,
+                %Temporalex.WorkflowFailedError{
+                  cause: %Temporalex.Failure.ActivityError{} = failure
+                }} =
+                 Temporalex.Client.get_result(retryable_activity, timeout: 30_000)
+
+        assert failure.retry_state == :maximum_attempts_reached
+        assert %Temporalex.Failure.ApplicationError{} = cause = failure.cause
+        assert cause.type == "RetryableActivityFailure"
+        assert cause.details == [2]
+        assert cause.retryable? == true
       after
         if Process.alive?(worker_pid) do
           Supervisor.stop(worker_pid, :normal, 15_000)
         end
-      end
-    after
-      Port.close(temporal_port)
-      drain_port_messages()
-    end
-  end
 
-  defp start_temporal(temporal, port, http_port, metrics_port) do
-    Port.open(
-      {:spawn_executable, temporal},
-      [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        {:line, 4096},
-        args: [
-          "server",
-          "start-dev",
-          "--headless",
-          "--ip",
-          "127.0.0.1",
-          "--port",
-          Integer.to_string(port),
-          "--http-port",
-          Integer.to_string(http_port),
-          "--metrics-port",
-          Integer.to_string(metrics_port),
-          "--log-level",
-          "error"
-        ]
-      ]
-    )
-  end
-
-  defp wait_for_health(temporal, port) do
-    deadline = System.monotonic_time(:millisecond) + 20_000
-    do_wait_for_health(temporal, port, deadline)
-  end
-
-  defp do_wait_for_health(temporal, port, deadline) do
-    address = "127.0.0.1:#{port}"
-
-    case System.cmd(
-           temporal,
-           [
-             "operator",
-             "cluster",
-             "health",
-             "--address",
-             address,
-             "--client-connect-timeout",
-             "1s",
-             "--command-timeout",
-             "2s"
-           ],
-           stderr_to_stdout: true
-         ) do
-      {_output, 0} ->
-        true
-
-      {_output, _status} ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          false
-        else
-          Process.sleep(250)
-          do_wait_for_health(temporal, port, deadline)
+        if Process.alive?(client_pid) do
+          GenServer.stop(client_pid, :normal, 15_000)
         end
-    end
-  end
-
-  defp free_port do
-    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
-
-  defp drain_port_messages do
-    receive do
-      {_port, {:data, _data}} -> drain_port_messages()
-      {_port, {:exit_status, _status}} -> drain_port_messages()
-    after
-      100 -> :ok
-    end
-  end
-
-  defp eventually(fun, timeout \\ 10_000) when is_function(fun, 0) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_eventually(fun, deadline)
-  end
-
-  defp do_eventually(fun, deadline) do
-    if fun.() do
-      true
-    else
-      if System.monotonic_time(:millisecond) >= deadline do
-        false
-      else
-        Process.sleep(250)
-        do_eventually(fun, deadline)
       end
+    after
+      TemporalDevServer.stop(temporal)
     end
   end
 end

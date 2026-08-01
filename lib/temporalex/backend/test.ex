@@ -13,31 +13,85 @@ defmodule Temporalex.Backend.Test do
   alias Temporalex.Core.ActivityTask
   alias Temporalex.Core.Completion
 
-  defmodule State do
+  defmodule ClientState do
     @moduledoc false
     defstruct [:agent, :owner_pid]
   end
 
   @impl Temporalex.Backend
-  def start_worker(opts, _owner_pid) do
-    owner_pid = Keyword.get(opts, :test_owner, self())
+  def start_client(opts, owner_pid) do
+    test_owner = Keyword.get(opts, :test_owner, owner_pid)
 
     Agent.start_link(fn ->
       %{
         workflow_completions: [],
         activity_completions: [],
         errors: [],
-        shutdown?: false
+        shutdown?: false,
+        client_shutdown?: false
       }
     end)
     |> case do
-      {:ok, agent} -> {:ok, %State{agent: agent, owner_pid: owner_pid}}
+      {:ok, agent} -> {:ok, %ClientState{agent: agent, owner_pid: test_owner}}
       {:error, reason} -> {:error, reason}
     end
   end
 
   @impl Temporalex.Backend
-  def complete_workflow_activation(%State{} = state, %Completion{} = completion) do
+  def shutdown_client(%ClientState{} = state) do
+    if Process.alive?(state.agent) do
+      Agent.update(state.agent, &Map.put(&1, :client_shutdown?, true))
+    end
+
+    :ok
+  end
+
+  defmodule WorkerState do
+    @moduledoc false
+    defstruct [:agent, :owner_pid]
+  end
+
+  @impl Temporalex.Backend
+  def start_worker(%ClientState{} = client_state, opts, _owner_pid) do
+    owner_pid = Keyword.get(opts, :test_owner, self())
+
+    {:ok, %WorkerState{agent: client_state.agent, owner_pid: owner_pid}}
+  end
+
+  @impl Temporalex.Backend
+  def start_workflow(%ClientState{}, _workflow_type, _input, _opts),
+    do: unsupported_client_operation()
+
+  @impl Temporalex.Backend
+  def get_workflow_result(%ClientState{}, _workflow_id, _run_id, _opts),
+    do: unsupported_client_operation()
+
+  @impl Temporalex.Backend
+  def signal_workflow(%ClientState{}, _workflow_id, _run_id, _signal_name, _args, _opts),
+    do: unsupported_client_operation()
+
+  @impl Temporalex.Backend
+  def query_workflow(%ClientState{}, _workflow_id, _run_id, _query_name, _args, _opts),
+    do: unsupported_client_operation()
+
+  @impl Temporalex.Backend
+  def update_workflow(%ClientState{}, _workflow_id, _run_id, _update_name, _args, _opts),
+    do: unsupported_client_operation()
+
+  @impl Temporalex.Backend
+  def cancel_workflow(%ClientState{}, _workflow_id, _run_id, _opts),
+    do: unsupported_client_operation()
+
+  @impl Temporalex.Backend
+  def terminate_workflow(%ClientState{}, _workflow_id, _run_id, _opts),
+    do: unsupported_client_operation()
+
+  @impl Temporalex.Backend
+  def describe_workflow(%ClientState{}, _workflow_id, _run_id, _opts),
+    do: unsupported_client_operation()
+
+  @impl Temporalex.Backend
+  def complete_workflow_activation(%WorkerState{} = state, %Completion{} = completion) do
     Agent.update(state.agent, fn data ->
       Map.update!(data, :workflow_completions, &(&1 ++ [completion]))
     end)
@@ -47,7 +101,7 @@ defmodule Temporalex.Backend.Test do
   end
 
   @impl Temporalex.Backend
-  def complete_activity_task(%State{} = state, %ActivityCompletion{} = completion) do
+  def complete_activity_task(%WorkerState{} = state, %ActivityCompletion{} = completion) do
     Agent.update(state.agent, fn data ->
       Map.update!(data, :activity_completions, &(&1 ++ [completion]))
     end)
@@ -57,10 +111,10 @@ defmodule Temporalex.Backend.Test do
   end
 
   @impl Temporalex.Backend
-  def record_activity_heartbeat(%State{}, _task_token, _details), do: :ok
+  def record_activity_heartbeat(%WorkerState{}, _task_token, _details), do: :ok
 
   @impl Temporalex.Backend
-  def shutdown_worker(%State{} = state) do
+  def shutdown_worker(%WorkerState{} = state) do
     if Process.alive?(state.agent) do
       Agent.update(state.agent, &Map.put(&1, :shutdown?, true))
     end
@@ -136,7 +190,7 @@ defmodule Temporalex.Backend.Test do
 
   defp state!(worker) do
     server = server_pid!(worker)
-    %State{agent: agent} = Temporalex.Server.backend_state(server)
+    %WorkerState{agent: agent} = Temporalex.Server.backend_state(server)
     agent
   end
 
@@ -148,4 +202,6 @@ defmodule Temporalex.Backend.Test do
       pid -> pid
     end
   end
+
+  defp unsupported_client_operation, do: {:error, {:unsupported_backend_operation, __MODULE__}}
 end

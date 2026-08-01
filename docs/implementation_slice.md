@@ -76,7 +76,7 @@ This slice is complete when the pure Elixir core test harness can record and rep
 - [ ] Completion semantics:
   - [ ] `{:ok, result}` emits `CompleteWorkflow`
   - [ ] `{:error, reason}` emits `FailWorkflow`
-  - [ ] `{:continue_as_new, args}` emits `ContinueAsNew`
+  - [ ] `API.continue_as_new!/2` emits terminal `ContinueAsNew`
   - [ ] unsupported return shape emits `FailWorkflow`
   - [ ] unexpected runner exception/exit emits `FailWorkflow`
   - [ ] `RemoveFromCache` activation runs no workflow code and emits an empty successful completion
@@ -127,7 +127,7 @@ This slice is complete when the pure Elixir core test harness can record and rep
 |---|---|
 | workflow returns `{:ok, result}` | successful activation with `CompleteWorkflow` |
 | workflow returns `{:error, reason}` | successful activation with `FailWorkflow` |
-| workflow returns `{:continue_as_new, args}` | successful activation with `ContinueAsNew` |
+| workflow calls `API.continue_as_new!/2` | successful activation with `ContinueAsNew` |
 | workflow returns an unsupported shape | successful activation with `FailWorkflow` |
 | workflow raises, throws, or exits unexpectedly | successful activation with `FailWorkflow` |
 | emitted replay command does not match transcript | failed activation with `%Nondeterminism{}` |
@@ -186,7 +186,7 @@ For Slice 1 there is only the root thread, but the protocol should already use t
 
 - [ ] workflow completion emits `CompleteWorkflow`
 - [ ] workflow explicit error emits `FailWorkflow`
-- [ ] workflow continue-as-new emits `ContinueAsNew`
+- [ ] workflow `API.continue_as_new!/2` emits `ContinueAsNew`
 - [ ] unsupported workflow return emits `FailWorkflow`
 - [ ] workflow exception emits `FailWorkflow`
 - [ ] activity call emits `ScheduleActivity` with seq `0`

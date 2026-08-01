@@ -89,7 +89,8 @@ defmodule Temporalex.Core.Thread do
             phase_id: nil,
             update_protocol_instance_id: nil,
             signal?: false,
-            started?: false
+            started?: false,
+            non_cancellable_depth: 0
 end
 
 defmodule Temporalex.Core.Pending do
@@ -99,13 +100,13 @@ defmodule Temporalex.Core.Pending do
   # after the start resolves, the pending stays alive until an
   # Op.AwaitChildWorkflow claims the completion (or until the completion
   # arrives and is cached for a future await).
-  defstruct [:seq, :thread_id, :from, :op, :awaiter, :completion]
+  defstruct [:seq, :thread_id, :from, :op, :awaiter, :completion, cancel_requested?: false]
 end
 
 defmodule Temporalex.Core.ParallelScope do
   @moduledoc false
 
-  defstruct [:id, :parent_thread_id, :from, :size, results: %{}, remaining: 0]
+  defstruct [:id, :parent_thread_id, :from, :size, :cancellation, results: %{}, remaining: 0]
 end
 
 defmodule Temporalex.Core.Phase do
@@ -126,6 +127,7 @@ defmodule Temporalex.Core.Phase do
     dispatch_counter: 0,
     stopping?: false,
     result: nil,
+    cancellation: nil,
     timeout_fired?: false,
     timer_cancelled?: false
   ]
@@ -253,6 +255,11 @@ defmodule Temporalex.Core.Command.CancelTimer do
   defstruct [:seq]
 end
 
+defmodule Temporalex.Core.Command.RequestCancelActivity do
+  @moduledoc false
+  defstruct [:seq]
+end
+
 defmodule Temporalex.Core.Command.SetPatchMarker do
   @moduledoc false
   defstruct [:id, deprecated: false]
@@ -270,12 +277,12 @@ end
 
 defmodule Temporalex.Core.Command.ContinueAsNew do
   @moduledoc false
-  defstruct [:args, :workflow_type, :task_queue]
+  defstruct [:input, :workflow_type, :task_queue, opts: []]
 end
 
 defmodule Temporalex.Core.Command.CancelWorkflow do
   @moduledoc false
-  defstruct []
+  defstruct [:reason]
 end
 
 defmodule Temporalex.Core.Command.RespondToUpdate do
@@ -375,6 +382,11 @@ defmodule Temporalex.Core.Op.WaitForSignal do
   defstruct [:name]
 end
 
+defmodule Temporalex.Core.Op.ContinueAsNew do
+  @moduledoc false
+  defstruct [:input, opts: []]
+end
+
 defmodule Temporalex.Core.Op.PublishState do
   @moduledoc false
   defstruct [:state]
@@ -386,6 +398,21 @@ defmodule Temporalex.Core.Op.WorkflowInfo do
 end
 
 defmodule Temporalex.Core.Op.Cancelled do
+  @moduledoc false
+  defstruct []
+end
+
+defmodule Temporalex.Core.Op.Cancellation do
+  @moduledoc false
+  defstruct []
+end
+
+defmodule Temporalex.Core.Op.EnterNonCancellable do
+  @moduledoc false
+  defstruct []
+end
+
+defmodule Temporalex.Core.Op.ExitNonCancellable do
   @moduledoc false
   defstruct []
 end

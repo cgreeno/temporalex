@@ -29,10 +29,10 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
     defactivity always_fail_non_retryable(),
       start_to_close_timeout: 5_000,
       retry_policy: [maximum_attempts: 5] do
-      raise %Temporalex.ApplicationError{
+      raise %Temporalex.Failure.ApplicationError{
         message: "no retry plz",
         type: "NoRetryEver",
-        non_retryable: true
+        retryable?: false
       }
     end
 
@@ -41,10 +41,10 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
     end
 
     defactivity local_fails(reason), local: true, start_to_close_timeout: 2_000 do
-      raise %Temporalex.ApplicationError{
+      raise %Temporalex.Failure.ApplicationError{
         message: "local fail",
         type: "LocalFail",
-        non_retryable: true,
+        retryable?: false,
         details: reason
       }
     end
@@ -167,14 +167,22 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
     end
 
     worker_name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client_name = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
     task_queue = "e2e-scenarios-#{System.unique_integer([:positive])}"
+
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: "http://127.0.0.1:7233",
+        namespace: "default",
+        task_queue: task_queue
+      )
 
     {:ok, worker_pid} =
       Temporalex.Worker.start_link(
         name: worker_name,
-        backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
-        namespace: "default",
+        client: client_name,
         task_queue: task_queue,
         workflows: [
           Counter,
@@ -191,18 +199,19 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
     on_exit(fn ->
       try do
         if Process.alive?(worker_pid), do: Supervisor.stop(worker_pid, :normal, 5_000)
+        if Process.alive?(client_pid), do: GenServer.stop(client_pid, :normal, 5_000)
       catch
         :exit, _ -> :ok
       end
     end)
 
-    {:ok, worker: worker_name}
+    {:ok, client: client_name, worker: worker_name}
   end
 
   describe "entity / counter workflow" do
-    test "counter accumulates increments via signals then stops on done", %{worker: worker} do
+    test "counter accumulates increments via signals then stops on done", %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, Counter, 0,
+        Temporalex.Client.start_workflow(client, Counter, 0,
           workflow_id: "counter-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
@@ -215,9 +224,9 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
       assert {:ok, 3} = Temporalex.Client.get_result(handle, timeout: 15_000)
     end
 
-    test "counter responds to queries while running", %{worker: worker} do
+    test "counter responds to queries while running", %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, Counter, 100,
+        Temporalex.Client.start_workflow(client, Counter, 100,
           workflow_id: "counter-q-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
@@ -240,9 +249,9 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
   end
 
   describe "multi-phase workflow" do
-    test "two phases in sequence each respond to their own signals", %{worker: worker} do
+    test "two phases in sequence each respond to their own signals", %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, MultiPhase, nil,
+        Temporalex.Client.start_workflow(client, MultiPhase, nil,
           workflow_id: "multiphase-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
@@ -253,9 +262,9 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
       assert {:ok, {:hello, true}} = Temporalex.Client.get_result(handle, timeout: 15_000)
     end
 
-    test "second phase cancel branch returns the cancel outcome", %{worker: worker} do
+    test "second phase cancel branch returns the cancel outcome", %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, MultiPhase, nil,
+        Temporalex.Client.start_workflow(client, MultiPhase, nil,
           workflow_id: "multiphase-cancel-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
@@ -269,9 +278,9 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
 
   describe "continue-as-new" do
     test "state preserved across CAN iterations until terminal condition met",
-         %{worker: worker} do
+         %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, ContinueWithState, %{generation: 0},
+        Temporalex.Client.start_workflow(client, ContinueWithState, %{generation: 0},
           workflow_id: "can-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
@@ -282,9 +291,9 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
   end
 
   describe "activity heartbeat (live)" do
-    test "activity that calls heartbeat completes successfully", %{worker: worker} do
+    test "activity that calls heartbeat completes successfully", %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, HeartbeatWorkflow, :alpha,
+        Temporalex.Client.start_workflow(client, HeartbeatWorkflow, :alpha,
           workflow_id: "hb-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
@@ -294,27 +303,27 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
   end
 
   describe "retry policy" do
-    test "non_retryable: true on raised error skips retries", %{worker: worker} do
+    test "retryable?: false on raised error skips retries", %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, RetryWorkflow, nil,
+        Temporalex.Client.start_workflow(client, RetryWorkflow, nil,
           workflow_id: "retry-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
 
       # Workflow catches the failure on first attempt — confirms no retries.
-      assert {:ok, {:got_failure, %Temporalex.ActivityFailure{cause: cause}}} =
+      assert {:ok, {:got_failure, %Temporalex.Failure.ActivityError{cause: cause}}} =
                Temporalex.Client.get_result(handle, timeout: 15_000)
 
       assert cause.type == "NoRetryEver"
-      assert cause.non_retryable == true
+      assert cause.retryable? == false
     end
   end
 
   describe "local activities (live)" do
     test "local activity that raises surfaces as ApplicationError to workflow",
-         %{worker: worker} do
+         %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, LocalActivityFailWorkflow, nil,
+        Temporalex.Client.start_workflow(client, LocalActivityFailWorkflow, nil,
           workflow_id: "la-fail-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
@@ -323,16 +332,16 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
       # ApplicationError (no outer ActivityFailure wrap, since local-activity
       # resolution doesn't carry the activity-task identity in the same way
       # as remote activities).
-      assert {:ok, {:local_failure, %Temporalex.ApplicationError{} = failure}} =
+      assert {:ok, {:local_failure, %Temporalex.Failure.ApplicationError{} = failure}} =
                Temporalex.Client.get_result(handle, timeout: 15_000)
 
       assert failure.type == "LocalFail"
-      assert failure.details == :bad_input
+      assert failure.details == [:bad_input]
     end
 
-    test "sequence of local activities composes correctly", %{worker: worker} do
+    test "sequence of local activities composes correctly", %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, LocalActivitySumWorkflow, nil,
+        Temporalex.Client.start_workflow(client, LocalActivitySumWorkflow, nil,
           workflow_id: "la-sum-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )

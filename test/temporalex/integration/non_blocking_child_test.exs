@@ -52,8 +52,12 @@ defmodule Temporalex.NonBlockingChildIntegrationTest do
       if API.cancelled?() do
         {:cancelled, :polled}
       else
-        :ok = API.sleep(200)
-        poll_loop()
+        # Under Hans's interrupting cancellation model the pending sleep is
+        # cancelled and returns {:cancelled, _}; observe that as the cancel.
+        case API.sleep(200) do
+          :ok -> poll_loop()
+          {:cancelled, _} -> {:cancelled, :polled}
+        end
       end
     end
   end
@@ -115,14 +119,22 @@ defmodule Temporalex.NonBlockingChildIntegrationTest do
     unless temporal_available?(), do: raise("Temporal dev server not reachable")
 
     worker_name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client_name = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
     task_queue = "nbc-#{System.unique_integer([:positive])}"
+
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: "http://127.0.0.1:7233",
+        namespace: "default",
+        task_queue: task_queue
+      )
 
     {:ok, worker_pid} =
       Temporalex.Worker.start_link(
         name: worker_name,
-        backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
-        namespace: "default",
+        client: client_name,
         task_queue: task_queue,
         workflows: [
           SignalReceiver,
@@ -136,20 +148,21 @@ defmodule Temporalex.NonBlockingChildIntegrationTest do
     on_exit(fn ->
       try do
         if Process.alive?(worker_pid), do: Supervisor.stop(worker_pid, :normal, 5_000)
+        if Process.alive?(client_pid), do: GenServer.stop(client_pid, :normal, 5_000)
       catch
         :exit, _ -> :ok
       end
     end)
 
-    {:ok, worker: worker_name}
+    {:ok, client: client_name, worker: worker_name}
   end
 
   test "start_child_workflow + signal via handle + await returns the child's result",
-       %{worker: worker} do
+       %{client: client} do
     workflow_id = "nbc-signal-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, StartSignalAwaitParent, :hello,
+      Temporalex.Client.start_workflow(client, StartSignalAwaitParent, :hello,
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -159,11 +172,11 @@ defmodule Temporalex.NonBlockingChildIntegrationTest do
   end
 
   test "start_child_workflow + cancel via handle + await sees the child's cancellation",
-       %{worker: worker} do
+       %{client: client} do
     workflow_id = "nbc-cancel-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, StartCancelAwaitParent, nil,
+      Temporalex.Client.start_workflow(client, StartCancelAwaitParent, nil,
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -176,7 +189,7 @@ defmodule Temporalex.NonBlockingChildIntegrationTest do
     # The parent's await sees it as {:cancelled, _} or {:error, %CancelledError{}}.
     case child_outcome do
       {:cancelled, _} -> :ok
-      {:error, %Temporalex.CancelledError{}} -> :ok
+      {:error, %Temporalex.Failure.CancelledError{}} -> :ok
       other -> flunk("expected cancellation outcome, got: #{inspect(other)}")
     end
   end
