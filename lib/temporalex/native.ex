@@ -3,13 +3,22 @@ defmodule Temporalex.Native do
 
   use Rustler, otp_app: :temporalex
 
-  def create_runtime, do: :erlang.nif_error(:nif_not_loaded)
+  def create_runtime(_telemetry_opts), do: :erlang.nif_error(:nif_not_loaded)
 
   def connect(_runtime, _url, _api_key, _headers, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def start_worker(_runtime, _client, _task_queue, _namespace, _max_wf, _max_act, _pid),
-    do: :erlang.nif_error(:nif_not_loaded)
+  def start_worker(
+        _runtime,
+        _client,
+        _task_queue,
+        _namespace,
+        _build_id,
+        _max_wf,
+        _max_act,
+        _pid
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
 
   def encode_workflow_completion(_completion, _task_queue, _codec),
     do: :erlang.nif_error(:nif_not_loaded)

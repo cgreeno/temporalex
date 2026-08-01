@@ -145,6 +145,73 @@ children = [
 Supervisor.start_link(children, strategy: :one_for_one)
 ```
 
+## Metrics
+
+Temporal's core records worker-side metrics — poller counts, slot usage, and
+`schedule_to_start` latency, which is the signal you autoscale workers on.
+They are off by default. The exporter belongs to the runtime, so it is
+configured on the client:
+
+```elixir
+{Temporalex.Client,
+ name: MyApp.Temporal,
+ backend: Temporalex.Backend.TemporalCore,
+ target: "http://127.0.0.1:7233",
+ namespace: "default",
+ telemetry: [
+   prometheus: [bind_address: "0.0.0.0:9464"],
+   global_tags: %{"service" => "checkout-worker", "env" => "prod"}
+ ]}
+```
+
+`GET /metrics` on that address then serves, among others:
+
+```
+temporal_num_pollers
+temporal_worker_task_slots_available
+temporal_worker_task_slots_used
+temporal_workflow_task_schedule_to_start_latency
+temporal_workflow_task_execution_latency
+temporal_workflow_endtoend_latency
+temporal_workflow_completed
+```
+
+For OTLP instead — to an OpenTelemetry Collector, or any agent with an OTLP
+intake:
+
+```elixir
+telemetry: [
+  otlp: [
+    url: "http://localhost:4317",
+    protocol: :grpc,                  # or :http
+    metric_temporality: :cumulative,  # or :delta
+    metric_periodicity_ms: 1_000,
+    headers: %{"authorization" => "Bearer ..."}
+  ]
+]
+```
+
+`:prometheus` and `:otlp` are mutually exclusive on one runtime. Other keys:
+`metric_prefix` (default `"temporal_"`), `attach_service_name`, and
+`durations_as_seconds`.
+
+## Build id
+
+Workers report a build id, which lands on every `WorkflowTaskCompleted` event
+and so answers "which release executed this task?" from history or the Web UI:
+
+```elixir
+{Temporalex.Worker,
+ name: MyApp.Temporal,
+ client: MyApp.TemporalClient,
+ task_queue: "checkout",
+ build_id: System.get_env("BUILD_ID", "dev"),
+ workflows: [MyApp.Workflows.Checkout]}
+```
+
+This is identification only — worker versioning is not enabled, so the build id
+does not affect task routing. Defaults to `"temporalex-<version>"`.
+
 ## Drive workflows from a client
 
 ```elixir

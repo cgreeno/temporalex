@@ -22,6 +22,36 @@ the `Failure.*` structs; `retryable?: false` replaces `non_retryable: true`.
 `Failure` details are a list of detail payloads (use `Failure.application/2`,
 which `List.wrap`s them).
 
+### Metrics
+
+Core telemetry was previously unreachable: the runtime was built with
+`RuntimeOptions::default()`, which hardcodes it off, so no SDK metrics were
+exported at all. Clients now accept a `:telemetry` option carrying one
+exporter.
+
+- **`telemetry: [prometheus: [bind_address: "0.0.0.0:9464"]]`** starts a
+  Prometheus endpoint serving core's worker metrics — `num_pollers`,
+  `worker_task_slots_used`, `workflow_task_schedule_to_start_latency`,
+  `workflow_task_execution_latency`, `workflow_endtoend_latency`, and others.
+  `schedule_to_start` is the metric worth autoscaling workers on.
+- **`telemetry: [otlp: [url: "http://localhost:4317"]]`** exports over OTLP
+  instead, with `:protocol` (`:grpc` / `:http`), `:metric_temporality`
+  (`:cumulative` / `:delta`), `:metric_periodicity_ms`, and `:headers`. This
+  turns on the `otel` feature of `temporalio-common`.
+- Shared keys: `:global_tags`, `:metric_prefix`, `:attach_service_name`,
+  `:durations_as_seconds`. `:prometheus` and `:otlp` are mutually exclusive.
+- Metrics remain **off by default** — omitting `:telemetry` behaves exactly as
+  before: no exporter, no bound port.
+
+### Configurable build id
+
+- **`build_id: "..."`** on a worker replaces the hardcoded
+  `temporalex-<crate version>`, which made every worker on a given SDK version
+  indistinguishable. The build id is stamped on every `WorkflowTaskCompleted`
+  event, so history and the Web UI can attribute a task to a release.
+- Identification only — the versioning strategy remains `None`, so routing is
+  unaffected. Worker Deployment Versioning is still not exposed.
+
 ## 0.3.2
 
 ### Non-blocking child workflows + cancel
