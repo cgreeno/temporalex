@@ -74,7 +74,10 @@ defmodule Temporalex.CliDrivenIntegrationTest do
     def handle_query("got", _args, state), do: {:reply, state}
 
     def run(input) do
-      API.publish_state({:got_input, input})
+      # Publish the decoded input directly. Query results round-trip through
+      # the JSON codec, which has no lossless tuple representation, so we
+      # observe the decoded map itself rather than a tagged tuple.
+      API.publish_state(input)
       :ok = API.sleep(60_000)
       {:ok, input}
     end
@@ -285,7 +288,7 @@ defmodule Temporalex.CliDrivenIntegrationTest do
     assert eventually(
              fn ->
                case Temporalex.Client.query_workflow(handle, "got", [], timeout: 2_000) do
-                 {:ok, {:got_input, decoded}} ->
+                 {:ok, decoded} ->
                    decoded == %{"order_id" => 42, "items" => ["a", "b"]}
 
                  _ ->

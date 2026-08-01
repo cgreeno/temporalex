@@ -56,14 +56,22 @@ defmodule Temporalex.ChildWorkflowIntegrationTest do
     end
 
     worker_name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client_name = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
     task_queue = "child-workflow-#{System.unique_integer([:positive])}"
+
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: "http://127.0.0.1:7233",
+        namespace: "default",
+        task_queue: task_queue
+      )
 
     {:ok, worker_pid} =
       Temporalex.Worker.start_link(
         name: worker_name,
-        backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
-        namespace: "default",
+        client: client_name,
         task_queue: task_queue,
         workflows: [Parent, Child],
         activities: []
@@ -72,19 +80,20 @@ defmodule Temporalex.ChildWorkflowIntegrationTest do
     on_exit(fn ->
       try do
         if Process.alive?(worker_pid), do: Supervisor.stop(worker_pid, :normal, 5_000)
+        if Process.alive?(client_pid), do: GenServer.stop(client_pid, :normal, 5_000)
       catch
         :exit, _ -> :ok
       end
     end)
 
-    {:ok, worker: worker_name}
+    {:ok, client: client_name, worker: worker_name}
   end
 
-  test "parent starts child and receives the child's return value", %{worker: worker} do
+  test "parent starts child and receives the child's return value", %{client: client} do
     workflow_id = "cw-simple-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, Parent, {:simple, 42},
+      Temporalex.Client.start_workflow(client, Parent, {:simple, 42},
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -94,12 +103,12 @@ defmodule Temporalex.ChildWorkflowIntegrationTest do
   end
 
   test "child failure surfaces as %ChildWorkflowFailure{cause: %ApplicationError{}}",
-       %{worker: worker} do
+       %{client: client} do
     workflow_id = "cw-fail-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
       Temporalex.Client.start_workflow(
-        worker,
+        client,
         Parent,
         {:expect_failure, "BadInput", "child rejected"},
         workflow_id: workflow_id,

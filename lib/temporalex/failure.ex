@@ -106,6 +106,36 @@ defmodule Temporalex.Failure do
     }
   end
 
+  @doc """
+  Normalize a failure for encoding: wrap scalar `details` (and
+  `last_heartbeat_details`) into lists and normalize the `cause` chain.
+
+  The NIF's typed encoder requires payload lists; the constructors in this
+  module already guarantee that, but failures built as struct literals
+  (`raise %ApplicationError{details: %{...}}`) may carry scalars. Applied
+  at the encode boundaries so user code never has to remember.
+  """
+  def normalize(%_{} = failure) when is_exception(failure) do
+    failure
+    |> wrap_field(:details)
+    |> wrap_field(:last_heartbeat_details)
+    |> normalize_cause()
+  end
+
+  def normalize(other), do: other
+
+  defp wrap_field(%_{} = failure, key) do
+    case Map.fetch(failure, key) do
+      {:ok, value} -> Map.put(failure, key, List.wrap(value))
+      :error -> failure
+    end
+  end
+
+  defp normalize_cause(%{cause: %_{} = cause} = failure),
+    do: %{failure | cause: normalize(cause)}
+
+  defp normalize_cause(failure), do: failure
+
   @doc "Raise an application failure."
   @spec application!(term()) :: no_return()
   @spec application!(term(), keyword()) :: no_return()

@@ -57,14 +57,22 @@ defmodule Temporalex.ClientApiIntegrationTest do
     end
 
     worker_name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client_name = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
     task_queue = "client-api-#{System.unique_integer([:positive])}"
+
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: "http://127.0.0.1:7233",
+        namespace: "default",
+        task_queue: task_queue
+      )
 
     {:ok, worker_pid} =
       Temporalex.Worker.start_link(
         name: worker_name,
-        backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
-        namespace: "default",
+        client: client_name,
         task_queue: task_queue,
         workflows: [Workflow, LongRunner],
         activities: []
@@ -73,19 +81,20 @@ defmodule Temporalex.ClientApiIntegrationTest do
     on_exit(fn ->
       try do
         if Process.alive?(worker_pid), do: Supervisor.stop(worker_pid, :normal, 5_000)
+        if Process.alive?(client_pid), do: GenServer.stop(client_pid, :normal, 5_000)
       catch
         :exit, _ -> :ok
       end
     end)
 
-    {:ok, worker: worker_name}
+    {:ok, client: client_name, worker: worker_name}
   end
 
-  test "start_workflow returns a handle with workflow_id and run_id", %{worker: worker} do
+  test "start_workflow returns a handle with workflow_id and run_id", %{client: client} do
     workflow_id = "client-start-#{System.unique_integer([:positive])}"
 
     assert {:ok, handle} =
-             Temporalex.Client.start_workflow(worker, Workflow, 0,
+             Temporalex.Client.start_workflow(client, Workflow, 0,
                workflow_id: workflow_id,
                timeout: 10_000
              )
@@ -99,9 +108,9 @@ defmodule Temporalex.ClientApiIntegrationTest do
     _ = Temporalex.Client.get_result(handle, timeout: 10_000)
   end
 
-  test "signal_workflow delivers the signal to the workflow", %{worker: worker} do
+  test "signal_workflow delivers the signal to the workflow", %{client: client} do
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, Workflow, 0,
+      Temporalex.Client.start_workflow(client, Workflow, 0,
         workflow_id: "client-signal-#{System.unique_integer([:positive])}",
         timeout: 10_000
       )
@@ -113,9 +122,9 @@ defmodule Temporalex.ClientApiIntegrationTest do
     assert {:ok, 2} = Temporalex.Client.get_result(handle, timeout: 15_000)
   end
 
-  test "query_workflow returns the last published state", %{worker: worker} do
+  test "query_workflow returns the last published state", %{client: client} do
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, Workflow, 7,
+      Temporalex.Client.start_workflow(client, Workflow, 7,
         workflow_id: "client-query-#{System.unique_integer([:positive])}",
         timeout: 10_000
       )
@@ -130,9 +139,9 @@ defmodule Temporalex.ClientApiIntegrationTest do
     _ = Temporalex.Client.get_result(handle, timeout: 10_000)
   end
 
-  test "update_workflow returns the handler's reply", %{worker: worker} do
+  test "update_workflow returns the handler's reply", %{client: client} do
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, Workflow, 10,
+      Temporalex.Client.start_workflow(client, Workflow, 10,
         workflow_id: "client-update-#{System.unique_integer([:positive])}",
         timeout: 10_000
       )
@@ -166,11 +175,11 @@ defmodule Temporalex.ClientApiIntegrationTest do
     assert {:ok, 18} = Temporalex.Client.get_result(handle, timeout: 10_000)
   end
 
-  test "describe_workflow returns workflow execution info", %{worker: worker} do
+  test "describe_workflow returns workflow execution info", %{client: client} do
     workflow_id = "client-describe-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, Workflow, 0,
+      Temporalex.Client.start_workflow(client, Workflow, 0,
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -188,9 +197,9 @@ defmodule Temporalex.ClientApiIntegrationTest do
     _ = Temporalex.Client.get_result(handle, timeout: 10_000)
   end
 
-  test "cancel_workflow requests workflow cancellation", %{worker: worker} do
+  test "cancel_workflow requests workflow cancellation", %{client: client} do
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, LongRunner, nil,
+      Temporalex.Client.start_workflow(client, LongRunner, nil,
         workflow_id: "client-cancel-#{System.unique_integer([:positive])}",
         timeout: 10_000
       )
@@ -203,9 +212,9 @@ defmodule Temporalex.ClientApiIntegrationTest do
     # Don't wait for the workflow to finish; the on_exit handles teardown.
   end
 
-  test "terminate_workflow forcibly ends the workflow", %{worker: worker} do
+  test "terminate_workflow forcibly ends the workflow", %{client: client} do
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, LongRunner, nil,
+      Temporalex.Client.start_workflow(client, LongRunner, nil,
         workflow_id: "client-terminate-#{System.unique_integer([:positive])}",
         timeout: 10_000
       )
@@ -217,7 +226,7 @@ defmodule Temporalex.ClientApiIntegrationTest do
                timeout: 5_000
              )
 
-    assert {:error, {:terminated, [:test_termination]}} =
+    assert {:error, %Temporalex.WorkflowTerminatedError{details: [:test_termination]}} =
              Temporalex.Client.get_result(handle, timeout: 10_000)
   end
 

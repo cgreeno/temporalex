@@ -141,14 +141,22 @@ defmodule Temporalex.ProtocolEdgesIntegrationTest do
     end
 
     worker_name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client_name = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
     task_queue = "protocol-edges-#{System.unique_integer([:positive])}"
+
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: "http://127.0.0.1:7233",
+        namespace: "default",
+        task_queue: task_queue
+      )
 
     {:ok, worker_pid} =
       Temporalex.Worker.start_link(
         name: worker_name,
-        backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
-        namespace: "default",
+        client: client_name,
         task_queue: task_queue,
         workflows: [
           Grandchild,
@@ -164,18 +172,19 @@ defmodule Temporalex.ProtocolEdgesIntegrationTest do
     on_exit(fn ->
       try do
         if Process.alive?(worker_pid), do: Supervisor.stop(worker_pid, :normal, 5_000)
+        if Process.alive?(client_pid), do: GenServer.stop(client_pid, :normal, 5_000)
       catch
         :exit, _ -> :ok
       end
     end)
 
-    {:ok, worker: worker_name}
+    {:ok, client: client_name, worker: worker_name}
   end
 
   describe "child workflow recursion" do
-    test "parent → child → grandchild chains result through all three levels", %{worker: worker} do
+    test "parent → child → grandchild chains result through all three levels", %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, Parent, :payload,
+        Temporalex.Client.start_workflow(client, Parent, :payload,
           workflow_id: "pcgc-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
@@ -185,9 +194,9 @@ defmodule Temporalex.ProtocolEdgesIntegrationTest do
     end
 
     test "multiple children started concurrently each complete with their own result",
-         %{worker: worker} do
+         %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, MultiParent, 4,
+        Temporalex.Client.start_workflow(client, MultiParent, 4,
           workflow_id: "multi-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
@@ -204,9 +213,9 @@ defmodule Temporalex.ProtocolEdgesIntegrationTest do
   end
 
   describe "activity retry policy" do
-    test "retryable failure retries up to maximum_attempts, then surfaces", %{worker: worker} do
+    test "retryable failure retries up to maximum_attempts, then surfaces", %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, RetryWorkflow, nil,
+        Temporalex.Client.start_workflow(client, RetryWorkflow, nil,
           workflow_id: "retry-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )
@@ -222,9 +231,9 @@ defmodule Temporalex.ProtocolEdgesIntegrationTest do
 
   describe "update accept-then-fail" do
     test "async update handler raise becomes a failed update response to the caller",
-         %{worker: worker} do
+         %{client: client} do
       {:ok, handle} =
-        Temporalex.Client.start_workflow(worker, UpdateAcceptThenFailWorkflow, nil,
+        Temporalex.Client.start_workflow(client, UpdateAcceptThenFailWorkflow, nil,
           workflow_id: "uatf-#{System.unique_integer([:positive])}",
           timeout: 10_000
         )

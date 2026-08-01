@@ -361,7 +361,7 @@ defmodule Temporalex.Server do
                message: "unknown activity type: #{task.activity_type}",
                type: "UnknownActivityType",
                retryable?: false,
-               details: task.activity_type
+               details: [task.activity_type]
              }}
         }
 
@@ -401,7 +401,7 @@ defmodule Temporalex.Server do
                message: "activity process exited: #{inspect(reason)}",
                type: "ActivityExit",
                retryable?: true,
-               details: reason
+               details: [inspect(reason)]
              }}
         }
 
@@ -435,11 +435,21 @@ defmodule Temporalex.Server do
   end
 
   defp submit_activity_completion(state, %ActivityCompletion{} = completion) do
+    completion = %{completion | result: normalize_activity_result(completion.result)}
+
     case state.backend.complete_activity_task(state.backend_state, completion) do
       :ok -> state
       {:error, reason} -> raise "backend activity completion failed: #{inspect(reason)}"
     end
   end
+
+  defp normalize_activity_result({:error, failure}),
+    do: {:error, Temporalex.Failure.normalize(failure)}
+
+  defp normalize_activity_result({:cancelled, failure}),
+    do: {:cancelled, Temporalex.Failure.normalize(failure)}
+
+  defp normalize_activity_result(result), do: result
 
   defp run_activity(activity, task, context) do
     args =
@@ -466,7 +476,7 @@ defmodule Temporalex.Server do
              message: "activity returned invalid value: #{inspect(other)}",
              type: "InvalidActivityReturn",
              retryable?: false,
-             details: other
+             details: [inspect(other)]
            }}
       end
     rescue
@@ -479,14 +489,14 @@ defmodule Temporalex.Server do
            message: Exception.message(error),
            type: inspect(error.__struct__),
            retryable?: true,
-           details: %{exception: error, stacktrace: __STACKTRACE__}
+           details: [inspect(error), Exception.format_stacktrace(__STACKTRACE__)]
          }}
     catch
       :throw, {:cancelled, reason} ->
         {:cancelled,
          %Temporalex.Failure.CancelledError{
            message: "activity cancelled",
-           details: reason
+           details: List.wrap(reason)
          }}
 
       kind, reason ->
@@ -495,7 +505,7 @@ defmodule Temporalex.Server do
            message: "activity #{kind}: #{inspect(reason)}",
            type: "ActivityExit",
            retryable?: true,
-           details: %{kind: kind, reason: reason, stacktrace: __STACKTRACE__}
+           details: [inspect(kind), inspect(reason), Exception.format_stacktrace(__STACKTRACE__)]
          }}
     end
   end

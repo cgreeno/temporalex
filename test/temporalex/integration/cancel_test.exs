@@ -34,8 +34,12 @@ defmodule Temporalex.CancelIntegrationTest do
       if API.cancelled?() do
         {:cancelled, :polled}
       else
-        :ok = API.sleep(200)
-        poll_loop()
+        # Under Hans's interrupting cancellation model the pending sleep is
+        # cancelled and returns {:cancelled, _}; observe that as the cancel.
+        case API.sleep(200) do
+          :ok -> poll_loop()
+          {:cancelled, _} -> {:cancelled, :polled}
+        end
       end
     end
   end
@@ -87,14 +91,22 @@ defmodule Temporalex.CancelIntegrationTest do
     end
 
     worker_name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
+    client_name = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
     task_queue = "cancel-#{System.unique_integer([:positive])}"
+
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: "http://127.0.0.1:7233",
+        namespace: "default",
+        task_queue: task_queue
+      )
 
     {:ok, worker_pid} =
       Temporalex.Worker.start_link(
         name: worker_name,
-        backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
-        namespace: "default",
+        client: client_name,
         task_queue: task_queue,
         workflows: [
           SleepingWorkflow,
@@ -108,19 +120,20 @@ defmodule Temporalex.CancelIntegrationTest do
     on_exit(fn ->
       try do
         if Process.alive?(worker_pid), do: Supervisor.stop(worker_pid, :normal, 5_000)
+        if Process.alive?(client_pid), do: GenServer.stop(client_pid, :normal, 5_000)
       catch
         :exit, _ -> :ok
       end
     end)
 
-    {:ok, worker: worker_name}
+    {:ok, client: client_name, worker: worker_name}
   end
 
-  test "cancel_workflow on a polling workflow is observed and stops the loop", %{worker: worker} do
+  test "cancel_workflow on a polling workflow is observed and stops the loop", %{client: client} do
     workflow_id = "cancel-polling-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, PollingWorkflow, nil,
+      Temporalex.Client.start_workflow(client, PollingWorkflow, nil,
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -130,17 +143,17 @@ defmodule Temporalex.CancelIntegrationTest do
 
     # Polling loop checks cancelled?/0 on next iteration, returns {:cancelled, _}
     # → CancelWorkflow command → workflow execution ends with cancelled status,
-    # which the client surfaces as {:error, {:cancelled, details}}.
-    assert {:error, {:cancelled, _details}} =
+    # which the client surfaces as %Temporalex.WorkflowCancelledError{}.
+    assert {:error, %Temporalex.WorkflowCancelledError{}} =
              Temporalex.Client.get_result(handle, timeout: 15_000)
   end
 
   test "terminate_workflow on a parent with parent_close_policy: :terminate terminates the child",
-       %{worker: worker} do
+       %{client: client} do
     workflow_id = "term-parent-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, ParentWithChildWorkflow, nil,
+      Temporalex.Client.start_workflow(client, ParentWithChildWorkflow, nil,
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -156,7 +169,7 @@ defmodule Temporalex.CancelIntegrationTest do
              )
 
     # Parent terminates immediately.
-    assert {:error, {:terminated, [:terminated]}} =
+    assert {:error, %Temporalex.WorkflowTerminatedError{details: [:terminated]}} =
              Temporalex.Client.get_result(handle, timeout: 10_000)
 
     # The child's parent_close_policy defaults to :terminate, so it ends too
@@ -165,11 +178,11 @@ defmodule Temporalex.CancelIntegrationTest do
   end
 
   test "terminate_workflow on a sleeping workflow ends it immediately with the termination details",
-       %{worker: worker} do
+       %{client: client} do
     workflow_id = "terminate-sleep-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, SleepingWorkflow, nil,
+      Temporalex.Client.start_workflow(client, SleepingWorkflow, nil,
         workflow_id: workflow_id,
         timeout: 10_000
       )
@@ -181,18 +194,18 @@ defmodule Temporalex.CancelIntegrationTest do
                timeout: 5_000
              )
 
-    assert {:error, {:terminated, [:terminated_by_test]}} =
+    assert {:error, %Temporalex.WorkflowTerminatedError{details: [:terminated_by_test]}} =
              Temporalex.Client.get_result(handle, timeout: 10_000)
   end
 
-  test "cancel_workflow on a phase-parked workflow is accepted by the server", %{worker: worker} do
+  test "cancel_workflow on a phase-parked workflow is accepted by the server", %{client: client} do
     # Phase doesn't auto-interrupt on cancel; the workflow needs to either
     # check cancelled? or wait for the timeout. The unit under test here is
     # that cancel_workflow itself returns :ok against a parked workflow.
     workflow_id = "cancel-phase-#{System.unique_integer([:positive])}"
 
     {:ok, handle} =
-      Temporalex.Client.start_workflow(worker, CooperativeWorkflow, nil,
+      Temporalex.Client.start_workflow(client, CooperativeWorkflow, nil,
         workflow_id: workflow_id,
         timeout: 10_000
       )

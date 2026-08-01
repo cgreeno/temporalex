@@ -66,7 +66,7 @@ defmodule Temporalex.BackendConformanceTest do
            message: "unknown activity type: missing",
            type: "UnknownActivityType",
            retryable?: false,
-           details: "missing"
+           details: ["missing"]
          }}
     }
 

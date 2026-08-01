@@ -1695,7 +1695,9 @@ defmodule Temporalex.Core.Executor do
         # Root failures surface as the underlying struct (bare exception or
         # structured Temporalex.Failure) so the Rust encoder can map them to
         # the right Temporal Failure variant.
-        append_command(state, %Command.FailWorkflow{reason: unwrapped})
+        append_command(state, %Command.FailWorkflow{
+          reason: Temporalex.Failure.normalize(unwrapped)
+        })
     end
   end
 
@@ -1733,7 +1735,7 @@ defmodule Temporalex.Core.Executor do
   end
 
   defp complete_root_thread(state, {:error, reason}) do
-    append_command(state, %Command.FailWorkflow{reason: reason})
+    append_command(state, %Command.FailWorkflow{reason: Temporalex.Failure.normalize(reason)})
   end
 
   defp complete_root_thread(state, {:cancelled, reason}) do

@@ -289,7 +289,7 @@ defmodule Temporalex.ServerIntegrationTest do
     assert %ActivityCompletion{
              result:
                {:error,
-                %Temporalex.Failure.ApplicationError{details: :bad, type: "ApplicationError"}}
+                %Temporalex.Failure.ApplicationError{details: [:bad], type: "ApplicationError"}}
            } = TestBackend.fetch_activity_completion(worker, "activity-fail")
 
     TestBackend.send_activity_task(
@@ -342,7 +342,7 @@ defmodule Temporalex.ServerIntegrationTest do
 
     assert %ActivityCompletion{
              task_token: ^token,
-             result: {:cancelled, %Temporalex.Failure.CancelledError{details: :cancelled}}
+             result: {:cancelled, %Temporalex.Failure.CancelledError{details: [:cancelled]}}
            } = TestBackend.fetch_activity_completion(worker, token)
   end
 
