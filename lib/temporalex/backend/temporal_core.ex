@@ -55,6 +55,12 @@ defmodule Temporalex.Backend.TemporalCore do
   @default_target "http://127.0.0.1:7233"
   @default_namespace "default"
   @default_task_queue "default"
+  # Reported to the server for identification only — worker versioning is not
+  # enabled, so this does not affect task routing. It lands on every
+  # WorkflowTaskCompleted event, which is what makes "which release ran this
+  # task?" answerable from history. Override with `:build_id` to stamp a
+  # release SHA instead.
+  @default_build_id "temporalex-#{Mix.Project.config()[:version]}"
   @default_connect_timeout 10_000
   @default_start_timeout 10_000
   @default_completion_timeout 10_000
@@ -81,7 +87,7 @@ defmodule Temporalex.Backend.TemporalCore do
     task_queue = Keyword.get(opts, :task_queue, @default_task_queue)
     connect_timeout = Keyword.get(opts, :connect_timeout, @default_connect_timeout)
 
-    with {:ok, runtime} <- Native.create_runtime(),
+    with {:ok, runtime} <- Native.create_runtime(telemetry_opts(opts)),
          :ok <-
            Native.connect(runtime, target, Keyword.get(opts, :api_key), headers(opts), owner_pid),
          {:ok, client} <- await_connection(connect_timeout) do
@@ -125,6 +131,7 @@ defmodule Temporalex.Backend.TemporalCore do
                client_state.client,
                task_queue,
                client_state.namespace,
+               Keyword.get(opts, :build_id, @default_build_id),
                workflow_poller_count(opts),
                activity_poller_count(opts),
                owner_pid,
@@ -389,6 +396,18 @@ defmodule Temporalex.Backend.TemporalCore do
       Keyword.get(opts, :address) ||
       @default_target
   end
+
+  # Metrics are opt-in: without `:prometheus` or `:otlp` the runtime starts with
+  # telemetry off, exactly as before. Core decodes tags and headers as string
+  # maps, so normalise them before they cross the NIF boundary.
+  defp telemetry_opts(opts) do
+    opts
+    |> Keyword.get(:telemetry, [])
+    |> Keyword.replace_lazy(:global_tags, &normalize_headers/1)
+    |> Keyword.replace_lazy(:otlp, &normalize_otlp/1)
+  end
+
+  defp normalize_otlp(otlp), do: Keyword.replace_lazy(otlp, :headers, &normalize_headers/1)
 
   defp headers(opts) do
     opts

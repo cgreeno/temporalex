@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use prost::Message;
 use rustler::types::elixir_struct::make_ex_struct;
 use rustler::types::list::ListIterator;
@@ -29,6 +29,11 @@ use temporalio_common::protos::temporal::api::enums::v1::{
     WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
 };
 use temporalio_common::protos::temporal::api::failure::v1::{Failure, failure};
+use temporalio_common::telemetry::metrics::CoreMeter;
+use temporalio_common::telemetry::{
+    MetricTemporality, OtelCollectorOptions, OtlpProtocol, PrometheusExporterOptions,
+    TelemetryOptions, build_otlp_metric_exporter, start_prometheus_metric_exporter,
+};
 use temporalio_common::worker::WorkerTaskTypes;
 use temporalio_sdk_core::{
     CoreRuntime, PollError, PollerBehavior, RuntimeOptions, TokioRuntimeBuilder, Worker,
@@ -167,6 +172,24 @@ rustler::atoms! {
     start_time_ms,
     execution_time_ms,
     close_time_ms,
+    // Telemetry options (see `telemetry_from_opts`).
+    prometheus,
+    otlp,
+    bind_address,
+    counters_total_suffix,
+    unit_suffix,
+    durations_as_seconds,
+    metric_prefix,
+    attach_service_name,
+    global_tags,
+    metric_periodicity_ms,
+    metric_temporality,
+    cumulative,
+    delta,
+    protocol,
+    grpc,
+    http,
+    url_atom = "url",
 }
 
 const ETF_ENCODING: &[u8] = b"binary/erlang-eterm";
@@ -360,12 +383,135 @@ macro_rules! put_fields {
     }};
 }
 
+/// A metrics exporter that has been validated but not yet started.
+///
+/// Exporters have to be constructed *after* the Tokio runtime exists — the
+/// Prometheus one binds a listener and spawns its server task — but bad config
+/// should fail before we build a runtime. So parsing and construction are split.
+enum MeterSpec {
+    Prometheus(Box<PrometheusExporterOptions>),
+    Otlp(Box<OtelCollectorOptions>),
+}
+
+impl MeterSpec {
+    fn start(self) -> anyhow::Result<Arc<dyn CoreMeter>> {
+        match self {
+            MeterSpec::Prometheus(opts) => Ok(start_prometheus_metric_exporter(*opts)?.meter),
+            MeterSpec::Otlp(opts) => Ok(Arc::new(build_otlp_metric_exporter(*opts)?)),
+        }
+    }
+}
+
 #[rustler::nif]
-fn create_runtime<'a>(env: Env<'a>) -> Term<'a> {
-    match CoreRuntime::new(RuntimeOptions::default(), TokioRuntimeBuilder::default()) {
+fn create_runtime<'a>(env: Env<'a>, opts: Term<'a>) -> Term<'a> {
+    match build_core_runtime(opts) {
         Ok(runtime) => (ok(), ResourceArc::new(RuntimeResource { core: runtime })).encode(env),
         Err(err) => (error(), format!("{err:#}")).encode(env),
     }
+}
+
+fn build_core_runtime(opts: Term) -> anyhow::Result<CoreRuntime> {
+    let (telemetry_options, meter) = telemetry_from_opts(opts)?;
+
+    let runtime_options = RuntimeOptions::builder()
+        .telemetry_options(telemetry_options)
+        .heartbeat_interval(Some(std::time::Duration::from_secs(60)))
+        .build()
+        .map_err(|err| anyhow!(err))?;
+
+    let mut core = CoreRuntime::new(runtime_options, TokioRuntimeBuilder::default())?;
+
+    if let Some(meter) = meter {
+        let _guard = core.tokio_handle().enter();
+        core.telemetry_mut().attach_late_init_metrics(meter.start()?);
+    }
+
+    Ok(core)
+}
+
+/// Builds core telemetry options from an Elixir keyword list or map.
+///
+/// Metrics are opt-in: with neither `:prometheus` nor `:otlp` set, the runtime
+/// behaves exactly as it did before — no exporter, no bound port.
+fn telemetry_from_opts(opts: Term) -> anyhow::Result<(TelemetryOptions, Option<MeterSpec>)> {
+    let telemetry = TelemetryOptions::builder()
+        .attach_service_name(keyword_get_bool(opts, attach_service_name())?.unwrap_or(true))
+        .maybe_metric_prefix(keyword_get_string(opts, metric_prefix())?)
+        .build();
+
+    let tags = keyword_get_string_map(opts, global_tags())?.unwrap_or_default();
+
+    let meter = match (
+        keyword_get_present(opts, prometheus())?,
+        keyword_get_present(opts, otlp())?,
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "cannot enable both :prometheus and :otlp metrics on one runtime"
+            ));
+        }
+        (Some(p), None) => Some(MeterSpec::Prometheus(Box::new(prometheus_options(p, tags)?))),
+        (None, Some(o)) => Some(MeterSpec::Otlp(Box::new(otlp_options(o, tags)?))),
+        (None, None) => None,
+    };
+
+    Ok((telemetry, meter))
+}
+
+fn prometheus_options(
+    opts: Term,
+    global_tags: HashMap<String, String>,
+) -> anyhow::Result<PrometheusExporterOptions> {
+    let bind = keyword_get_string(opts, bind_address())?.ok_or_else(|| {
+        anyhow!(r#"prometheus telemetry requires :bind_address, e.g. "0.0.0.0:9464""#)
+    })?;
+
+    Ok(PrometheusExporterOptions::builder()
+        .socket_addr(
+            bind.parse()
+                .with_context(|| format!("invalid prometheus :bind_address {bind:?}"))?,
+        )
+        .global_tags(global_tags)
+        .counters_total_suffix(keyword_get_bool(opts, counters_total_suffix())?.unwrap_or(false))
+        .unit_suffix(keyword_get_bool(opts, unit_suffix())?.unwrap_or(false))
+        .use_seconds_for_durations(keyword_get_bool(opts, durations_as_seconds())?.unwrap_or(false))
+        .build())
+}
+
+fn otlp_options(
+    opts: Term,
+    global_tags: HashMap<String, String>,
+) -> anyhow::Result<OtelCollectorOptions> {
+    let raw_url = keyword_get_string(opts, url_atom())?.ok_or_else(|| {
+        anyhow!(r#"otlp telemetry requires :url, e.g. "http://localhost:4317""#)
+    })?;
+
+    let temporality = match keyword_get_atom(opts, metric_temporality())? {
+        None => MetricTemporality::Cumulative,
+        Some(value) if value == cumulative() => MetricTemporality::Cumulative,
+        Some(value) if value == delta() => MetricTemporality::Delta,
+        Some(_) => return Err(anyhow!(":metric_temporality must be :cumulative or :delta")),
+    };
+
+    let otlp_protocol = match keyword_get_atom(opts, protocol())? {
+        None => OtlpProtocol::Grpc,
+        Some(value) if value == grpc() => OtlpProtocol::Grpc,
+        Some(value) if value == http() => OtlpProtocol::Http,
+        Some(_) => return Err(anyhow!(":protocol must be :grpc or :http")),
+    };
+
+    Ok(OtelCollectorOptions::builder()
+        .url(Url::parse(&raw_url).with_context(|| format!("invalid otlp :url {raw_url:?}"))?)
+        .headers(keyword_get_string_map(opts, headers())?.unwrap_or_default())
+        .global_tags(global_tags)
+        .metric_temporality(temporality)
+        .protocol(otlp_protocol)
+        .use_seconds_for_durations(keyword_get_bool(opts, durations_as_seconds())?.unwrap_or(false))
+        .maybe_metric_periodicity(
+            keyword_get_millis(opts, metric_periodicity_ms(), "metric_periodicity_ms")?
+                .map(std::time::Duration::from_millis),
+        )
+        .build())
 }
 
 #[rustler::nif]
@@ -437,6 +583,7 @@ fn start_worker(
     client: ResourceArc<ClientResource>,
     task_queue: String,
     namespace: String,
+    build_id: String,
     max_wf: usize,
     max_act: usize,
     pid: LocalPid,
@@ -452,9 +599,11 @@ fn start_worker(
             let config = WorkerConfig::builder()
                 .namespace(namespace)
                 .task_queue(task_queue)
-                .versioning_strategy(WorkerVersioningStrategy::None {
-                    build_id: format!("temporalex-{}", env!("CARGO_PKG_VERSION")),
-                })
+                // Strategy stays `None` — versioning is not enabled. The build
+                // id is reported for identification only: it lands on each
+                // WorkflowTaskCompleted event, so history and the Web UI show
+                // which release executed a task. Routing is unaffected.
+                .versioning_strategy(WorkerVersioningStrategy::None { build_id })
                 .ignore_evicts_on_shutdown(true)
                 .task_types(WorkerTaskTypes::all())
                 .workflow_task_poller_behavior(PollerBehavior::SimpleMaximum(max_wf.max(1)))
@@ -1647,6 +1796,48 @@ fn keyword_get_string(opts: Term, key: Atom) -> anyhow::Result<Option<String>> {
     } else {
         decode_term(term).map(Some)
     }
+}
+
+fn keyword_get_bool(opts: Term, key: Atom) -> anyhow::Result<Option<bool>> {
+    let Some(term) = keyword_get(opts, key)? else {
+        return Ok(None);
+    };
+
+    if term.decode::<Atom>().ok() == Some(nil()) {
+        Ok(None)
+    } else {
+        decode_term(term).map(Some)
+    }
+}
+
+fn keyword_get_atom(opts: Term, key: Atom) -> anyhow::Result<Option<Atom>> {
+    let Some(term) = keyword_get(opts, key)? else {
+        return Ok(None);
+    };
+
+    let value: Atom = decode_term(term)?;
+    Ok((value != nil()).then_some(value))
+}
+
+fn keyword_get_string_map(
+    opts: Term,
+    key: Atom,
+) -> anyhow::Result<Option<HashMap<String, String>>> {
+    let Some(term) = keyword_get(opts, key)? else {
+        return Ok(None);
+    };
+
+    if term.decode::<Atom>().ok() == Some(nil()) {
+        Ok(None)
+    } else {
+        decode_term(term).map(Some)
+    }
+}
+
+/// Like `keyword_get`, but treats an explicit `nil` value as absent. Lets the
+/// Elixir side pass `prometheus: nil` to mean "off" without special-casing.
+fn keyword_get_present(opts: Term, key: Atom) -> anyhow::Result<Option<Term>> {
+    Ok(keyword_get(opts, key)?.filter(|term| term.decode::<Atom>().ok() != Some(nil())))
 }
 
 fn keyword_get_string_list(opts: Term, key: Atom) -> anyhow::Result<Option<Vec<String>>> {
