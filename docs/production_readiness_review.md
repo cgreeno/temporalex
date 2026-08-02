@@ -22,13 +22,15 @@ Original concern:
 Implemented:
 
 - Added `Temporalex.SearchAttribute` typed constructors for Bool, Datetime, Double, Int, Keyword, KeywordList, and Text values.
-- Kept ETF encoding for normal payloads and switched Search Attribute maps to `json/plain` payloads in the native encoder.
+- Kept ETF encoding for normal payloads and switched Search Attribute maps to `json/plain` payloads in the backend payload converter and client native option encoder.
 - Wired typed Search Attributes through workflow start and `Workflow.API.upsert_search_attributes/1`.
-- Added constructor/unit tests, native codec validation coverage, and a Temporal dev-server visibility test that registers custom Search Attributes, upserts from workflow code, and lists by Search Attribute query.
+- Added constructor/unit tests, Temporal Core codec validation coverage, and a Temporal dev-server visibility test that registers custom Search Attributes, upserts from workflow code, and lists by Search Attribute query.
 
 References:
 
-- `../native/temporalex_nif/src/lib.rs`: `payload_from_term`, `term_to_payload_map`, workflow start search attributes, upsert search attributes.
+- `../lib/temporalex/backend/temporal_core/payload_converter.ex`: ETF payloads and `json/plain` Search Attribute payloads.
+- `../lib/temporalex/backend/temporal_core/codec.ex`: upsert Search Attribute command encoding.
+- `../native/temporalex_nif/src/lib.rs`: workflow start Search Attribute option encoding.
 - `../../temporal-api/temporal/api/common/v1/message.proto`: `Payload`, `SearchAttributes`.
 - `../../temporal-sdk-core/crates/common/src/payload_visitor.rs`: search attributes skipped during payload encoding.
 - `../../documentation/docs/encyclopedia/visibility/search-attributes.mdx`: supported Search Attribute types and visibility behavior.
@@ -88,13 +90,14 @@ Implemented:
 - Added public `Temporalex.Failure` structs for application, cancellation, timeout, activity, child workflow, and unknown failures.
 - Exposed application failure retry control as `retryable?`, which maps to the inverse of Temporal's `ApplicationFailureInfo.non_retryable`.
 - Preserved failure `cause` recursively when decoding server/core failures and when encoding decoded wrappers back to Temporal.
-- Routed workflow, activity, query, and update rejection failures through the structured native encoder.
+- Routed workflow, activity, query, and update rejection failures through the structured Temporal Core codec and client error decoder.
 - Added public client operation error structs, including `Temporalex.UpdateFailedError` for update failures and rejections observed by the client.
 - Added core, codec, and Temporal dev-server tests proving `retryable?`, `non_retryable_error_types`, and activity retry attempts are observed by Temporal.
 
 References:
 
-- `../native/temporalex_nif/src/lib.rs`: `failure_from_term`, `failure_to_term`.
+- `../lib/temporalex/backend/temporal_core/codec.ex`: Temporal Core failure encoding and decoding.
+- `../native/temporalex_nif/src/lib.rs`: client operation failure decoding.
 - `../../temporal-api/temporal/api/common/v1/message.proto`: `RetryPolicy.non_retryable_error_types`.
 - `../../temporal-api/temporal/api/failure/v1/message.proto`: Temporal failure variants.
 
@@ -109,7 +112,7 @@ Status: completed on May 8, 2026.
 Original concern:
 
 - Workflow code can only return `{:continue_as_new, args}`.
-- The NIF encodes only workflow type, task queue, and arguments.
+- The backend previously encoded only workflow type, task queue, and arguments.
 - Temporal supports run timeout, task timeout, retry policy, header, memo, search attributes, start backoff, and versioning behavior on continue-as-new.
 
 Implemented:
@@ -120,13 +123,13 @@ Implemented:
 - Added continue-as-new options for workflow type, task queue, run timeout, task timeout, memo, headers, typed Search Attributes, retry policy, versioning intent, and initial versioning behavior.
 - Extended workflow info with activation timestamp, replay flag, history length/size, and `continue_as_new_suggested`.
 - Added core tests for terminal behavior, option propagation, replay identity, root-thread enforcement, and workflow info exposure.
-- Added native codec coverage and a Temporal dev-server test for a chained continue-as-new run whose final result is retrieved across runs and whose Search Attributes are visible.
+- Added Temporal Core codec coverage and a Temporal dev-server test for a chained continue-as-new run whose final result is retrieved across runs and whose Search Attributes are visible.
 
 References:
 
 - `../lib/temporalex/workflow/api.ex`: `continue_as_new!/2`.
 - `../lib/temporalex/core/executor.ex`: `Op.ContinueAsNew` handling.
-- `../native/temporalex_nif/src/lib.rs`: `ContinueAsNewWorkflowExecution` command encoding.
+- `../lib/temporalex/backend/temporal_core/codec.ex`: `ContinueAsNewWorkflowExecution` command encoding.
 - `../../temporal-api/temporal/api/command/v1/message.proto`: `ContinueAsNewWorkflowExecutionCommandAttributes`.
 - `../../documentation/docs/develop/rust/workflows/continue-as-new.mdx`: continue-as-new usage and suggestion API.
 

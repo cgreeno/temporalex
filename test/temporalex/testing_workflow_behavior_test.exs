@@ -227,7 +227,7 @@ defmodule Temporalex.TestingWorkflowBehaviorTest do
     command = assert_continue_as_new(run, %{next: :input})
 
     assert command.task_queue == "continued"
-    assert command.opts[:headers] == %{"trace" => "testing"}
+    assert command.headers == %{"trace" => "testing"}
     assert_replay(run)
   end
 

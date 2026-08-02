@@ -16,6 +16,7 @@ defmodule Temporalex.Core.Executor do
 
   alias Temporalex.Core.Activation
   alias Temporalex.Core.Command
+  alias Temporalex.Core.CommandBuilder
   alias Temporalex.Core.Completion
   alias Temporalex.Core.Context
   alias Temporalex.Core.Job
@@ -501,22 +502,19 @@ defmodule Temporalex.Core.Executor do
       state
     else
       seq = state.next_seq
-      activity_id = Keyword.get(op.opts, :activity_id, "activity-#{seq}")
 
-      command = %Command.ScheduleActivity{
-        seq: seq,
-        thread_id: thread_id,
-        activity_id: activity_id,
-        type: op.type,
-        input: op.input,
-        opts: op.opts
-      }
+      case CommandBuilder.schedule_activity(seq, thread_id, op) do
+        {:ok, command} ->
+          state
+          |> append_command(command)
+          |> put_pending(seq, thread_id, from, op, cancellation_type: command.cancellation_type)
+          |> block_thread(thread_id)
+          |> Map.update!(:next_seq, &(&1 + 1))
 
-      state
-      |> append_command(command)
-      |> put_pending(seq, thread_id, from, op)
-      |> block_thread(thread_id)
-      |> Map.update!(:next_seq, &(&1 + 1))
+        {:error, reason} ->
+          reply_error(from, reason)
+          state
+      end
     end
   end
 
@@ -699,9 +697,16 @@ defmodule Temporalex.Core.Executor do
   defp handle_workflow_op(state, from, thread_id, %Op.ContinueAsNew{} = op) do
     case validate_continue_as_new_call(state, thread_id) do
       :ok ->
-        state
-        |> append_command(continue_as_new_command(state, op))
-        |> teardown_threads()
+        case CommandBuilder.continue_as_new(state.workflow_type, op) do
+          {:ok, command} ->
+            state
+            |> append_command(command)
+            |> teardown_threads()
+
+          {:error, reason} ->
+            reply_error(from, reason)
+            state
+        end
 
       {:error, reason} ->
         reply_error(from, reason)
@@ -976,21 +981,21 @@ defmodule Temporalex.Core.Executor do
     |> Enum.sort()
   end
 
-  defp continue_as_new_command(state, %Op.ContinueAsNew{input: input, opts: opts}) do
-    %Command.ContinueAsNew{
-      input: input,
-      workflow_type: Keyword.get(opts, :workflow_type, state.workflow_type),
-      task_queue: Keyword.get(opts, :task_queue),
-      opts: opts
-    }
-  end
+  defp put_pending(state, seq, thread_id, from, op, opts \\ [])
 
-  defp put_pending(%State{activation_failed: reason} = state, _seq, _thread_id, _from, _op)
+  defp put_pending(%State{activation_failed: reason} = state, _seq, _thread_id, _from, _op, _opts)
        when not is_nil(reason),
        do: state
 
-  defp put_pending(state, seq, thread_id, from, op) do
-    pending = %Pending{seq: seq, thread_id: thread_id, from: from, op: op}
+  defp put_pending(state, seq, thread_id, from, op, opts) do
+    pending =
+      opts
+      |> Keyword.put(:seq, seq)
+      |> Keyword.put(:thread_id, thread_id)
+      |> Keyword.put(:from, from)
+      |> Keyword.put(:op, op)
+      |> then(&struct!(Pending, &1))
+
     put_in(state.pending[seq], pending)
   end
 
@@ -1292,10 +1297,10 @@ defmodule Temporalex.Core.Executor do
 
   defp do_cancel_pending_operation(
          state,
-         %Pending{op: %Op.ExecuteActivity{} = op, cancel_requested?: false} = pending,
+         %Pending{op: %Op.ExecuteActivity{}, cancel_requested?: false} = pending,
          cancellation
        ) do
-    case activity_cancellation_type(op.opts) do
+    case pending.cancellation_type do
       :wait_cancellation_completed ->
         state = put_in(state.pending[pending.seq], %{pending | cancel_requested?: true})
         append_command(state, %Command.RequestCancelActivity{seq: pending.seq})
@@ -1346,14 +1351,6 @@ defmodule Temporalex.Core.Executor do
 
   defp tombstone_sequence(state, seq) do
     %{state | cancelled_sequences: MapSet.put(state.cancelled_sequences, seq)}
-  end
-
-  defp activity_cancellation_type(opts) do
-    case Keyword.get(opts, :cancellation_type, :wait_cancellation_completed) do
-      :try_cancel -> :try_cancel
-      :abandon -> :abandon
-      _ -> :wait_cancellation_completed
-    end
   end
 
   defp receive_signal(state, %Job.SignalReceived{} = signal) do
@@ -2100,7 +2097,10 @@ defmodule Temporalex.Core.Executor do
 
   defp command_identity(%Command.ScheduleActivity{} = command) do
     {:schedule_activity, command.seq, command.thread_id, command.activity_id, command.type,
-     command.input, command.opts}
+     command.task_queue, command.input, command.headers, command.schedule_to_close_timeout_ms,
+     command.schedule_to_start_timeout_ms, command.start_to_close_timeout_ms,
+     command.heartbeat_timeout_ms, command.retry_policy, command.cancellation_type,
+     command.do_not_eagerly_execute}
   end
 
   defp command_identity(%Command.StartTimer{} = command) do
@@ -2118,7 +2118,10 @@ defmodule Temporalex.Core.Executor do
   defp command_identity(%Command.FailWorkflow{} = command), do: {:fail_workflow, command.reason}
 
   defp command_identity(%Command.ContinueAsNew{} = command) do
-    {:continue_as_new, command.input, command.workflow_type, command.task_queue, command.opts}
+    {:continue_as_new, command.input, command.workflow_type, command.task_queue,
+     command.workflow_run_timeout_ms, command.workflow_task_timeout_ms, command.memo,
+     command.headers, command.search_attributes, command.retry_policy, command.versioning_intent,
+     command.initial_versioning_behavior}
   end
 
   defp command_identity(%Command.CancelWorkflow{} = command),

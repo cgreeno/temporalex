@@ -4,6 +4,7 @@ title: Evaluate remaining workflow primitive parity
 status: To Do
 assignee: []
 created_date: '2026-05-19 15:40'
+updated_date: '2026-05-19 16:36'
 labels:
   - production-readiness
   - workflow-core
@@ -13,6 +14,7 @@ dependencies: []
 references:
   - lib/temporalex/workflow/api.ex
   - lib/temporalex/core/executor.ex
+  - lib/temporalex/backend/temporal_core/codec.ex
   - ../documentation/docs/develop/rust/workflows
 documentation:
   - docs/production_readiness_review.md
@@ -34,4 +36,5 @@ Review and implement or explicitly defer remaining SDK-parity workflow primitive
 - [ ] #3 Implement only primitives that can be expressed as executor operations with precise replay behavior and Temporal/Core command mapping.
 - [ ] #4 Add focused core tests before backend integration for any accepted primitive.
 - [ ] #5 Update production readiness docs and create narrower follow-up backlog tasks for primitives that should not be bundled together.
+- [ ] #6 Include Nexus operations and any unsupported worker-facing Temporal Core activation/command variants surfaced by the codec in the parity evaluation.
 <!-- AC:END -->

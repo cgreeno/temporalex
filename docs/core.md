@@ -123,19 +123,58 @@ The guard allows the executor protocol, runner completion/failure messages, oper
 Common commands:
 
 ```elixir
-%Temporalex.Core.Command.ScheduleActivity{seq: integer(), thread_id: list(), activity_id: String.t(), type: String.t(), input: [term()], opts: keyword()}
+%Temporalex.Core.Command.RetryPolicy{
+  initial_interval_ms: non_neg_integer() | nil,
+  backoff_coefficient: float() | nil,
+  maximum_interval_ms: non_neg_integer() | nil,
+  maximum_attempts: non_neg_integer(),
+  non_retryable_error_types: [String.t()]
+}
+
+%Temporalex.Core.Command.ScheduleActivity{
+  seq: integer(),
+  thread_id: list(),
+  activity_id: String.t(),
+  type: String.t(),
+  task_queue: String.t() | nil,
+  input: [term()],
+  headers: map(),
+  schedule_to_close_timeout_ms: non_neg_integer(),
+  schedule_to_start_timeout_ms: non_neg_integer() | nil,
+  start_to_close_timeout_ms: non_neg_integer(),
+  heartbeat_timeout_ms: non_neg_integer() | nil,
+  retry_policy: Temporalex.Core.Command.RetryPolicy.t() | nil,
+  cancellation_type: :wait_cancellation_completed | :try_cancel | :abandon,
+  do_not_eagerly_execute: boolean()
+}
+
 %Temporalex.Core.Command.StartTimer{seq: integer(), thread_id: list(), duration_ms: non_neg_integer()}
 %Temporalex.Core.Command.CancelTimer{seq: integer()}
 %Temporalex.Core.Command.RequestCancelActivity{seq: integer()}
 %Temporalex.Core.Command.SetPatchMarker{id: String.t(), deprecated: boolean()}
 %Temporalex.Core.Command.CompleteWorkflow{result: term()}
 %Temporalex.Core.Command.FailWorkflow{reason: term()}
-%Temporalex.Core.Command.ContinueAsNew{input: term(), workflow_type: String.t(), task_queue: String.t() | nil, opts: keyword()}
+%Temporalex.Core.Command.ContinueAsNew{
+  input: term(),
+  workflow_type: String.t(),
+  task_queue: String.t() | nil,
+  workflow_run_timeout_ms: non_neg_integer() | nil,
+  workflow_task_timeout_ms: non_neg_integer() | nil,
+  memo: map(),
+  headers: map(),
+  search_attributes: map() | nil,
+  retry_policy: Temporalex.Core.Command.RetryPolicy.t() | nil,
+  versioning_intent: :unspecified | :compatible | :default,
+  initial_versioning_behavior: :unspecified | :auto_upgrade | :use_ramping_version
+}
+
 %Temporalex.Core.Command.CancelWorkflow{reason: term()}
 %Temporalex.Core.Command.RespondToUpdate{protocol_instance_id: String.t(), response: :accepted | {:completed, term()} | {:rejected, term()}}
 %Temporalex.Core.Command.RespondToQuery{query_id: String.t(), result: {:ok, term()} | {:error, term()}}
 %Temporalex.Core.Command.UpsertSearchAttributes{attrs: map()}
 ```
+
+Workflow operations still accept user-facing option keywords, but the executor normalizes those options into canonical command fields before the backend sees them.
 
 ### Activity Task And Completion
 

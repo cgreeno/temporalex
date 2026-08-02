@@ -103,18 +103,19 @@ defmodule Temporalex.BackendConformanceTest do
                         input: %{generation: 2},
                         workflow_type: "NextWorkflow",
                         task_queue: "temporalex-next",
-                        opts: [
-                          run_timeout: 20_000,
-                          task_timeout: 3_000,
-                          memo: %{"generation" => 2},
-                          headers: %{"trace" => "continue"},
-                          search_attributes: %{
-                            "CustomKeywordField" => SearchAttribute.keyword("continued")
-                          },
-                          retry_policy: [initial_interval: 10, maximum_attempts: 3],
-                          versioning_intent: :compatible,
-                          initial_versioning_behavior: :auto_upgrade
-                        ]
+                        workflow_run_timeout_ms: 20_000,
+                        workflow_task_timeout_ms: 3_000,
+                        memo: %{"generation" => 2},
+                        headers: %{"trace" => "continue"},
+                        search_attributes: %{
+                          "CustomKeywordField" => SearchAttribute.keyword("continued")
+                        },
+                        retry_policy: %Command.RetryPolicy{
+                          initial_interval_ms: 10,
+                          maximum_attempts: 3
+                        },
+                        versioning_intent: :compatible,
+                        initial_versioning_behavior: :auto_upgrade
                       }
                     ]}
                },
@@ -193,7 +194,7 @@ defmodule Temporalex.BackendConformanceTest do
     assert byte_size(activity_bytes) > 0
   end
 
-  test "TemporalCore codec rejects invalid duration and retry options" do
+  test "TemporalCore codec rejects invalid canonical durations and retry policies" do
     assert {:error, timer_reason} =
              Codec.workflow_completion_to_bytes(
                %Completion{
@@ -218,10 +219,8 @@ defmodule Temporalex.BackendConformanceTest do
                         activity_id: "activity",
                         type: "Example.activity",
                         input: [],
-                        opts: [
-                          start_to_close_timeout: 10,
-                          retry_policy: [initial_interval: -1]
-                        ]
+                        start_to_close_timeout_ms: 10,
+                        retry_policy: %Command.RetryPolicy{initial_interval_ms: -1}
                       }
                     ]}
                },
@@ -243,10 +242,8 @@ defmodule Temporalex.BackendConformanceTest do
                         activity_id: "activity",
                         type: "Example.activity",
                         input: [],
-                        opts: [
-                          start_to_close_timeout: 10,
-                          retry_policy: [backoff_coefficient: 0.5]
-                        ]
+                        start_to_close_timeout_ms: 10,
+                        retry_policy: %Command.RetryPolicy{backoff_coefficient: 0.5}
                       }
                     ]}
                },
@@ -268,10 +265,8 @@ defmodule Temporalex.BackendConformanceTest do
                         activity_id: "activity",
                         type: "Example.activity",
                         input: [],
-                        opts: [
-                          start_to_close_timeout: 10,
-                          retry_policy: [backoff_coefficient: 0.0]
-                        ]
+                        start_to_close_timeout_ms: 10,
+                        retry_policy: %Command.RetryPolicy{backoff_coefficient: 0.0}
                       }
                     ]}
                },
@@ -290,14 +285,14 @@ defmodule Temporalex.BackendConformanceTest do
                       %Command.ContinueAsNew{
                         input: :next,
                         workflow_type: "NextWorkflow",
-                        opts: [run_timeout: -1]
+                        workflow_run_timeout_ms: -1
                       }
                     ]}
                },
                task_queue: "temporalex-test"
              )
 
-    assert continue_reason =~ "duration option must be non-negative"
+    assert continue_reason =~ "continue-as-new workflow_run_timeout must be non-negative"
   end
 
   test "TemporalCore codec rejects invalid search attribute values" do

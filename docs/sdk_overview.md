@@ -51,7 +51,7 @@ Temporalex.Server
   v
 Temporalex.Backend.TemporalCore
   |
-  | Rustler NIF calls and protobuf bytes
+  | Rustler NIF calls, poll-loop protobuf bytes, and client operations
   v
 Temporal Core / Temporal Server
 ```
@@ -96,7 +96,7 @@ The real backend, `Temporalex.Backend.TemporalCore`, handles:
 
 - Rustler calls
 - Temporal Core worker lifecycle
-- protobuf activation/completion encoding
+- Temporal Core worker protobuf encoding/decoding with MiniPB
 - ETF payload conversion with `:erlang.term_to_binary/1` and `:erlang.binary_to_term/1`
 - poll loop messages
 - completion submission
@@ -170,7 +170,7 @@ Current repository status:
 - Core verification lives in `test/temporalex/core_executor_test.exs` and covers sequential execution, replay matching, deterministic `parallel`, `phase`, signals, updates, queries, and process lifecycle.
 - Server/test-backend integration is implemented through `Temporalex.Worker`, `Temporalex.Server`, `Temporalex.Backend`, and `Temporalex.Backend.Test`.
 - Server verification lives in `test/temporalex/server_integration_test.exs` and covers worker supervision, executor registry cleanup, activation routing, activity task supervision, query routing, eviction, and completion submission.
-- `Temporalex.Backend.TemporalCore` is implemented through `Temporalex.Native`, Rustler resources, Temporal Core worker/client calls, native poll loops, protobuf conversion, and ETF payload conversion.
+- `Temporalex.Backend.TemporalCore` is implemented through `Temporalex.Native`, Rustler resources, Temporal Core worker/client calls, native poll loops, Elixir MiniPB protobuf conversion, and ETF payload conversion.
 - `Temporalex.Client` is implemented for Temporal Core-backed workers with workflow start/result, signal, query, update, cancel, terminate, and describe operations.
 - `test/temporalex/integration/temporal_core_integration_test.exs` starts a Temporal dev server and verifies workflow execution, activity execution, heartbeats, invalid client option handling, signal/query/update/describe, termination, and result decoding through the Rust NIF.
 - `test/temporalex/integration/temporal_worker_restart_test.exs` verifies worker restart and real-history replay with the Temporal dev server.

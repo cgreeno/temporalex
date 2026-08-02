@@ -69,7 +69,7 @@ The native backend starts long-lived Tokio poll loops:
 - workflow poll loop calls `worker.poll_workflow_activation()`
 - activity poll loop calls `worker.poll_activity_task()`
 
-The real backend decodes poll results into core structs and sends them to the server:
+The Rust poll loops send raw Temporal Core protobuf bytes to the Elixir poller bridge. The bridge decodes them through `Temporalex.Backend.TemporalCore.Codec` and forwards core structs to the server:
 
 ```elixir
 {:workflow_activation, %Temporalex.Core.Activation{}}
@@ -106,7 +106,7 @@ connect(runtime, url, api_key, headers, pid) :: :ok
 Worker:
 
 ```elixir
-start_worker(runtime, client, task_queue, namespace, max_wf, max_act, pid) :: :ok
+start_worker(runtime, client, task_queue, namespace, max_wf, max_act, pid, poll_pid) :: :ok
 # sends {:worker_started, worker} | {:worker_error, reason}
 ```
 
@@ -123,7 +123,7 @@ complete_activity_task(worker, bytes, pid) :: :ok
 Heartbeat:
 
 ```elixir
-record_activity_heartbeat(worker, task_token, details_bytes) :: :ok
+record_activity_heartbeat(worker, heartbeat_bytes) :: :ok
 ```
 
 Shutdown:
@@ -177,11 +177,12 @@ No `[:safe]` option is used in v1. No pluggable converter layer exists in v1.
 
 ## Codec Placement
 
-Temporal protobuf conversion should live inside the real backend:
+Temporal Core worker protobuf conversion lives inside the real backend, on the Elixir side:
 
 ```elixir
 Temporalex.Backend.TemporalCore.Codec
 Temporalex.Backend.TemporalCore.PayloadConverter
+Temporalex.Backend.TemporalCore.Proto.Schema
 ```
 
 These modules translate:
@@ -190,5 +191,7 @@ These modules translate:
 Temporal Core protobuf bytes -> Temporalex.Core structs
 Temporalex.Core completions -> Temporal Core protobuf bytes
 ```
+
+The Rust NIF still decodes completion and heartbeat bytes into Temporal Core SDK structs at the final call boundary because the core crate APIs accept typed Rust values, not opaque bytes. It should not own the Elixir core-struct mapping.
 
 The core and server should not depend on protobuf modules directly.
