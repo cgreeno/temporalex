@@ -1410,10 +1410,53 @@ fn json_payload_from_value(value: JsonValue) -> anyhow::Result<Payload> {
     })
 }
 
+fn json_value_to_term<'a>(env: Env<'a>, value: &JsonValue) -> Term<'a> {
+    match value {
+        JsonValue::Null => nil().encode(env),
+        JsonValue::Bool(b) => rustler::Encoder::encode(b, env),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                rustler::Encoder::encode(&i, env)
+            } else if let Some(f) = n.as_f64() {
+                rustler::Encoder::encode(&f, env)
+            } else {
+                nil().encode(env)
+            }
+        }
+        JsonValue::String(s) => rustler::Encoder::encode(s, env),
+        JsonValue::Array(items) => {
+            let terms: Vec<Term> = items.iter().map(|v| json_value_to_term(env, v)).collect();
+            rustler::Encoder::encode(&terms, env)
+        }
+        JsonValue::Object(obj) => {
+            let mut map = Term::map_new(env);
+            for (key, val) in obj {
+                let value_term = json_value_to_term(env, val);
+                map = map
+                    .map_put(rustler::Encoder::encode(key, env), value_term)
+                    .unwrap_or_else(|_| Term::map_new(env));
+            }
+            map
+        }
+    }
+}
+
 fn payload_to_term<'a>(env: Env<'a>, payload: &Payload) -> anyhow::Result<Term<'a>> {
     let data = payload.data.as_slice();
     if data.is_empty() {
         return Ok(nil().encode(env));
+    }
+
+    let encoding = payload
+        .metadata
+        .get("encoding")
+        .map(|v| v.as_slice())
+        .unwrap_or(ETF_ENCODING);
+
+    if encoding == JSON_ENCODING {
+        let value: JsonValue =
+            serde_json::from_slice(data).map_err(|e| anyhow!("json/plain decode: {e}"))?;
+        return Ok(json_value_to_term(env, &value));
     }
 
     let (term, _read) = env

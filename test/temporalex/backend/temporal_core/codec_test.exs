@@ -4,8 +4,8 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
   alias Temporalex.Backend.TemporalCore.Codec
   alias Temporalex.Backend.TemporalCore.PayloadConverter
   alias Temporalex.Backend.TemporalCore.Proto.Schema
-  alias Temporalex.Core.ActivityTask
   alias Temporalex.Core.Activation
+  alias Temporalex.Core.ActivityTask
   alias Temporalex.Core.Job
   alias Temporalex.Failure
 

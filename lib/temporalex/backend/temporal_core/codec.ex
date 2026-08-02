@@ -3,9 +3,9 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
 
   alias Temporalex.Backend.TemporalCore.PayloadConverter
   alias Temporalex.Backend.TemporalCore.Proto.Schema
+  alias Temporalex.Core.Activation
   alias Temporalex.Core.ActivityCompletion
   alias Temporalex.Core.ActivityTask
-  alias Temporalex.Core.Activation
   alias Temporalex.Core.Command
   alias Temporalex.Core.Completion
   alias Temporalex.Core.Job
@@ -63,6 +63,21 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
     nexus_handler_failure_info: :nexus_handler_failure,
     application_failure_info: :failed
   }
+  @parent_close_policies_to_proto %{
+    nil => :PARENT_CLOSE_POLICY_TERMINATE,
+    terminate: :PARENT_CLOSE_POLICY_TERMINATE,
+    abandon: :PARENT_CLOSE_POLICY_ABANDON,
+    request_cancel: :PARENT_CLOSE_POLICY_REQUEST_CANCEL,
+    unspecified: :PARENT_CLOSE_POLICY_UNSPECIFIED
+  }
+  @workflow_id_reuse_policies_to_proto %{
+    nil => :WORKFLOW_ID_REUSE_POLICY_UNSPECIFIED,
+    unspecified: :WORKFLOW_ID_REUSE_POLICY_UNSPECIFIED,
+    allow_duplicate: :WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+    allow_duplicate_failed_only: :WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY,
+    reject_duplicate: :WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
+    terminate_if_running: :WORKFLOW_ID_REUSE_POLICY_TERMINATE_IF_RUNNING
+  }
   @activity_cancellation_types_to_proto %{
     try_cancel: :TRY_CANCEL,
     wait_cancellation_completed: :WAIT_CANCELLATION_COMPLETED,
@@ -82,33 +97,36 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
   }
 
   def workflow_activation_from_bytes(bytes) when is_binary(bytes) do
-    with {:ok, proto} <- decode(@workflow_activation, bytes, defaults: true),
-         {:ok, activation} <- workflow_activation_from_proto(proto) do
-      {:ok, activation}
+    with {:ok, proto} <- decode(@workflow_activation, bytes, defaults: true) do
+      workflow_activation_from_proto(proto)
     end
   end
 
   def activity_task_from_bytes(bytes) when is_binary(bytes) do
-    with {:ok, proto} <- decode(@activity_task, bytes, defaults: true),
-         {:ok, task} <- activity_task_from_proto(proto) do
-      {:ok, task}
+    with {:ok, proto} <- decode(@activity_task, bytes, defaults: true) do
+      activity_task_from_proto(proto)
     end
   end
 
   def workflow_completion_to_bytes(%Completion{} = completion, opts) do
     task_queue = Keyword.fetch!(opts, :task_queue)
+    codec = Keyword.get(opts, :payload_codec, :etf)
 
-    with {:ok, proto} <- workflow_completion_to_proto(completion, task_queue),
-         {:ok, bytes} <- encode(@workflow_activation_completion, proto) do
-      {:ok, bytes}
-    end
+    PayloadConverter.with_codec(codec, fn ->
+      with {:ok, proto} <- workflow_completion_to_proto(completion, task_queue) do
+        encode(@workflow_activation_completion, proto)
+      end
+    end)
   end
 
-  def activity_completion_to_bytes(%ActivityCompletion{} = completion) do
-    with {:ok, proto} <- activity_completion_to_proto(completion),
-         {:ok, bytes} <- encode(@activity_task_completion, proto) do
-      {:ok, bytes}
-    end
+  def activity_completion_to_bytes(%ActivityCompletion{} = completion, opts \\ []) do
+    codec = Keyword.get(opts, :payload_codec, :etf)
+
+    PayloadConverter.with_codec(codec, fn ->
+      with {:ok, proto} <- activity_completion_to_proto(completion) do
+        encode(@activity_task_completion, proto)
+      end
+    end)
   end
 
   def activity_heartbeat_to_bytes(task_token, details) when is_binary(task_token) do
@@ -295,11 +313,99 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
      }}
   end
 
+  defp activation_job_from_proto(%{
+         variant: {:resolve_child_workflow_execution_start, %{seq: seq} = resolution}
+       }) do
+    with {:ok, status} <- child_start_status_from_proto(Map.get(resolution, :status)) do
+      {:ok, %Job.ResolveChildWorkflowExecutionStart{seq: seq, status: status}}
+    end
+  end
+
+  defp activation_job_from_proto(%{
+         variant: {:resolve_child_workflow_execution, %{seq: seq} = resolution}
+       }) do
+    with {:ok, result} <- child_workflow_result_from_proto(Map.get(resolution, :result)) do
+      {:ok, %Job.ResolveChildWorkflowExecution{seq: seq, result: result}}
+    end
+  end
+
+  defp activation_job_from_proto(%{
+         variant: {:resolve_signal_external_workflow, %{seq: seq} = resolution}
+       }) do
+    with {:ok, result} <- external_workflow_result_from_proto(Map.get(resolution, :failure)) do
+      {:ok, %Job.ResolveSignalExternalWorkflow{seq: seq, result: result}}
+    end
+  end
+
+  defp activation_job_from_proto(%{
+         variant: {:resolve_request_cancel_external_workflow, %{seq: seq} = resolution}
+       }) do
+    with {:ok, result} <- external_workflow_result_from_proto(Map.get(resolution, :failure)) do
+      {:ok, %Job.ResolveRequestCancelExternalWorkflow{seq: seq, result: result}}
+    end
+  end
+
   defp activation_job_from_proto(%{variant: {variant, _value}}) do
     {:error, "unsupported workflow activation job from Temporal Core: #{variant}"}
   end
 
   defp activation_job_from_proto(_job), do: {:error, "activation job had no variant"}
+
+  defp child_start_status_from_proto({:succeeded, success}),
+    do: {:ok, {:succeeded, Map.get(success, :run_id)}}
+
+  defp child_start_status_from_proto({:failed, failure}) do
+    {:ok,
+     {:failed,
+      %{
+        workflow_id: Map.get(failure, :workflow_id),
+        workflow_type: Map.get(failure, :workflow_type),
+        cause: Map.get(failure, :cause)
+      }}}
+  end
+
+  defp child_start_status_from_proto({:cancelled, cancellation}) do
+    with {:ok, failure} <- failure_from_proto(Map.get(cancellation, :failure)) do
+      {:ok, {:cancelled, failure}}
+    end
+  end
+
+  defp child_start_status_from_proto(_status), do: {:error, "child workflow start status missing"}
+
+  defp child_workflow_result_from_proto(%{status: {:completed, success}}) do
+    case Map.fetch(success, :result) do
+      {:ok, payload} ->
+        with {:ok, term} <- PayloadConverter.payload_to_term(payload), do: {:ok, {:ok, term}}
+
+      :error ->
+        {:error, "child completion missing payload"}
+    end
+  end
+
+  defp child_workflow_result_from_proto(%{status: {:failed, failure}}) do
+    with {:ok, failure} <- failure_from_proto(Map.get(failure, :failure)) do
+      {:ok, {:error, failure}}
+    end
+  end
+
+  defp child_workflow_result_from_proto(%{status: {:cancelled, cancellation}}) do
+    with {:ok, failure} <- failure_from_proto(Map.get(cancellation, :failure)) do
+      {:ok, {:cancelled, failure}}
+    end
+  end
+
+  defp child_workflow_result_from_proto(nil), do: {:error, "child workflow result missing"}
+
+  defp child_workflow_result_from_proto(_result),
+    do: {:error, "child workflow result empty status"}
+
+  defp external_workflow_result_from_proto(nil), do: {:ok, :ok}
+
+  defp external_workflow_result_from_proto(failure) do
+    with {:ok, failure} <- failure_from_proto(failure) do
+      {:ok, {:error, failure}}
+    end
+  end
 
   defp activity_resolution_from_proto(%{status: {:completed, success}}) do
     case Map.fetch(success, :result) do
@@ -395,81 +501,83 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
   defp failure_from_proto(failure) do
     with {:ok, cause} <- failure_from_proto(Map.get(failure, :cause)) do
       base_attrs = failure_base_attrs(failure, cause)
-
-      case Map.get(failure, :failure_info) do
-        {:application_failure_info, info} ->
-          with {:ok, details} <- payloads_to_terms_option(Map.get(info, :details)) do
-            {:ok,
-             struct!(
-               Failure.ApplicationError,
-               Map.merge(base_attrs, %{
-                 type: info.type,
-                 details: details,
-                 retryable?: not info.non_retryable
-               })
-             )}
-          end
-
-        {:canceled_failure_info, info} ->
-          with {:ok, details} <- payloads_to_terms_option(Map.get(info, :details)) do
-            {:ok,
-             struct!(
-               Failure.CancelledError,
-               Map.merge(base_attrs, %{
-                 identity: info.identity,
-                 details: details
-               })
-             )}
-          end
-
-        {:timeout_failure_info, info} ->
-          with {:ok, last_heartbeat_details} <-
-                 payloads_to_terms_option(Map.get(info, :last_heartbeat_details)) do
-            {:ok,
-             struct!(
-               Failure.TimeoutError,
-               Map.merge(base_attrs, %{
-                 timeout_type: timeout_type_from_proto(info.timeout_type),
-                 last_heartbeat_details: last_heartbeat_details
-               })
-             )}
-          end
-
-        {:activity_failure_info, info} ->
-          {:ok,
-           struct!(
-             Failure.ActivityError,
-             Map.merge(base_attrs, %{
-               identity: info.identity,
-               activity_id: info.activity_id,
-               activity_type: Map.get(info, :activity_type, ""),
-               retry_state: retry_state_from_proto(info.retry_state)
-             })
-           )}
-
-        {:child_workflow_execution_failure_info, info} ->
-          execution = Map.get(info, :workflow_execution, %{})
-
-          {:ok,
-           struct!(
-             Failure.WorkflowExecutionError,
-             Map.merge(base_attrs, %{
-               namespace: info.namespace,
-               workflow_id: Map.get(execution, :workflow_id, ""),
-               run_id: Map.get(execution, :run_id, ""),
-               workflow_type: Map.get(info, :workflow_type, ""),
-               retry_state: retry_state_from_proto(info.retry_state)
-             })
-           )}
-
-        other ->
-          {:ok,
-           struct!(
-             Failure.UnknownError,
-             Map.merge(base_attrs, %{failure_type: failure_info_type(other)})
-           )}
-      end
+      failure_struct_from_info(Map.get(failure, :failure_info), base_attrs)
     end
+  end
+
+  defp failure_struct_from_info({:application_failure_info, info}, base_attrs) do
+    with {:ok, details} <- payloads_to_terms_option(Map.get(info, :details)) do
+      {:ok,
+       struct!(
+         Failure.ApplicationError,
+         Map.merge(base_attrs, %{
+           type: info.type,
+           details: details,
+           retryable?: not info.non_retryable
+         })
+       )}
+    end
+  end
+
+  defp failure_struct_from_info({:canceled_failure_info, info}, base_attrs) do
+    with {:ok, details} <- payloads_to_terms_option(Map.get(info, :details)) do
+      {:ok,
+       struct!(
+         Failure.CancelledError,
+         Map.merge(base_attrs, %{identity: info.identity, details: details})
+       )}
+    end
+  end
+
+  defp failure_struct_from_info({:timeout_failure_info, info}, base_attrs) do
+    with {:ok, last_heartbeat_details} <-
+           payloads_to_terms_option(Map.get(info, :last_heartbeat_details)) do
+      {:ok,
+       struct!(
+         Failure.TimeoutError,
+         Map.merge(base_attrs, %{
+           timeout_type: timeout_type_from_proto(info.timeout_type),
+           last_heartbeat_details: last_heartbeat_details
+         })
+       )}
+    end
+  end
+
+  defp failure_struct_from_info({:activity_failure_info, info}, base_attrs) do
+    {:ok,
+     struct!(
+       Failure.ActivityError,
+       Map.merge(base_attrs, %{
+         identity: info.identity,
+         activity_id: info.activity_id,
+         activity_type: Map.get(info, :activity_type, ""),
+         retry_state: retry_state_from_proto(info.retry_state)
+       })
+     )}
+  end
+
+  defp failure_struct_from_info({:child_workflow_execution_failure_info, info}, base_attrs) do
+    execution = Map.get(info, :workflow_execution, %{})
+
+    {:ok,
+     struct!(
+       Failure.WorkflowExecutionError,
+       Map.merge(base_attrs, %{
+         namespace: info.namespace,
+         workflow_id: Map.get(execution, :workflow_id, ""),
+         run_id: Map.get(execution, :run_id, ""),
+         workflow_type: Map.get(info, :workflow_type, ""),
+         retry_state: retry_state_from_proto(info.retry_state)
+       })
+     )}
+  end
+
+  defp failure_struct_from_info(other, base_attrs) do
+    {:ok,
+     struct!(
+       Failure.UnknownError,
+       Map.merge(base_attrs, %{failure_type: failure_info_type(other)})
+     )}
   end
 
   defp failure_base_attrs(%{message: message, source: source, stack_trace: stack_trace}, cause) do
@@ -723,6 +831,121 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
     end
   end
 
+  defp command_to_proto(%Command.ScheduleLocalActivity{} = command, _default_task_queue) do
+    opts = command.opts || []
+    timeout_ms = keyword_millis(opts, [:timeout, :start_to_close_timeout]) || 60_000
+
+    with {:ok, start_to_close_timeout} <-
+           duration_from_ms(timeout_ms, "local activity start_to_close_timeout"),
+         {:ok, schedule_to_close_timeout} <-
+           duration_from_ms(
+             keyword_millis(opts, [:schedule_to_close_timeout]) || timeout_ms,
+             "local activity schedule_to_close_timeout"
+           ),
+         {:ok, schedule_to_start_timeout} <-
+           optional_duration_ms(
+             keyword_millis(opts, [:schedule_to_start_timeout]),
+             "local activity schedule_to_start_timeout"
+           ),
+         {:ok, headers} <-
+           PayloadConverter.term_to_payload_map(Keyword.get(opts, :headers, %{})),
+         {:ok, retry_policy} <- opts_retry_policy_to_proto(opts),
+         {:ok, cancellation_type} <-
+           activity_cancellation_type_to_proto(
+             Keyword.get(opts, :cancellation_type, :wait_cancellation_completed)
+           ) do
+      schedule = %{
+        seq: command.seq,
+        activity_id: command.activity_id,
+        activity_type: command.type,
+        attempt: 1,
+        headers: headers,
+        arguments: PayloadConverter.term_to_payloads_list(command.input || []),
+        schedule_to_close_timeout: schedule_to_close_timeout,
+        schedule_to_start_timeout: schedule_to_start_timeout,
+        start_to_close_timeout: start_to_close_timeout,
+        retry_policy: retry_policy,
+        cancellation_type: cancellation_type
+      }
+
+      {:ok, %{variant: {:schedule_local_activity, drop_nil(schedule)}}}
+    end
+  end
+
+  defp command_to_proto(%Command.StartChildWorkflowExecution{} = command, default_task_queue) do
+    opts = command.opts || []
+
+    with {:ok, workflow_execution_timeout} <-
+           optional_duration_ms(
+             keyword_millis(opts, [:execution_timeout, :workflow_execution_timeout]),
+             "child workflow execution_timeout"
+           ),
+         {:ok, workflow_run_timeout} <-
+           optional_duration_ms(
+             keyword_millis(opts, [:run_timeout]),
+             "child workflow run_timeout"
+           ),
+         {:ok, workflow_task_timeout} <-
+           optional_duration_ms(
+             keyword_millis(opts, [:task_timeout]),
+             "child workflow task_timeout"
+           ),
+         {:ok, parent_close_policy} <- parent_close_policy_to_proto(opts),
+         {:ok, workflow_id_reuse_policy} <- workflow_id_reuse_policy_to_proto(opts),
+         {:ok, retry_policy} <- opts_retry_policy_to_proto(opts),
+         {:ok, headers} <-
+           PayloadConverter.term_to_payload_map(Keyword.get(opts, :headers, %{})) do
+      start = %{
+        seq: command.seq,
+        namespace: Keyword.get(opts, :namespace, ""),
+        workflow_id: command.workflow_id,
+        workflow_type: command.workflow_type,
+        task_queue: Keyword.get(opts, :task_queue) || default_task_queue,
+        input: PayloadConverter.term_to_payloads_list(command.input || []),
+        workflow_execution_timeout: workflow_execution_timeout,
+        workflow_run_timeout: workflow_run_timeout,
+        workflow_task_timeout: workflow_task_timeout,
+        parent_close_policy: parent_close_policy,
+        workflow_id_reuse_policy: workflow_id_reuse_policy,
+        retry_policy: retry_policy,
+        cron_schedule: Keyword.get(opts, :cron_schedule, ""),
+        headers: headers
+      }
+
+      {:ok, %{variant: {:start_child_workflow_execution, drop_nil(start)}}}
+    end
+  end
+
+  defp command_to_proto(%Command.SignalExternalWorkflowExecution{} = command, _default_task_queue) do
+    with {:ok, target} <- signal_target_to_proto(command.target) do
+      {:ok,
+       %{
+         variant:
+           {:signal_external_workflow_execution,
+            %{
+              seq: command.seq,
+              signal_name: command.signal_name,
+              args: PayloadConverter.term_to_payloads_list(command.args || []),
+              target: target
+            }}
+       }}
+    end
+  end
+
+  defp command_to_proto(
+         %Command.RequestCancelExternalWorkflowExecution{} = command,
+         _default_task_queue
+       ) do
+    with {:ok, workflow_execution} <- cancel_target_to_proto(command.target) do
+      {:ok,
+       %{
+         variant:
+           {:request_cancel_external_workflow_execution,
+            %{seq: command.seq, workflow_execution: workflow_execution, reason: ""}}
+       }}
+    end
+  end
+
   defp command_to_proto(command, _task_queue) do
     {:error, "unsupported workflow command #{inspect(command.__struct__)}"}
   end
@@ -905,11 +1128,7 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
   defp maybe_failure(nil, _message), do: nil
   defp maybe_failure(cause, message), do: failure_to_proto(cause, message)
 
-  defp duration_from_ms(ms, option_name) do
-    with {:ok, ms} <- non_negative_millis(ms, option_name) do
-      {:ok, ms}
-    end
-  end
+  defp duration_from_ms(ms, option_name), do: non_negative_millis(ms, option_name)
 
   defp optional_duration_ms(nil, _option_name), do: {:ok, nil}
   defp optional_duration_ms(ms, option_name), do: duration_from_ms(ms, option_name)
@@ -1010,6 +1229,65 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
   defp timeout_type_to_proto(type),
     do: lookup(@timeout_types_to_proto, type, :TIMEOUT_TYPE_UNSPECIFIED)
 
+  defp keyword_millis(opts, keys) do
+    Enum.find_value(keys, fn key ->
+      case Keyword.fetch(opts, key) do
+        {:ok, nil} -> nil
+        {:ok, value} -> value
+        :error -> nil
+      end
+    end)
+  end
+
+  defp opts_retry_policy_to_proto(opts) do
+    case Keyword.get(opts, :retry_policy) do
+      nil ->
+        {:ok, nil}
+
+      kw when is_list(kw) ->
+        retry_policy_to_proto(%Command.RetryPolicy{
+          initial_interval_ms: keyword_millis(kw, [:initial_interval]),
+          maximum_interval_ms: keyword_millis(kw, [:maximum_interval]),
+          backoff_coefficient: Keyword.get(kw, :backoff_coefficient),
+          maximum_attempts: Keyword.get(kw, :maximum_attempts, 0),
+          non_retryable_error_types: Keyword.get(kw, :non_retryable_error_types, [])
+        })
+
+      _other ->
+        {:error, "retry_policy must be a keyword list"}
+    end
+  end
+
+  defp parent_close_policy_to_proto(opts) do
+    enum_to_proto(
+      @parent_close_policies_to_proto,
+      Keyword.get(opts, :parent_close_policy),
+      "unsupported parent close policy"
+    )
+  end
+
+  defp workflow_id_reuse_policy_to_proto(opts) do
+    key = Keyword.get(opts, :workflow_id_reuse_policy) || Keyword.get(opts, :id_reuse_policy)
+
+    enum_to_proto(
+      @workflow_id_reuse_policies_to_proto,
+      key,
+      "unsupported workflow id reuse policy"
+    )
+  end
+
+  defp signal_target_to_proto({:child, workflow_id}) when is_binary(workflow_id),
+    do: {:ok, {:child_workflow_id, workflow_id}}
+
+  defp signal_target_to_proto({_tag, _value}), do: {:error, "unsupported signal target"}
+  defp signal_target_to_proto(_other), do: {:error, "signal target must be a tagged tuple"}
+
+  defp cancel_target_to_proto({:child, workflow_id}) when is_binary(workflow_id),
+    do: {:ok, %{namespace: "", workflow_id: workflow_id, run_id: ""}}
+
+  defp cancel_target_to_proto({_tag, _value}), do: {:error, "unsupported cancel target"}
+  defp cancel_target_to_proto(_other), do: {:error, "cancel target must be a tagged tuple"}
+
   defp enum_to_proto(map, key, error) do
     case Map.fetch(map, key) do
       {:ok, value} -> {:ok, value}
@@ -1036,7 +1314,8 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
   # key entirely instead of leaving it nil.
   defp drop_nil(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
 
+  # `format_error/1` is only ever reached with PB error structs (exceptions);
+  # non-exception reasons fall through to inspect/1.
   defp format_error(error) when is_exception(error), do: Exception.message(error)
-  defp format_error(reason) when is_binary(reason), do: reason
   defp format_error(reason), do: inspect(reason)
 end

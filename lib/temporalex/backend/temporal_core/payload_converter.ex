@@ -5,13 +5,46 @@ defmodule Temporalex.Backend.TemporalCore.PayloadConverter do
 
   @etf_encoding "binary/erlang-eterm"
   @json_encoding "json/plain"
+  @codec_key :temporalex_payload_codec
+
+  @doc """
+  Run `fun` with the outbound payload codec (`:etf` | `:json`) bound for the
+  current process. Encoding is synchronous within one process, so a
+  process-scoped codec threads the option through the whole completion without
+  touching every `term_to_payload/1` call site (mirrors the previous native
+  thread-local codec). Restores the previous binding afterwards so codecs
+  cannot leak between calls.
+  """
+  def with_codec(codec, fun) when codec in [:etf, :json] and is_function(fun, 0) do
+    previous = Process.get(@codec_key)
+    Process.put(@codec_key, codec)
+
+    try do
+      fun.()
+    after
+      if previous == nil, do: Process.delete(@codec_key), else: Process.put(@codec_key, previous)
+    end
+  end
+
+  def current_codec, do: Process.get(@codec_key, :etf)
 
   def term_to_bytes(term), do: :erlang.term_to_binary(term)
 
   def bytes_to_term(bytes) when is_binary(bytes), do: :erlang.binary_to_term(bytes)
 
   def term_to_payload(term) do
-    payload_from_bytes(term_to_bytes(term))
+    case current_codec() do
+      :json -> json_payload_from_term(term)
+      _etf -> payload_from_bytes(term_to_bytes(term))
+    end
+  end
+
+  def payload_to_term(%{metadata: %{"encoding" => @json_encoding}, data: data})
+      when is_binary(data) and data != "" do
+    case Jason.decode(data) do
+      {:ok, term} -> {:ok, term}
+      {:error, error} -> {:error, "payload is not valid JSON: #{Exception.message(error)}"}
+    end
   end
 
   def payload_to_term(%{data: data}) when data in [nil, ""], do: {:ok, nil}
@@ -84,6 +117,19 @@ defmodule Temporalex.Backend.TemporalCore.PayloadConverter do
     }
   end
 
+  # Encode a term as a `json/plain` payload. Terms JSON cannot represent
+  # losslessly (e.g. tuples) fall back to ETF so the completion still encodes;
+  # workflows using the JSON codec are expected to exchange JSON-compatible data.
+  defp json_payload_from_term(term) do
+    case Jason.encode(term) do
+      {:ok, data} ->
+        %{metadata: %{"encoding" => @json_encoding}, data: data, external_payloads: []}
+
+      {:error, _error} ->
+        payload_from_bytes(term_to_bytes(term))
+    end
+  end
+
   defp json_payload(value) do
     case Jason.encode(value) do
       {:ok, data} ->
@@ -152,6 +198,8 @@ defmodule Temporalex.Backend.TemporalCore.PayloadConverter do
   defp typed_search_attribute_json(_type, _value),
     do: {:error, "unsupported Search Attribute type"}
 
-  defp finite_float?(value),
-    do: value == value and value not in [:math.pow(1.0, 309), -:math.pow(1.0, 309)]
+  # Largest finite IEEE-754 double; excludes ±infinity and NaN (NaN fails both
+  # comparisons) so only JSON-representable finite doubles pass.
+  @max_finite_float 1.797_693_134_862_315_7e308
+  defp finite_float?(value), do: value >= -@max_finite_float and value <= @max_finite_float
 end
