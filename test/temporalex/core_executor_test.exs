@@ -767,8 +767,7 @@ defmodule Temporalex.CoreExecutorTest do
     test "continue_as_new! options are validated before command emission" do
       assert {:ok, exec} = TestHarness.start_workflow(InvalidContinueOptionsWorkflow, :next)
 
-      assert {:complete, {:error, {:exception, {:exception, %ArgumentError{} = error, _stack}}}} =
-               TestHarness.next(exec)
+      assert {:complete, {:error, %ArgumentError{} = error}} = TestHarness.next(exec)
 
       assert error.message == "continue_as_new! workflow_run_timeout must be non-negative"
     end
@@ -793,8 +792,7 @@ defmodule Temporalex.CoreExecutorTest do
     test "activity options are validated before command emission" do
       assert {:ok, exec} = TestHarness.start_workflow(InvalidActivityOptionsWorkflow, :value)
 
-      assert {:complete, {:error, {:exception, {:exception, %ArgumentError{} = error, _stack}}}} =
-               TestHarness.next(exec)
+      assert {:complete, {:error, %ArgumentError{} = error}} = TestHarness.next(exec)
 
       assert error.message == "retry_policy.backoff_coefficient must be 1.0 or larger"
     end

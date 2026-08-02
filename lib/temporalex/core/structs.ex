@@ -20,6 +20,13 @@ defmodule Temporalex.Core.Completion do
   """
 
   defstruct run_id: nil, status: {:ok, []}
+
+  @type status :: {:ok, [struct()]} | {:failed, term(), keyword()}
+
+  @type t :: %__MODULE__{
+          run_id: String.t() | nil,
+          status: status()
+        }
 end
 
 defmodule Temporalex.Core.Nondeterminism do
@@ -89,7 +96,16 @@ end
 defmodule Temporalex.Core.Pending do
   @moduledoc false
 
-  defstruct [:seq, :thread_id, :from, :op, :cancellation_type, cancel_requested?: false]
+  defstruct [
+    :seq,
+    :thread_id,
+    :from,
+    :op,
+    :awaiter,
+    :completion,
+    :cancellation_type,
+    cancel_requested?: false
+  ]
 end
 
 defmodule Temporalex.Core.ParallelScope do
@@ -310,6 +326,13 @@ defmodule Temporalex.Core.ActivityCompletion do
   """
 
   defstruct task_token: nil, result: nil
+
+  @type result :: {:ok, term()} | {:error, term()} | {:cancelled, term()} | nil
+
+  @type t :: %__MODULE__{
+          task_token: binary() | nil,
+          result: result()
+        }
 end
 
 defmodule Temporalex.Core.Op.ExecuteActivity do
@@ -405,4 +428,84 @@ end
 defmodule Temporalex.Core.Op.UpdateState do
   @moduledoc false
   defstruct [:fun]
+end
+
+# ── Child-workflow & local-activity primitives (Chris's features) ──────────
+# Command/Job/Op structs the executor produces for child workflows and local
+# activities; encoded/decoded by the proto codec's child-workflow support.
+
+defmodule Temporalex.Core.Job.ResolveChildWorkflowExecutionStart do
+  @moduledoc false
+  # status: {:succeeded, run_id} | {:failed, %{workflow_id, workflow_type, cause}} | {:cancelled, failure}
+  defstruct [:seq, :status]
+end
+
+defmodule Temporalex.Core.Job.ResolveChildWorkflowExecution do
+  @moduledoc false
+  # result: {:ok, value} | {:error, failure} | {:cancelled, failure}
+  defstruct [:seq, :result]
+end
+
+defmodule Temporalex.Core.Job.ResolveSignalExternalWorkflow do
+  @moduledoc false
+  # result: :ok | {:error, failure}
+  defstruct [:seq, :result]
+end
+
+defmodule Temporalex.Core.Job.ResolveRequestCancelExternalWorkflow do
+  @moduledoc false
+  # result: :ok | {:error, failure}
+  defstruct [:seq, :result]
+end
+
+defmodule Temporalex.Core.Command.ScheduleLocalActivity do
+  @moduledoc false
+  defstruct [:seq, :thread_id, :activity_id, :type, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Command.StartChildWorkflowExecution do
+  @moduledoc false
+  defstruct [:seq, :thread_id, :workflow_type, :workflow_id, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Command.SignalExternalWorkflowExecution do
+  @moduledoc false
+  # target: {:child, workflow_id}
+  defstruct [:seq, :thread_id, :target, :signal_name, args: [], opts: []]
+end
+
+defmodule Temporalex.Core.Command.RequestCancelExternalWorkflowExecution do
+  @moduledoc false
+  # target: {:child, workflow_id}
+  defstruct [:seq, :thread_id, :target]
+end
+
+defmodule Temporalex.Core.Op.ExecuteLocalActivity do
+  @moduledoc false
+  defstruct [:type, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Op.ExecuteChildWorkflow do
+  @moduledoc false
+  defstruct [:workflow_type, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Op.SignalChildWorkflow do
+  @moduledoc false
+  defstruct [:workflow_id, :signal_name, args: [], opts: []]
+end
+
+defmodule Temporalex.Core.Op.StartChildWorkflow do
+  @moduledoc false
+  defstruct [:workflow_type, input: [], opts: []]
+end
+
+defmodule Temporalex.Core.Op.AwaitChildWorkflow do
+  @moduledoc false
+  defstruct [:seq]
+end
+
+defmodule Temporalex.Core.Op.CancelChildWorkflow do
+  @moduledoc false
+  defstruct [:workflow_id, opts: []]
 end

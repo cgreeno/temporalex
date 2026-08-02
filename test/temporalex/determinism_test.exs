@@ -85,7 +85,15 @@ defmodule Temporalex.DeterminismTest do
                      activity_id: "activity-0",
                      type: "#{inspect(Activities)}.work",
                      input: [:old_path],
-                     opts: [timeout: 1_000]
+                     task_queue: nil,
+                     headers: %{},
+                     schedule_to_close_timeout_ms: 1_000,
+                     schedule_to_start_timeout_ms: nil,
+                     start_to_close_timeout_ms: 1_000,
+                     heartbeat_timeout_ms: nil,
+                     retry_policy: nil,
+                     cancellation_type: :wait_cancellation_completed,
+                     do_not_eagerly_execute: false
                    }
                  ]
                )
@@ -220,7 +228,15 @@ defmodule Temporalex.DeterminismTest do
           activity_id: "activity-0",
           type: type,
           input: [:right],
-          opts: [timeout: 1_000]
+          task_queue: nil,
+          headers: %{},
+          schedule_to_close_timeout_ms: 1_000,
+          schedule_to_start_timeout_ms: nil,
+          start_to_close_timeout_ms: 1_000,
+          heartbeat_timeout_ms: nil,
+          retry_policy: nil,
+          cancellation_type: :wait_cancellation_completed,
+          do_not_eagerly_execute: false
         },
         %Command.ScheduleActivity{
           seq: 1,
@@ -228,7 +244,15 @@ defmodule Temporalex.DeterminismTest do
           activity_id: "activity-1",
           type: type,
           input: [:left],
-          opts: [timeout: 1_000]
+          task_queue: nil,
+          headers: %{},
+          schedule_to_close_timeout_ms: 1_000,
+          schedule_to_start_timeout_ms: nil,
+          start_to_close_timeout_ms: 1_000,
+          heartbeat_timeout_ms: nil,
+          retry_policy: nil,
+          cancellation_type: :wait_cancellation_completed,
+          do_not_eagerly_execute: false
         }
       ]
 
