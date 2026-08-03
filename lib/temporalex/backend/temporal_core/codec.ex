@@ -831,6 +831,14 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
     end
   end
 
+  # Memo upsert rides on ModifyWorkflowProperties, whose only property is the
+  # memo it upserts.
+  defp command_to_proto(%Command.UpsertMemo{memo: memo}, _task_queue) do
+    with {:ok, fields} <- PayloadConverter.term_to_payload_map(memo) do
+      {:ok, %{variant: {:modify_workflow_properties, %{upserted_memo: %{fields: fields}}}}}
+    end
+  end
+
   defp command_to_proto(%Command.ScheduleLocalActivity{} = command, _default_task_queue) do
     opts = command.opts || []
     timeout_ms = keyword_millis(opts, [:timeout, :start_to_close_timeout]) || 60_000
@@ -894,7 +902,9 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
          {:ok, workflow_id_reuse_policy} <- workflow_id_reuse_policy_to_proto(opts),
          {:ok, retry_policy} <- opts_retry_policy_to_proto(opts),
          {:ok, headers} <-
-           PayloadConverter.term_to_payload_map(Keyword.get(opts, :headers, %{})) do
+           PayloadConverter.term_to_payload_map(Keyword.get(opts, :headers, %{})),
+         {:ok, memo} <-
+           PayloadConverter.term_to_payload_map(Keyword.get(opts, :memo, %{})) do
       start = %{
         seq: command.seq,
         namespace: Keyword.get(opts, :namespace, ""),
@@ -909,7 +919,8 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
         workflow_id_reuse_policy: workflow_id_reuse_policy,
         retry_policy: retry_policy,
         cron_schedule: Keyword.get(opts, :cron_schedule, ""),
-        headers: headers
+        headers: headers,
+        memo: memo
       }
 
       {:ok, %{variant: {:start_child_workflow_execution, drop_nil(start)}}}

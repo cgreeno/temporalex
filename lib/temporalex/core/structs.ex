@@ -298,6 +298,11 @@ defmodule Temporalex.Core.Command.UpsertSearchAttributes do
   defstruct attrs: %{}
 end
 
+defmodule Temporalex.Core.Command.UpsertMemo do
+  @moduledoc false
+  defstruct memo: %{}
+end
+
 defmodule Temporalex.Core.ActivityTask do
   @moduledoc """
   Server-facing activity task decoded by a backend.
@@ -413,6 +418,11 @@ end
 defmodule Temporalex.Core.Op.UpsertSearchAttributes do
   @moduledoc false
   defstruct attrs: %{}
+end
+
+defmodule Temporalex.Core.Op.UpsertMemo do
+  @moduledoc false
+  defstruct memo: %{}
 end
 
 defmodule Temporalex.Core.Op.Parallel do

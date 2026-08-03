@@ -23,7 +23,7 @@ use temporalio_common::protos::coresdk::workflow_completion::WorkflowActivationC
 use temporalio_common::protos::temporal::api::history::v1::History;
 use temporalio_common::protos::coresdk::{ActivityHeartbeat, ActivityTaskCompletion};
 use temporalio_common::protos::temporal::api::common::v1::{
-    Header, Payload, Payloads, RetryPolicy,
+    Header, Memo, Payload, Payloads, RetryPolicy,
 };
 use temporalio_common::protos::temporal::api::enums::v1::{
     QueryRejectCondition, RetryState, TimeoutType, WorkflowExecutionStatus,
@@ -193,6 +193,7 @@ rustler::atoms! {
     http,
     url_atom = "url",
     workflow_history_fetched,
+    memo,
     // Task priority and fairness (see `priority_from_opts`).
     priority,
     priority_key,
@@ -1568,7 +1569,28 @@ fn workflow_description_to_term<'a>(
         start_time_ms() => option_i64_term(env, description.start_time().and_then(system_time_to_millis)),
         execution_time_ms() => option_i64_term(env, description.execution_time().and_then(system_time_to_millis)),
         close_time_ms() => option_i64_term(env, description.close_time().and_then(system_time_to_millis)),
+        memo() => memo_to_term(env, description.memo())?,
     )
+}
+
+/// Decodes a workflow's memo into a plain Elixir map.
+///
+/// Memo is unindexed operator annotation, so it is only ever read back — there
+/// is no point returning it opaque. An absent memo becomes an empty map rather
+/// than nil, so callers can pattern match on a map unconditionally.
+fn memo_to_term<'a>(env: Env<'a>, memo: Option<&Memo>) -> anyhow::Result<Term<'a>> {
+    let mut map = Term::map_new(env);
+
+    let Some(memo) = memo else {
+        return Ok(map);
+    };
+
+    for (key, payload) in &memo.fields {
+        let value = payload_to_term(env, payload)?;
+        map = map_put(map, string_term(env, key.clone()), value)?;
+    }
+
+    Ok(map)
 }
 
 fn option_i64_term<'a>(env: Env<'a>, value: Option<i64>) -> Term<'a> {

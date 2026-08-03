@@ -784,6 +784,12 @@ defmodule Temporalex.Core.Executor do
     state
   end
 
+  defp handle_workflow_op(state, from, _thread_id, %Op.UpsertMemo{memo: memo}) do
+    state = append_command(state, %Command.UpsertMemo{memo: memo})
+    reply_ok(from, :ok)
+    state
+  end
+
   defp handle_workflow_op(state, from, thread_id, %Op.Parallel{funs: []}) do
     if cancellable_blocked_by_workflow_cancellation?(state, thread_id) do
       reply_cancelled(from, state.cancellation)
@@ -2135,6 +2141,9 @@ defmodule Temporalex.Core.Executor do
 
   defp command_identity(%Command.UpsertSearchAttributes{} = command),
     do: {:upsert_search_attributes, command.attrs}
+
+  defp command_identity(%Command.UpsertMemo{} = command),
+    do: {:upsert_memo, command.memo}
 
   defp command_identity(command), do: command
 
