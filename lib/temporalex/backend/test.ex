@@ -91,6 +91,10 @@ defmodule Temporalex.Backend.Test do
     do: unsupported_client_operation()
 
   @impl Temporalex.Backend
+  def fetch_workflow_history(%ClientState{}, _workflow_id, _run_id, _opts),
+    do: unsupported_client_operation()
+
+  @impl Temporalex.Backend
   def complete_workflow_activation(%WorkerState{} = state, %Completion{} = completion) do
     Agent.update(state.agent, fn data ->
       Map.update!(data, :workflow_completions, &(&1 ++ [completion]))

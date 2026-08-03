@@ -82,6 +82,22 @@ defmodule Temporalex.Backend do
               opts :: keyword()
             ) :: {:ok, term()} | {:error, term()}
 
+  @doc """
+  Fetches a workflow's history as an opaque binary.
+
+  The binary is encoded protobuf, but callers must treat it as opaque: feed it
+  to a replay worker or persist it as a replay fixture. It is deliberately not
+  decoded into core structs — the only consumer is the replayer, which wants the
+  encoded form, so decoding and re-encoding would be waste. Backend transport
+  detail stays out of executor and workflow semantics either way.
+  """
+  @callback fetch_workflow_history(
+              client_state(),
+              workflow_id :: binary(),
+              run_id :: binary() | nil,
+              opts :: keyword()
+            ) :: {:ok, binary()} | {:error, term()}
+
   @callback complete_workflow_activation(
               worker_state(),
               Temporalex.Core.Completion.t()
