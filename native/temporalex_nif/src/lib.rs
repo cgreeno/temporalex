@@ -11,8 +11,8 @@ use temporalio_client::{
     Client, ClientOptions, Connection, ConnectionOptions, TlsOptions, UntypedQuery, UntypedSignal,
     UntypedUpdate, UntypedWorkflow, WorkflowCancelOptions, WorkflowDescribeOptions,
     WorkflowExecuteUpdateOptions, WorkflowExecutionDescription, WorkflowExecutionInfo,
-    WorkflowGetResultOptions, WorkflowHandle, WorkflowQueryOptions, WorkflowSignalOptions,
-    WorkflowStartOptions, WorkflowTerminateOptions,
+    WorkflowFetchHistoryOptions, WorkflowGetResultOptions, WorkflowHandle, WorkflowQueryOptions,
+    WorkflowSignalOptions, WorkflowStartOptions, WorkflowTerminateOptions,
     errors::{
         WorkflowGetResultError, WorkflowInteractionError, WorkflowQueryError, WorkflowStartError,
         WorkflowUpdateError,
@@ -20,6 +20,7 @@ use temporalio_client::{
 };
 use temporalio_common::data_converters::RawValue;
 use temporalio_common::protos::coresdk::workflow_completion::WorkflowActivationCompletion;
+use temporalio_common::protos::temporal::api::history::v1::History;
 use temporalio_common::protos::coresdk::{ActivityHeartbeat, ActivityTaskCompletion};
 use temporalio_common::protos::temporal::api::common::v1::{
     Header, Payload, Payloads, RetryPolicy,
@@ -190,6 +191,7 @@ rustler::atoms! {
     grpc,
     http,
     url_atom = "url",
+    workflow_history_fetched,
 }
 
 const ETF_ENCODING: &[u8] = b"binary/erlang-eterm";
@@ -1172,6 +1174,57 @@ fn terminate_workflow(
             workflow_terminated(),
             |env| match result {
                 Ok(()) => (ok(), ok()).encode(env),
+                Err(err) => (error(), workflow_interaction_error_to_term(env, err)).encode(env),
+            },
+        );
+    });
+
+    ok()
+}
+
+/// Fetches a workflow's full history and returns it as encoded protobuf bytes.
+///
+/// Protobuf rather than JSON deliberately: `.temporal.api.history` is not in
+/// temporalio-common's pbjson list, so `History`'s derived serde impl is not
+/// proto-JSON compatible and will not round-trip `temporal workflow show
+/// --output json`. Bytes are the format that survives both the NIF boundary and
+/// being checked in as a replay fixture.
+#[rustler::nif]
+fn fetch_workflow_history(
+    client: ResourceArc<ClientResource>,
+    namespace: String,
+    workflow_id: String,
+    run_id: Option<String>,
+    pid: LocalPid,
+    reference: Term,
+) -> Atom {
+    let connection = client.connection.clone();
+    let handle = client._runtime_handle.clone();
+    let saved_env = OwnedEnv::new();
+    let saved_ref = saved_env.save(reference);
+
+    handle.spawn(async move {
+        let result = async {
+            let wf = untyped_handle(connection, namespace, workflow_id, run_id)
+                .map_err(WorkflowInteractionResult::Other)?;
+            let history = wf
+                .fetch_history(WorkflowFetchHistoryOptions::default())
+                .await
+                .map_err(WorkflowInteractionResult::Interaction)?;
+            Ok::<_, WorkflowInteractionResult>(history)
+        }
+        .await;
+
+        send_ref_result(
+            saved_env,
+            saved_ref,
+            &pid,
+            workflow_history_fetched(),
+            |env| match result {
+                Ok(history) => {
+                    let bytes = History::from(history).encode_to_vec();
+                    (ok(), binary_term(env, &bytes)).encode(env)
+                }
                 Err(err) => (error(), workflow_interaction_error_to_term(env, err)).encode(env),
             },
         );

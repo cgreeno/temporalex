@@ -120,4 +120,7 @@ defmodule Temporalex.Native do
 
   def describe_workflow(_client, _namespace, _workflow_id, _run_id, _pid, _ref),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  def fetch_workflow_history(_client, _namespace, _workflow_id, _run_id, _pid, _ref),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

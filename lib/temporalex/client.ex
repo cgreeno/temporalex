@@ -400,6 +400,55 @@ defmodule Temporalex.Client do
     end)
   end
 
+  @doc """
+  Fetches a workflow's history as an opaque binary.
+
+  Feed the result to `Temporalex.Replay` to check current workflow code against
+  a real execution, or write it to a file as a replay fixture. Treat it as
+  opaque — it is encoded protobuf, and parsing it in application code would put
+  backend transport detail somewhere it does not belong.
+  """
+  def fetch_workflow_history(%Handle{} = handle, opts \\ []) when is_list(opts) do
+    with_client_connection(handle.client, :fetch_workflow_history, opts, fn %Connection{} =
+                                                                              connection,
+                                                                            opts ->
+      connection.backend.fetch_workflow_history(
+        connection.backend_state,
+        handle.workflow_id,
+        handle.run_id,
+        opts
+      )
+      |> normalize_client_result(
+        operation: :fetch_workflow_history,
+        client: handle.client,
+        workflow_id: handle.workflow_id,
+        run_id: handle.run_id,
+        workflow_type: handle.workflow_type
+      )
+    end)
+  end
+
+  def fetch_workflow_history(client, workflow_id, opts)
+      when is_binary(workflow_id) and is_list(opts) do
+    with_client_connection(client, :fetch_workflow_history, opts, fn %Connection{} = connection,
+                                                                     opts ->
+      run_id = Keyword.get(opts, :run_id)
+
+      connection.backend.fetch_workflow_history(
+        connection.backend_state,
+        workflow_id,
+        run_id,
+        opts
+      )
+      |> normalize_client_result(
+        operation: :fetch_workflow_history,
+        client: client,
+        workflow_id: workflow_id,
+        run_id: run_id
+      )
+    end)
+  end
+
   @impl GenServer
   def init(opts) do
     Process.flag(:trap_exit, true)

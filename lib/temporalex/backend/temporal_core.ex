@@ -390,6 +390,27 @@ defmodule Temporalex.Backend.TemporalCore do
     end
   end
 
+  # Histories can be large and paginate server-side, so this borrows the
+  # (longer) workflow-result timeout rather than the completion timeout.
+  @impl Temporalex.Backend
+  def fetch_workflow_history(%ClientState{} = state, workflow_id, run_id, opts)
+      when is_binary(workflow_id) and is_list(opts) do
+    timeout = Keyword.get(opts, :timeout, state.workflow_result_timeout)
+    ref = make_ref()
+
+    with :ok <-
+           Native.fetch_workflow_history(
+             state.client,
+             state.namespace,
+             workflow_id,
+             empty_to_nil(run_id),
+             self(),
+             ref
+           ) do
+      await_ref(:workflow_history_fetched, ref, timeout, client_monitor(opts))
+    end
+  end
+
   defp target(opts) do
     Keyword.get(opts, :target) ||
       Keyword.get(opts, :url) ||
