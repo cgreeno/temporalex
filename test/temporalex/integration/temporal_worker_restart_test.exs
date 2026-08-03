@@ -86,6 +86,18 @@ defmodule Temporalex.TemporalWorkerRestartTest do
     end
   end
 
+  defmodule NapWorkflow do
+    use Temporalex.Workflow
+
+    def handle_query("state", _args, state), do: {:reply, state}
+
+    def run(_) do
+      API.publish_state(:napping)
+      API.sleep!(6_000)
+      {:ok, :napped}
+    end
+  end
+
   test "worker restart replays real Temporal history across blocked workflow states" do
     temporal = TemporalDevServer.start!()
 
@@ -122,6 +134,76 @@ defmodule Temporalex.TemporalWorkerRestartTest do
 
       worker_pid =
         continue_as_new_after_worker_restart(client_name, worker_pid, client_pid, task_queue)
+
+      stop_worker(worker_pid)
+    after
+      if Process.alive?(client_pid) do
+        GenServer.stop(client_pid, :normal, 15_000)
+      end
+
+      TemporalDevServer.stop(temporal)
+    end
+  end
+
+  test "worker survives a violent supervisor kill and restarts on the same task queue" do
+    temporal = TemporalDevServer.start!()
+
+    task_queue = "temporalex-violent-kill-#{System.unique_integer([:positive])}"
+    client_name = unique_name(:Client)
+
+    # A single long-lived client, shared the way an application shares one
+    # Temporalex.Client across many workers. The client MUST outlive a
+    # violently-killed worker.
+    {:ok, client_pid} =
+      Temporalex.Client.start_link(
+        name: client_name,
+        backend: Temporalex.Backend.TemporalCore,
+        target: temporal.target,
+        namespace: "default",
+        task_queue: task_queue,
+        workflow_result_timeout: 30_000
+      )
+
+    {:ok, worker_pid} = start_nap_worker(client_name, task_queue)
+
+    try do
+      assert {:ok, handle} =
+               Temporalex.Client.start_workflow(client_name, NapWorkflow, nil,
+                 workflow_id: "temporalex-violent-#{System.unique_integer([:positive])}",
+                 workflow_task_timeout: 10_000,
+                 timeout: 10_000
+               )
+
+      assert TemporalDevServer.eventually(fn ->
+               Temporalex.Client.query_workflow(handle, "state", [], timeout: 10_000) ==
+                 {:ok, :napping}
+             end)
+
+      # Kill the worker's whole supervision tree the way an OTP supervisor
+      # does when a worker exhausts its restart budget. Unlink first so the
+      # :kill does not take the test process down through the start_link link.
+      Process.unlink(worker_pid)
+      ref = Process.monitor(worker_pid)
+      killed_at = System.monotonic_time(:millisecond)
+      Process.exit(worker_pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^worker_pid, :killed}, 5_000
+
+      # Blast radius: the shared client must survive the worker's violent death.
+      # (PollerBridge monitors its owner instead of link-crashing the client.)
+      assert Process.alive?(client_pid)
+
+      # The dead worker's task-queue registration must be released promptly so a
+      # replacement can register on the SAME queue. Before the fix the owner-death
+      # monitor never fired, the sdk-core SlotKey stayed registered, and this
+      # failed indefinitely with "Registration of multiple workers ...".
+      {worker_pid, recovery_ms} =
+        start_worker_until_ready!(client_name, task_queue, killed_at, killed_at + 20_000)
+
+      assert recovery_ms < 5_000,
+             "expected the task queue to free within 5s, took #{recovery_ms}ms"
+
+      # The in-flight workflow must complete on the replacement worker.
+      assert {:ok, :napped} = Temporalex.Client.get_result(handle, timeout: 30_000)
 
       stop_worker(worker_pid)
     after
@@ -286,5 +368,36 @@ defmodule Temporalex.TemporalWorkerRestartTest do
 
   defp unique_name(prefix) do
     Module.concat(__MODULE__, :"#{prefix}#{System.unique_integer([:positive])}")
+  end
+
+  defp start_nap_worker(client_name, task_queue) do
+    Temporalex.Worker.start_link(
+      name: unique_name(:Worker),
+      client: client_name,
+      task_queue: task_queue,
+      workflows: [NapWorkflow],
+      max_workflow_pollers: 2,
+      max_activity_pollers: 2,
+      shutdown_timeout: 15_000
+    )
+  end
+
+  # Retry starting a worker on `task_queue` until sdk-core accepts the
+  # registration, returning the recovery time measured from the kill. A failed
+  # start (the registration conflict) is expected while the dead worker's
+  # SlotKey is still held, so we poll rather than crash on the first error.
+  defp start_worker_until_ready!(client_name, task_queue, killed_at, deadline) do
+    case start_nap_worker(client_name, task_queue) do
+      {:ok, worker_pid} ->
+        {worker_pid, System.monotonic_time(:millisecond) - killed_at}
+
+      {:error, _reason} ->
+        if System.monotonic_time(:millisecond) > deadline do
+          flunk("replacement worker never registered on #{task_queue} within deadline")
+        else
+          Process.sleep(100)
+          start_worker_until_ready!(client_name, task_queue, killed_at, deadline)
+        end
+    end
   end
 end

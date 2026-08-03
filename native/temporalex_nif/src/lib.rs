@@ -1320,6 +1320,7 @@ fn schedule_worker_shutdown(worker: Arc<Worker>, handle: tokio::runtime::Handle)
         // task types". `ignore_evicts_on_shutdown(true)` keeps this from
         // blocking on activations the dead owner will never complete.
         worker.initiate_shutdown();
+        worker.shutdown().await;
     });
 }
 
