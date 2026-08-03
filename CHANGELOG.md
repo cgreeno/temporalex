@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — breaking
+## 0.4.0 — 2026-08-02 (breaking)
 
 ### Failure vocabulary unified on `Temporalex.Failure.*`
 
