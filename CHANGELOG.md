@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 — 2026-08-03
+
+- Fix worker-crash blast radius: the poller bridge was spawn_linked from
+  inside the client process, so a violently-killed worker propagated an exit
+  through the bridge link and took the shared client down with it. The
+  bridge now monitors its owning worker (no link) and exits when it does.
+
 ## 0.4.1 — 2026-08-03
 
 - Fix Hex packaging: ship `priv/proto/temporal_core.binpb` — the Elixir proto
