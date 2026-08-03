@@ -122,7 +122,7 @@ defmodule Temporalex.Backend.TemporalCore do
     task_queue = Keyword.get(opts, :task_queue, client_state.task_queue)
     start_timeout = Keyword.get(opts, :start_timeout, @default_start_timeout)
 
-    {:ok, poller_bridge} = PollerBridge.start_link(owner_pid)
+    {:ok, poller_bridge} = PollerBridge.start(owner_pid)
 
     result =
       with :ok <-
@@ -518,8 +518,17 @@ defmodule Temporalex.Backend.TemporalCore do
 
   defp await_worker(timeout) do
     receive do
-      {:worker_started, worker} -> {:ok, worker}
-      {:worker_error, reason} -> {:error, {:worker_error, reason}}
+      {:worker_started, worker} ->
+        # Bind the worker's lifetime to THIS process (the owning server):
+        # the monitor must be attached from a real NIF call — the native
+        # side cannot attach it from its own async task (see monitor_worker
+        # in the NIF). Without this, a violently killed worker never
+        # releases its task-queue registration.
+        :ok = Native.monitor_worker(worker)
+        {:ok, worker}
+
+      {:worker_error, reason} ->
+        {:error, {:worker_error, reason}}
     after
       timeout -> {:error, {:worker_start_timeout, timeout}}
     end

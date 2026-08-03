@@ -39,6 +39,8 @@ defmodule Temporalex.Native do
 
   def shutdown_worker(_worker, _pid), do: :erlang.nif_error(:nif_not_loaded)
 
+  def monitor_worker(_worker), do: :erlang.nif_error(:nif_not_loaded)
+
   def start_workflow(
         _client,
         _namespace,

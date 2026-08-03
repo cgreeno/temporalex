@@ -628,7 +628,10 @@ fn start_worker(
                     _runtime: runtime_for_worker,
                 });
 
-                let _ = resource.monitor(None, &pid);
+                // Monitor attachment happens via the monitor_worker NIF, called
+                // by the owner AFTER it receives this resource: attaching from
+                // this tokio thread is invalid (the BEAM only honors NULL-env
+                // monitor calls from ERTS-created threads) and fails silently.
                 start_poll_loops(resource.clone(), poll_pid);
                 send_simple(&pid, |env| (worker_started(), resource).encode(env));
             }
@@ -1289,9 +1292,35 @@ fn parse_target_url(target: &str) -> anyhow::Result<Url> {
     }
 }
 
+/// Attach the owner-death monitor from a real NIF context. Must be called
+/// by the process that owns the worker (the Temporalex.Server) once it has
+/// received the WorkerResource. When the caller dies — however violently —
+/// `WorkerResource::down` fires and drives the full sdk-core shutdown,
+/// releasing the task-queue registration so a replacement worker can start.
+#[rustler::nif]
+fn monitor_worker(env: Env, worker: ResourceArc<WorkerResource>) -> Atom {
+    match worker.monitor(Some(env), &env.pid()) {
+        Some(_monitor) => ok(),
+        None => {
+            // Surfaced to the caller as :error — the Elixir side matches :ok = ... and crashes loudly.
+            error()
+        }
+    }
+}
+
 fn schedule_worker_shutdown(worker: Arc<Worker>, handle: tokio::runtime::Handle) {
     handle.spawn(async move {
+        // `initiate_shutdown` only *signals* shutdown; the sdk-core worker
+        // registration (the per-task-queue SlotKey held in the shared client)
+        // is not released until the worker is fully shut down. On a violent
+        // owner death (`down/4`) we must therefore drive the full
+        // `shutdown().await`, exactly as the clean-stop path does — otherwise
+        // the task queue stays registered indefinitely and supervised restarts
+        // fail with "Registration of multiple workers with overlapping worker
+        // task types". `ignore_evicts_on_shutdown(true)` keeps this from
+        // blocking on activations the dead owner will never complete.
         worker.initiate_shutdown();
+        worker.shutdown().await;
     });
 }
 

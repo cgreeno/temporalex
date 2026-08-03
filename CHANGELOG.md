@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.2 — 2026-08-03
+
+- Fix worker-crash blast radius: the poller bridge was spawn_linked from
+  inside the client process, so a violently-killed worker propagated an exit
+  through the bridge link and took the shared client down with it. The
+  bridge now monitors its owning worker (no link) and exits when it does.
+- Fix task-queue lockout after a violent worker death: the owner-death
+  monitor on the worker resource was attached from a tokio thread with a
+  NULL env, which the BEAM only honours from ERTS-created threads. The attach
+  failed and its error was discarded (`let _ =`), so `down/4` never fired,
+  the sdk-core `SlotKey` stayed registered, and supervised restarts on the
+  same task queue failed indefinitely with "Registration of multiple
+  workers ...". The monitor is now attached from the owning server via a new
+  `monitor_worker/1` NIF (a real NIF context), and the death path drives the
+  worker shutdown so the registration is released. Measured queue release
+  after a `:kill` is ~0.75s, letting supervised restarts succeed. Covered by
+  a new external regression test in `temporal_worker_restart_test.exs`.
+
 ## 0.4.1 — 2026-08-03
 
 - Fix Hex packaging: ship `priv/proto/temporal_core.binpb` — the Elixir proto
