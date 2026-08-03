@@ -1,7 +1,12 @@
 defmodule Temporalex.Native do
   @moduledoc false
 
-  use Rustler, otp_app: :temporalex
+  # crate/path defaults live HERE (not only in config/config.exs) because a
+  # dependency's config files are never evaluated by consumers — without
+  # these options the Hex package fails to compile with
+  # "Could not cd to native/temporalex". App-env config still overrides
+  # (config/config.exs sets :mode per env for this repo's own builds).
+  use Rustler, otp_app: :temporalex, crate: :temporalex_nif, path: "native/temporalex_nif"
 
   def create_runtime(_telemetry_opts), do: :erlang.nif_error(:nif_not_loaded)
 
