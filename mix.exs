@@ -1,7 +1,7 @@
 defmodule Temporalex.MixProject do
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.4.1"
   @source_url "https://github.com/cgreeno/temporalex"
 
   def project do
@@ -66,6 +66,7 @@ defmodule Temporalex.MixProject do
         native/temporalex_nif/src
         native/temporalex_nif/Cargo.toml
         native/temporalex_nif/Cargo.lock
+        priv/proto
         .formatter.exs
         mix.exs
         README.md

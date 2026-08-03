@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 — 2026-08-03
+
+- Fix Hex packaging: ship `priv/proto/temporal_core.binpb` — the Elixir proto
+  codec compiles its schema from this descriptor, and 0.4.0 omitted it from
+  the package files, breaking every consumer install.
+
 ## 0.4.0 — 2026-08-02 (breaking)
 
 ### Failure vocabulary unified on `Temporalex.Failure.*`
