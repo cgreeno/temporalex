@@ -273,6 +273,32 @@ defmodule Temporalex.Workflow.API do
     call!(%Op.UpsertSearchAttributes{attrs: Temporalex.SearchAttribute.validate_map!(attrs)})
   end
 
+  @doc """
+  Upserts workflow memo fields.
+
+  Memo is unindexed operator annotation, returned when describing or listing a
+  workflow — use it for context a human reads, not for anything you need to
+  search by. Search attributes are the indexed counterpart, and unlike them
+  memo keys need no namespace registration.
+
+      API.upsert_memo(%{"salon_id" => salon_id, "channel" => "marketplace"})
+
+  Keys are strings; values are converted with the worker's payload codec. Like
+  `upsert_search_attributes/1` this emits a command without waiting for a
+  result, so it does not yield the caller's scheduler turn.
+
+  An empty map is a no-op. The server rejects an empty upsert outright —
+  `BadModifyWorkflowPropertiesAttributes: UpsertedMemo.Fields is not set` — and
+  because that fails the workflow task rather than the workflow, it retries
+  forever and wedges the execution. Callers that build a memo dynamically
+  should not have to guard against producing nothing.
+  """
+  def upsert_memo(memo) when is_map(memo) and map_size(memo) == 0, do: :ok
+
+  def upsert_memo(memo) when is_map(memo) do
+    call!(%Op.UpsertMemo{memo: memo})
+  end
+
   def parallel(funs) when is_list(funs) do
     unwrap_op(%Op.Parallel{funs: funs})
   end

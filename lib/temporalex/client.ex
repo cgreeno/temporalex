@@ -77,6 +77,41 @@ defmodule Temporalex.Client do
     end
   end
 
+  @doc """
+  Starts a workflow.
+
+  Beyond the usual `:workflow_id`, `:task_queue`, timeouts, `:retry_policy`,
+  `:search_attributes`, and `:cron_schedule`, this accepts:
+
+    * `:priority` — task priority and fairness, as a keyword list:
+
+      * `:priority_key` — positive integer, **smaller is higher priority**.
+        The server's maximum is configurable and defaults to 5; an unset key
+        gets the server default (the midpoint, 3 by default).
+
+      * `:fairness_key` — short string, max 64 bytes, typically a tenant id.
+        Tasks sharing a key are dispatched in proportion to their weight, so a
+        single noisy tenant cannot monopolise a task queue.
+
+      * `:fairness_weight` — float, clamped server-side to `[0.001, 1000]`,
+        default `1.0`.
+
+  Each priority field is optional, and an unset field inherits from the calling
+  workflow or falls back to the server default. Omit `:priority` entirely for
+  the previous behaviour.
+
+      Temporalex.Client.start_workflow(client, Checkout, order,
+        workflow_id: "checkout-\#{order_id}",
+        priority: [priority_key: 2, fairness_key: salon_id]
+      )
+
+  > #### Server support {: .info}
+  >
+  > Priority requires a server that records it. Older servers accept the field
+  > and silently drop it — `temporalio/auto-setup:1.27` reports
+  > `priority: null` in both `describe` and history, including for workflows
+  > started by the `temporal` CLI.
+  """
   def start_workflow(client, workflow, input, opts \\ []) when is_list(opts) do
     workflow_type = workflow_type(workflow)
     workflow_id = workflow_id_opt(opts)

@@ -23,7 +23,7 @@ use temporalio_common::protos::coresdk::workflow_completion::WorkflowActivationC
 use temporalio_common::protos::temporal::api::history::v1::History;
 use temporalio_common::protos::coresdk::{ActivityHeartbeat, ActivityTaskCompletion};
 use temporalio_common::protos::temporal::api::common::v1::{
-    Header, Payload, Payloads, RetryPolicy,
+    Header, Memo, Payload, Payloads, RetryPolicy,
 };
 use temporalio_common::protos::temporal::api::enums::v1::{
     QueryRejectCondition, RetryState, TimeoutType, WorkflowExecutionStatus,
@@ -35,6 +35,7 @@ use temporalio_common::telemetry::{
     MetricTemporality, OtelCollectorOptions, OtlpProtocol, PrometheusExporterOptions,
     TelemetryOptions, build_otlp_metric_exporter, start_prometheus_metric_exporter,
 };
+use temporalio_common::Priority;
 use temporalio_common::worker::WorkerTaskTypes;
 use temporalio_sdk_core::{
     CoreRuntime, PollError, PollerBehavior, RuntimeOptions, TokioRuntimeBuilder, Worker,
@@ -192,6 +193,12 @@ rustler::atoms! {
     http,
     url_atom = "url",
     workflow_history_fetched,
+    memo,
+    // Task priority and fairness (see `priority_from_opts`).
+    priority,
+    priority_key,
+    fairness_key,
+    fairness_weight,
 }
 
 const ETF_ENCODING: &[u8] = b"binary/erlang-eterm";
@@ -1591,7 +1598,28 @@ fn workflow_description_to_term<'a>(
         start_time_ms() => option_i64_term(env, description.start_time().and_then(system_time_to_millis)),
         execution_time_ms() => option_i64_term(env, description.execution_time().and_then(system_time_to_millis)),
         close_time_ms() => option_i64_term(env, description.close_time().and_then(system_time_to_millis)),
+        memo() => memo_to_term(env, description.memo())?,
     )
+}
+
+/// Decodes a workflow's memo into a plain Elixir map.
+///
+/// Memo is unindexed operator annotation, so it is only ever read back — there
+/// is no point returning it opaque. An absent memo becomes an empty map rather
+/// than nil, so callers can pattern match on a map unconditionally.
+fn memo_to_term<'a>(env: Env<'a>, memo: Option<&Memo>) -> anyhow::Result<Term<'a>> {
+    let mut map = Term::map_new(env);
+
+    let Some(memo) = memo else {
+        return Ok(map);
+    };
+
+    for (key, payload) in &memo.fields {
+        let value = payload_to_term(env, payload)?;
+        map = map_put(map, string_term(env, key.clone()), value)?;
+    }
+
+    Ok(map)
 }
 
 fn option_i64_term<'a>(env: Env<'a>, value: Option<i64>) -> Term<'a> {
@@ -2069,6 +2097,7 @@ fn workflow_start_options(
     options.cron_schedule = keyword_get_string(opts, cron_schedule())?;
     options.search_attributes = search_attributes_option_from_opts(opts)?;
     options.retry_policy = retry_policy_from_opts(opts)?;
+    options.priority = priority_from_opts(opts)?;
     options.header = header_from_opts(opts)?;
     options.static_summary = keyword_get_string(opts, static_summary())?;
     options.static_details = keyword_get_string(opts, static_details())?;
@@ -2117,6 +2146,57 @@ fn search_attributes_option_from_opts(
     } else {
         Ok(Some(term_to_search_attributes_map(term)?))
     }
+}
+
+/// Builds task priority and fairness settings from a `:priority` keyword list.
+///
+/// All three fields are `Option`, and an absent field means "inherit from the
+/// calling workflow, or use the server default" — so omitting `:priority`
+/// entirely behaves exactly as before.
+///
+/// Validation is deliberately limited to the two hard limits Temporal
+/// documents: `priority_key` is 1-based, and `fairness_key` is capped at 64
+/// bytes. `fairness_weight` is clamped server-side to [0.001, 1000], so only an
+/// obviously-wrong non-positive weight is rejected here.
+fn priority_from_opts(opts: Term) -> anyhow::Result<Priority> {
+    let Some(term) = keyword_get_present(opts, priority())? else {
+        return Ok(Priority::default());
+    };
+
+    let mut priority = Priority::default();
+
+    priority.priority_key = match keyword_get_i64(term, priority_key())? {
+        None => None,
+        Some(value) if value >= 1 => Some(value as u32),
+        Some(value) => {
+            return Err(anyhow!(
+                "priority.priority_key must be 1 or larger (smaller is higher priority), got {value}"
+            ));
+        }
+    };
+
+    let key = keyword_get_string(term, fairness_key())?;
+    if let Some(key) = key.as_ref()
+        && key.len() > 64
+    {
+        return Err(anyhow!(
+            "priority.fairness_key is limited to 64 bytes, got {}",
+            key.len()
+        ));
+    }
+    priority.fairness_key = key;
+
+    priority.fairness_weight = match keyword_get_f64(term, fairness_weight())? {
+        None => None,
+        Some(value) if value > 0.0 => Some(value as f32),
+        Some(value) => {
+            return Err(anyhow!(
+                "priority.fairness_weight must be greater than 0, got {value}"
+            ));
+        }
+    };
+
+    Ok(priority)
 }
 
 fn retry_policy_from_opts(opts: Term) -> anyhow::Result<Option<RetryPolicy>> {

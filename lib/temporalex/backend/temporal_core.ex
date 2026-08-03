@@ -460,7 +460,8 @@ defmodule Temporalex.Backend.TemporalCore do
       :id_conflict_policy,
       :workflow_id_conflict_policy,
       :static_summary,
-      :static_details
+      :static_details,
+      :priority
     ])
     |> normalize_native_opts()
   end
