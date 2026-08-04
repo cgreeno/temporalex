@@ -191,7 +191,7 @@ This is what makes Invariant 1 cheap: the previous type drains within a day, so 
 
 This is the deepest requirement in the RFC and the one that carries the most engineering.
 
-A cross-type transition ([§6](#6-cross-type-transitions)) does not *resume* an execution — continue-as-new starts a **fresh run** of the target type. Pending timers, in-flight activities, and every workflow-local variable are gone. So a type cannot assume it begins at step 1 with nothing done; it must be able to start mid-process, discover what has already happened, and continue.
+A cross-type transition ([§6](#6-fallback)) does not *resume* an execution — continue-as-new starts a **fresh run** of the target type. Pending timers, in-flight activities, and every workflow-local variable are gone. So a type cannot assume it begins at step 1 with nothing done; it must be able to start mid-process, discover what has already happened, and continue.
 
 Three rules follow:
 
