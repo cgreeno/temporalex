@@ -9,7 +9,7 @@ explicit and structured — there is no implicit event loop. The runtime uses a
 sequences are reproducible from the same activation transcript regardless of
 BEAM scheduling or mailbox timing.
 
-> **Status: 0.3.0.** This release is an architectural rewrite around a
+> **Status: 0.4.x.** This line is an architectural rewrite around a
 > deterministic core, a `Temporalex.Backend` boundary that isolates Temporal
 > Core / Rust details, and structured concurrency primitives `phase` and
 > `parallel`. The 0.x line is not backwards-compatible with 0.2.0. See
@@ -26,7 +26,7 @@ BEAM scheduling or mailbox timing.
 ```elixir
 # mix.exs
 defp deps do
-  [{:temporalex, "~> 0.3.0"}]
+  [{:temporalex, "~> 0.4.0"}]
 end
 ```
 
@@ -123,23 +123,68 @@ defmodule MyApp.Workflows.Checkout do
 end
 ```
 
-## Start a worker
+## Clients and workers
+
+The worker is not the connection — that's the client. They are different
+processes with different jobs:
+
+|           | Client                            | Worker                                      |
+| --------- | --------------------------------- | ------------------------------------------- |
+| Is        | the gRPC connection to the server | a poller + executor bound to one task queue |
+| Knows     | target, namespace, codec          | which workflows/activities it can run       |
+| Needed by | anyone who starts/signals/queries | only nodes that run workflow code           |
+
+One client can back many workers. And a node that only *starts* workflows —
+a Phoenix deployment creating bookings, say — needs just a client and no
+worker at all: it never polls.
+
+The worker entry in your supervision tree is the deployment topology written
+down: "this node serves these workflows." That is a property of the
+deployable, not of the workflow code, which is why it cannot be derived and
+must be stated.
+
+## Task queues
+
+A task queue is a rendezvous string — nothing more. Starting a workflow
+writes its tasks under a name; workers long-poll a name; whoever polls the
+name you wrote to gets the work. There is no server-side registry of which
+worker runs which workflow type, so every start names its queue.
+
+| The queue is the unit of… | |
+| --- | --- |
+| decoupling | callers name a queue, never a host, pod, or process — whoever polls that name picks the work up |
+| scaling | more capacity = more workers polling the same name |
+| deployment | one queue ≈ one deployable, with its own release cadence and blast radius |
+| fairness & versioning | fairness keys and worker deployment versions attach per queue |
+
+Queues are not provisioned; a queue springs into existence the first time
+anyone uses its name. Which is what makes a typo dangerous: it does not
+error, it creates a new empty queue — and a workflow started there sits
+"Running" forever, because nothing polls it.
+
+## Start a client and a worker
 
 ```elixir
 children = [
-  {Temporalex.Worker,
+  {Temporalex.Client,
    name: MyApp.Temporal,
    backend: Temporalex.Backend.TemporalCore,
    target: "http://127.0.0.1:7233",
    namespace: "default",
+   # Starts that pass no :task_queue inherit this one. Without it they go to
+   # "default" — which nothing here polls (see "Task queues" above).
    task_queue: "checkout",
-   workflows: [MyApp.Workflows.Checkout],
-   activities: [MyApp.Activities.Payment],
    # :etf (default) preserves full Elixir term fidelity.
    # :json makes payloads renderable by `temporal` CLI and non-Elixir
    # clients, at the cost of lossy term encoding (atoms → strings,
    # tuples → unsupported).
-   payload_codec: :etf}
+   payload_codec: :etf},
+  {Temporalex.Worker,
+   name: MyApp.Worker,
+   client: MyApp.Temporal,
+   task_queue: "checkout",
+   workflows: [MyApp.Workflows.Checkout],
+   activities: [MyApp.Activities.Payment]}
 ]
 
 Supervisor.start_link(children, strategy: :one_for_one)
@@ -202,15 +247,18 @@ and so answers "which release executed this task?" from history or the Web UI:
 
 ```elixir
 {Temporalex.Worker,
- name: MyApp.Temporal,
- client: MyApp.TemporalClient,
+ name: MyApp.Worker,
+ client: MyApp.Temporal,
  task_queue: "checkout",
  build_id: System.get_env("BUILD_ID", "dev"),
  workflows: [MyApp.Workflows.Checkout]}
 ```
 
-This is identification only — worker versioning is not enabled, so the build id
-does not affect task routing. Defaults to `"temporalex-<version>"`.
+Without a `:versioning` option the strategy is `None`, so the build id
+identifies but does not affect task routing. Defaults to
+`"temporalex-<version>"`. Pass `versioning: [deployment_name: ...,
+use_versioning: true, default_behavior: :pinned | :auto_upgrade]` to opt a
+worker into deployment-based routing.
 
 ## Drive workflows from a client
 
@@ -276,9 +324,13 @@ codepath.
 
 ```elixir
 start_supervised!(
+  {Temporalex.Client, name: MyApp.TestClient, backend: Temporalex.Backend.Test}
+)
+
+start_supervised!(
   {Temporalex.Worker,
-   name: MyApp.Temporal,
-   backend: Temporalex.Backend.Test,
+   name: MyApp.TestWorker,
+   client: MyApp.TestClient,
    workflows: [MyApp.Workflows.Checkout],
    activities: [MyApp.Activities.Payment]}
 )
