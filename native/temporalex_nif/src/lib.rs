@@ -26,7 +26,7 @@ use temporalio_common::protos::temporal::api::common::v1::{
     Header, Memo, Payload, Payloads, RetryPolicy,
 };
 use temporalio_common::protos::temporal::api::enums::v1::{
-    QueryRejectCondition, RetryState, TimeoutType, WorkflowExecutionStatus,
+    QueryRejectCondition, RetryState, TimeoutType, VersioningBehavior, WorkflowExecutionStatus,
     WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
 };
 use temporalio_common::protos::temporal::api::failure::v1::{Failure, failure};
@@ -36,7 +36,9 @@ use temporalio_common::telemetry::{
     TelemetryOptions, build_otlp_metric_exporter, start_prometheus_metric_exporter,
 };
 use temporalio_common::Priority;
-use temporalio_common::worker::WorkerTaskTypes;
+use temporalio_common::worker::{
+    WorkerDeploymentOptions, WorkerDeploymentVersion, WorkerTaskTypes,
+};
 use temporalio_sdk_core::{
     CoreRuntime, PollError, PollerBehavior, RuntimeOptions, TokioRuntimeBuilder, Worker,
     WorkerConfig, WorkerVersioningStrategy, init_worker,
@@ -199,6 +201,13 @@ rustler::atoms! {
     priority_key,
     fairness_key,
     fairness_weight,
+    // Worker versioning (see `versioning_strategy_from_opts`).
+    build_id,
+    deployment_name,
+    use_versioning,
+    default_behavior,
+    pinned,
+    auto_upgrade,
 }
 
 const ETF_ENCODING: &[u8] = b"binary/erlang-eterm";
@@ -586,18 +595,82 @@ fn connect(
     ok()
 }
 
+/// Chooses the worker's versioning strategy from a `:versioning` keyword list.
+///
+/// Without `:deployment_name` the strategy is `None`: the build id is still
+/// reported and lands on each WorkflowTaskCompleted event, so history and the
+/// Web UI show which release ran a task, but routing is unaffected.
+///
+/// With `:deployment_name` the strategy is deployment-based. Note that
+/// `use_versioning: false` still only reports — it registers the deployment
+/// without opting workflows into pinned or auto-upgrade routing.
+fn versioning_strategy_from_opts(opts: Term) -> anyhow::Result<WorkerVersioningStrategy> {
+    let build_id = keyword_get_string(opts, build_id())?.unwrap_or_default();
+
+    let Some(deployment_name) = keyword_get_string(opts, deployment_name())? else {
+        return Ok(WorkerVersioningStrategy::None { build_id });
+    };
+
+    let default_versioning_behavior = match keyword_get_atom(opts, default_behavior())? {
+        None => None,
+        Some(value) if value == pinned() => Some(VersioningBehavior::Pinned),
+        Some(value) if value == auto_upgrade() => Some(VersioningBehavior::AutoUpgrade),
+        Some(_) => {
+            return Err(anyhow!(
+                "versioning.default_behavior must be :pinned or :auto_upgrade"
+            ));
+        }
+    };
+
+    let use_worker_versioning = keyword_get_bool(opts, use_versioning())?.unwrap_or(false);
+
+    // Stricter than core on purpose. Per-workflow-type behavior is not exposed
+    // yet, so with no default every completion reports Unspecified — and the
+    // server treats that as unversioned, clearing the deployment version it had
+    // just recorded. Versioning would be on and provably doing nothing. Neither
+    // core nor the server rejects this combination.
+    if use_worker_versioning && default_versioning_behavior.is_none() {
+        return Err(anyhow!(
+            "versioning.default_behavior is required when use_versioning is true, \
+             otherwise every workflow task reports an unspecified behavior and the \
+             server records the execution as unversioned"
+        ));
+    }
+
+    Ok(WorkerVersioningStrategy::WorkerDeploymentBased(
+        WorkerDeploymentOptions {
+            version: WorkerDeploymentVersion {
+                deployment_name,
+                build_id,
+            },
+            use_worker_versioning,
+            default_versioning_behavior,
+        },
+    ))
+}
+
 #[rustler::nif]
-fn start_worker(
+fn start_worker<'a>(
+    env: Env<'a>,
     runtime: ResourceArc<RuntimeResource>,
     client: ResourceArc<ClientResource>,
     task_queue: String,
     namespace: String,
-    build_id: String,
+    versioning: Term<'a>,
     max_wf: usize,
     max_act: usize,
     pid: LocalPid,
     poll_pid: LocalPid,
-) -> Atom {
+) -> Term<'a> {
+    // Parsed before the spawn: a Term borrows the caller's env and cannot cross
+    // into the async block, and bad config should be reported before a worker is
+    // built. Returned rather than messaged — sending from a NIF-managed thread
+    // panics inside rustler.
+    let versioning_strategy = match versioning_strategy_from_opts(versioning) {
+        Ok(strategy) => strategy,
+        Err(err) => return (error(), format!("{err:#}")).encode(env),
+    };
+
     let handle = runtime.core.tokio_handle();
     let runtime_for_worker = runtime.clone();
     let client_connection = client.connection.clone();
@@ -608,11 +681,7 @@ fn start_worker(
             let config = WorkerConfig::builder()
                 .namespace(namespace)
                 .task_queue(task_queue)
-                // Strategy stays `None` — versioning is not enabled. The build
-                // id is reported for identification only: it lands on each
-                // WorkflowTaskCompleted event, so history and the Web UI show
-                // which release executed a task. Routing is unaffected.
-                .versioning_strategy(WorkerVersioningStrategy::None { build_id })
+                .versioning_strategy(versioning_strategy)
                 .ignore_evicts_on_shutdown(true)
                 .task_types(WorkerTaskTypes::all())
                 .workflow_task_poller_behavior(PollerBehavior::SimpleMaximum(max_wf.max(1)))
@@ -650,7 +719,7 @@ fn start_worker(
         guard.complete();
     });
 
-    ok()
+    ok().encode(env)
 }
 
 #[rustler::nif]

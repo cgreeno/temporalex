@@ -55,11 +55,10 @@ defmodule Temporalex.Backend.TemporalCore do
   @default_target "http://127.0.0.1:7233"
   @default_namespace "default"
   @default_task_queue "default"
-  # Reported to the server for identification only — worker versioning is not
-  # enabled, so this does not affect task routing. It lands on every
-  # WorkflowTaskCompleted event, which is what makes "which release ran this
-  # task?" answerable from history. Override with `:build_id` to stamp a
-  # release SHA instead.
+  # Reported on every WorkflowTaskCompleted event, which is what makes "which
+  # release ran this task?" answerable from history. Override with `:build_id`
+  # to stamp a release SHA. On its own it only identifies — see `:versioning`
+  # for the option that also affects routing.
   @default_build_id "temporalex-#{Mix.Project.config()[:version]}"
   @default_connect_timeout 10_000
   @default_start_timeout 10_000
@@ -131,7 +130,7 @@ defmodule Temporalex.Backend.TemporalCore do
                client_state.client,
                task_queue,
                client_state.namespace,
-               Keyword.get(opts, :build_id, @default_build_id),
+               versioning_opts(opts),
                workflow_poller_count(opts),
                activity_poller_count(opts),
                owner_pid,
@@ -429,6 +428,16 @@ defmodule Temporalex.Backend.TemporalCore do
   end
 
   defp normalize_otlp(otlp), do: Keyword.replace_lazy(otlp, :headers, &normalize_headers/1)
+
+  # `:build_id` stays a top-level option because it is meaningful on its own —
+  # without `:versioning` the strategy is `None` and the build id only
+  # identifies which release ran a task. `:versioning` layers deployment-based
+  # routing on top and inherits the same build id unless it overrides it.
+  defp versioning_opts(opts) do
+    opts
+    |> Keyword.get(:versioning, [])
+    |> Keyword.put_new(:build_id, Keyword.get(opts, :build_id, @default_build_id))
+  end
 
   defp headers(opts) do
     opts
