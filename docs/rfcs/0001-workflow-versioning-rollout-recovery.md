@@ -7,108 +7,84 @@
 | **Date** | 2026-08-04 |
 | **Scope** | A Fresha library over `temporalex` (working name `Fresha.Workflow`). Elixir only. |
 
+## The rule
+
+> A behaviour change ships as a new workflow *type*, not a new version of an existing type. Released types are immutable. Only new executions route to the new type.
+
+What it buys: **the rules do not change mid-booking.** An in-flight execution runs code that has not changed, so the quote a customer saw and the charge they get come from the same implementation.
+
 ## 1. The four scenarios
 
-Everything here exists to answer these, and they are the test for any change to this design:
+### Scenario 1 — Upgrade, and roll back
 
-| # | Scenario | Answered in |
-|---|---|---|
-| **1** | **Upgrade a workflow, and roll it back.** | §6 for new starts, §5 for executions already running |
-| **2** | **Canary a new version to a percentage or a cohort.** | §6 — a deterministic cohort, not a dice roll |
-| **3** | **A deploy introduces a bug and in-flight executions are stuck.** Get them back onto the version that works. | §7 for the recovery ladder, §5 for the fallback |
-| **4** | **Force saga steps to declare whether they change state**, so every state-changing step has an undo or an idempotency key and can be safely re-attempted — including by a different workflow. | §4 for the declarations, §3.4–3.5 for the keys and the ledger |
+A change ships as `Booking.V2`. `route/2` sends new bookings there; bookings already running stay on `V1`, whose code has not changed, and finish on it. Rollback for new starts is a flag flip — no server call.
 
-Scenario 4 is not a peer of the others. It is the precondition for 1, 2, and 3: every recovery path re-executes side effects, so without it the other three are unsafe to attempt.
+Executions already running move between types with continue-as-new (§3), in either direction.
 
-### The rule
+### Scenario 2 — Canary
 
-All four reduce to one:
+The same flag picks the type per cohort, so canary salons are *always* on V2 and a support ticket is reproducible. Blast radius is "new bookings for these salons", not "10% of everything, non-reproducibly".
 
-> **A behaviour change ships as a new workflow *type*, not a new version of an existing type. Released types are immutable. Only new executions route to the new type.**
+### Scenario 3 — Bad deploy, executions stuck
 
-Everything else follows from that, and what it buys is:
+Cheapest rung first:
 
-> **The rules do not change mid-booking.**
+| Situation | Action |
+|---|---|
+| An activity is failing | `temporal activity pause` / `complete` / `fail` — no rewind |
+| The fix is replay-safe | Edit the type in place; it reaches running executions at their next workflow task |
+| A step already happened out of band | Pre-mark the ledger, then reset — the step re-runs and no-ops |
+| The type is structurally wrong for this execution | Fall back to the previous type (§3) |
+| Unrecoverable | Terminate, compensate, restart |
 
-An in-flight execution runs code that has not changed, so the quote a customer saw and the charge they get come from the same implementation.
+Reset rewinds; it cannot skip, cannot change workflow type, and does not run compensations.
 
-## 2. Why not Worker Versioning
+### Scenario 4 — Steps declare whether they change state
 
-Temporal's docs call Worker Versioning the recommended default. We are not using it.
+Each step declares a class:
 
-Replay always restarts from event 1, so adding one activity near the top of a workflow breaks *every* in-flight execution — including ones that are 90% complete and semantically unaffected. Under `auto_upgrade` that stalls the whole population silently, because workflow-task failures retry forever rather than failing anything. `pinned` avoids the stall, but you buy that with a subsystem — ramping, drainage, reaping, batch resets — and it *closes* the hotfix path, since a pinned population needs a batch reset to receive a fix.
+| Class | Requirement |
+|---|---|
+| `:read` | None. But a re-read after reset may return a different value, so snapshot it into a pivot's arguments where the plan must not change. |
+| `:pivot` | An idempotency key, or an undo where a wrong value is plausible and consequential (money, availability). |
+| `:irreversible` | Neither is possible. Never precedes a pivot, and checks the ledger before acting. A card capture is keyable but not undoable; an SMS is neither. |
 
-Type versioning gets the same guarantee by construction: new code has no old history to replay. One worker fleet, no versioning configuration.
+Keys derive from business facts — `"deposit_capture:booking:#{id}"` — never a workflow ID, step counter, run ID, UUID, or timestamp. So the same booking yields the same key in *any* type, and a ledger table with a unique index on that key answers "did this already happen?"
 
-**Reconsider if** a type needs different *worker-level* dependencies — a native library, a different runtime — so one fleet cannot serve both. That is a deployment boundary, which is what Worker Versioning is for. Also reconsider if step-level immutability (§3.3) proves unenforceable, since pinning's coarser freeze would then be the cheaper discipline.
+**Scenario 4 is the precondition for 1–3, not a peer of them.** Every recovery path re-executes side effects, so without the keys and the ledger the other three are unsafe to attempt.
 
-## 3. Invariants
+## 2. Why not versioned workers
 
-### 3.1 Executions are capped at 24 hours
+We use neither versioning mode. Both are rejected, for different reasons:
 
-A *family* is a business process (`booking`); a *type* is one released implementation (`booking.v1`).
+`auto_upgrade` cannot deliver the property in the rule above. Two distinct problems, and the second is the disqualifying one:
 
-The library sets `workflow_execution_timeout = 24h` — per the API, the *"total workflow execution timeout including retries and continue as new"*, so it caps a continue-as-new chain too. That buys two things:
+- *Without* `patched?`, replay restarts from event 1, so adding a step near the top of a workflow breaks every in-flight execution — including ones 90% complete and semantically unaffected. Workflow-task failures retry forever, so the population stalls silently rather than failing. This is a discipline failure, and `patched?` fixes it: on replay of a history lacking the marker it returns `false`, the new step is skipped, and replay is clean. With a 24h cap the patch branch is deletable the next day, so the discipline is cheap.
+- *With* `patched?`, structural changes are safe — but patching gates structure, never values. Changing the deposit from 20% to 25% has nothing to gate: it replays cleanly and silently charges an in-flight booking at a rate the customer was never quoted. No marker can catch it, and no replay test fails.
 
-- **A bounded replay-compatibility surface for in-place bugfixes** (§3.2). A fix must be replay-safe against every in-flight history of the type it touches; capped executions mean those histories are a day old at most.
-- **A trivial answer to "can I delete this type?"** — no running executions after a day.
+That second case is the whole property we are buying, so `auto_upgrade` is out on capability, not on cost.
 
-Live types cost nothing operationally: they all register in the same fleet (§3.2), so an extra type is a module in the repo. In practice a family has two, current and previous.
+`pinned` is rejected on cost. It delivers the property, but it costs ramping, drainage tracking, version reaping, and version-aware remediation queries — and it closes the hotfix path, because a pinned population needs a batch reset to receive a fix. Type versioning gets the same guarantee with one worker fleet and no versioning configuration, since new code has no old history to replay.
 
-**Consequence:** anything longer-lived — a reminder three weeks out — is a fresh workflow started later by a scheduler, never a long execution or a continue-as-new chain.
+Revisit only if a type needs different *worker-level* dependencies — a native library, a different runtime — so one fleet cannot serve both. That is a deployment boundary, which is what Worker Versioning is actually for.
 
-### 3.2 One worker fleet; in-place edits are for replay-safe bugfixes only
+## 3. Moving executions between types
 
-| Change | Where | Replay risk |
-|---|---|---|
-| New, removed, or reordered step; changed customer-visible terms | New type | None |
-| Bugfix | In place | **Yes** — must be replay-safe |
+One primitive, both directions: continue-as-new with a different workflow type (`ContinueAsNewWorkflowExecutionCommandAttributes.workflow_type`; in `temporalex`, the `:workflow_type` option on `continue_as_new!`).
 
-Bugfixes reach in-flight executions at their next workflow task, which is what a hotfix should do. CI runs a blocking **forward replay gate**: the edited type replayed against production histories. Where a fix cannot be made replay-safe, gate it with `Temporalex.Workflow.API.patched?/1` — with a 24h cap the branch is deletable the next day.
+- Forward is an operator action against a cohort query — pull running executions onto a type with a fix or a control the old one lacks.
+- Backward is a fallback, triggered by the execution: `rescue e in FallbackError -> Workflow.fallback!(reason: e)`.
 
-### 3.3 Step lists are names; behaviour lives in immutable step modules
+Same workflow ID, new run, chain linked, reason in history. Nothing is passed but provenance: the successor derives the same keys and the ledger skips what is done. The 24h budget spans the chain.
 
-A workflow declares an ordered list of step names and nothing else. Every property that governs safety — class, gate status, unavailability handling — is declared on the **step module**, because those are properties of the step itself, not of one workflow's use of it.
+Rules:
 
-Released step modules are immutable. `CaptureDeposit.V1` is frozen once released; a change introduces `V2`, referenced only by the new type.
-
-Both halves are load-bearing:
-
-- **If branching a type meant copying a 400-line module to change three lines, the strategy collapses** — fixes get applied twice and reviewers cannot see the diff. Names-only lists make a branch a one-line diff.
-- **Types share step implementations, so editing a shared step changes a frozen type's behaviour through the back door.** Immutability does not disappear under type versioning; it relocates to the step module, which is small enough to fingerprint and enforce in CI.
-
-### 3.4 Idempotency keys derive from business facts
-
-```elixir
-def pivot_key(%{booking_id: id}), do: "deposit_capture:booking:#{id}"
-```
-
-Never `workflow_id`, a step counter, a run ID, a UUID, or a timestamp. A workflow-scoped key produces a different value in a different type for the same business action, and we double-charge — and moving an execution between types (§5) is the only way to get work off a broken type.
-
-It also means **nothing needs passing at recovery time**: any type, given the same booking, computes the same key.
-
-Corollary: pivots are named by business intent, not call site. `deposit_capture` and `final_capture` are distinct pivots; two call sites of one code path are not.
-
-### 3.5 The ledger answers "did this happen?"
-
-Keys make the question askable; a table answers it. Columns: `pivot_key` (**unique index — the enforcement point**), `completed_at`, and `operator_id`/`reason` for overrides.
-
-- **Dedup is enforced by the unique index, not workflow state.** After a reset or a type transition the workflow has genuinely forgotten. The database is the only thing that remembers.
-- An undo shares its forward action's key, so it can tell whether the write committed when the result was lost.
-- Ledger-skip count is a metric. A key that never dedupes is one we cannot trust in an incident.
-
-### 3.6 Types are re-enterable from any step boundary
-
-The deepest requirement, and most of the remaining engineering.
-
-A type transition (§5) does not resume an execution — continue-as-new starts a **fresh run**. Pending timers, in-flight activities, and every workflow-local variable are gone. So:
-
-- **Workflow-local state must be reconstructible from durable business state.** If a value exists only in a workflow variable, that boundary is not a legal transition point.
-- **Every type is idempotent from the top.** Entering at step 1 with the ledger showing two steps done must skip them and land on the right next step.
-- **Timers are recomputed**, not inherited.
-- **Transition only at a quiescent point.** Continue-as-new does not wait for in-flight activities; an abandoned activity can still complete into a dead run. Pivot keys are what make that safe.
-
-**The remaining hard work is not versioning — it is making state reconstructible.** That lives in our programming model, not in Temporal.
+- A fallback target must contain every gate its source has — checked at compile time.
+- Only a narrow, typed `FallbackError` triggers a fallback; retryable failures exhaust their retry policy first.
+- Compensate source-only steps before handing off, or their partial state is orphaned.
+- Debts (§4) survive the transition. An `owe:` row is keyed to the booking, not the workflow, so it must not be compensated away.
+- Single hop. The predecessor failing too pages a human.
+- The trigger defaults to manual. Stuck is visible and recoverable; silently degraded is neither, so auto-fallback turns a loud failure into a quiet one. Opt in per family once gate declarations have proven honest.
 
 ## 4. Declaring a workflow
 
@@ -123,7 +99,7 @@ defworkflow Booking.V2,
   steps: [:hold_slot, :check_fraud, :capture_deposit, :send_confirmation]
 ```
 
-A new type is a one-line diff. The steps it composes are declared once, and frozen:
+A new type is a one-line diff. Step lists are bare names; everything governing safety is declared once, on the frozen step module:
 
 ```elixir
 defstep Booking.Steps.HoldSlot.V1,         class: :pivot
@@ -139,67 +115,38 @@ defstep Payout.Steps.VerifyBeneficiary.V1,
   kind: :gate
 ```
 
-### `class` — how do we make this safe to attempt twice?
-
-| Class | Answer |
-|---|---|
-| `:read` | Nothing needed — but a re-read after reset may return a *different value*, so snapshot it into a pivot's arguments wherever the plan must not change |
-| `:pivot` | An idempotency key, or an undo where a wrong value is plausible and consequential (money, availability) |
-| `:irreversible` | Neither exists. Never precedes a pivot, and checks the ledger before acting. A card capture is keyable but not undoable; an SMS is neither. |
+Those properties belong to the step, not to one workflow's use of it — per-list annotation would let two types disagree about the same step's safety.
 
 ### `kind` — may a fallback route around this step?
 
-Defaults to `:skippable`. The test for declaring `:gate` is **remediability, not importance**:
+Defaults to `:skippable`. The test for a gate is remediability, not importance:
 
-> A step is a `:gate` **iff** skipping it causes harm that cannot be remediated after the fact.
+> A step is a gate iff skipping it causes harm that cannot be remediated after the fact.
 
-A fraud check is *not* a gate — we can still cancel, flag the account, hold the payout, or require ID before the appointment. Irrevocably sending money out is. The intuitive definition ("it exists to block something") makes everything a gate, and a taxonomy where everything is a gate protects nothing.
-
-Gates are opt-in rather than mandatory because remediability is a property of the step, decided once by whoever reviews that step module — not re-decided by every workflow that composes it.
+A fraud check is not a gate: we can still cancel, flag the account, hold the payout, or require ID. Irrevocably sending money out is. The intuitive definition — "it exists to block something" — makes everything a gate, and a taxonomy where everything is a gate protects nothing.
 
 ### `on_unavailable` — required wherever a dependency can be down
 
-Three states, not two:
-
 | Dependency says | Proceed? | Debt |
 |---|---|---|
-| unavailable / timeout | **yes** | recorded |
-| reject | **no** | none — it was checked |
+| unavailable / timeout | yes | recorded |
+| reject | no | none — it was checked |
 | approve | yes | none |
 
-**Fail open on unavailability; fail closed on rejection.** A skipped control becomes a debt (`owe: :fraud_review`), swept once the dependency recovers — deferred, not lost.
+Fail open on unavailability, fail closed on rejection. A skipped control becomes a debt, swept once the dependency recovers — deferred, not lost.
 
-The load-bearing rule: **a business rejection must never raise.** If "reject" and "unavailable" collapse into one error path, triggering an error becomes a way through the control, and a deliberate fail-open policy turns into a bypass.
+**A business rejection must never raise.** If "reject" and "unavailable" collapse into one error path, triggering an error becomes a way through the control and a deliberate fail-open policy turns into a bypass.
 
-## 5. Moving executions between types
+## 5. Invariants
 
-One primitive, both directions: continue-as-new with a different workflow type (`ContinueAsNewWorkflowExecutionCommandAttributes.workflow_type`, exposed in `temporalex` as the `:workflow_type` option on `continue_as_new!`).
+1. Executions are capped at 24 hours. `workflow_execution_timeout = 24h`, which per the API is the total "including retries and continue as new", so it caps a continue-as-new chain too. It bounds the replay-compatibility surface for in-place fixes, and makes "can I delete this type?" trivial. Anything longer-lived — a reminder three weeks out — is a fresh workflow started later by a scheduler.
+2. One worker fleet. All live types register in it, so an extra type costs a module in the repo, nothing operational. In practice a family has two: current and previous.
+3. In-place edits are for replay-safe bugfixes only. CI runs a blocking forward replay gate — the edited type replayed against production histories. Where a fix cannot be made replay-safe, gate it with `patched?/1`; with a 24h cap the branch is deletable the next day.
+4. Released step modules are immutable. Types share step implementations, so editing a shared step changes a frozen type's behaviour through the back door. Immutability does not disappear under type versioning; it relocates to the step module, small enough to fingerprint in CI.
+5. Dedup is enforced by the ledger's unique index, not by workflow state. After a reset or a transition the workflow has genuinely forgotten. An undo shares its forward action's key, so it can tell whether a write committed when the result was lost.
+6. Types are re-enterable from any step boundary. A transition starts a fresh run — pending timers, in-flight activities and every workflow-local variable are gone. So workflow-local state must be reconstructible from durable business state; every type must be idempotent from the top; timers are recomputed, not inherited; and transitions happen only at a quiescent point, since continue-as-new does not wait for in-flight activities. *This is the deepest requirement and most of the remaining engineering — and it lives in our programming model, not in Temporal.*
 
-| | New starts | In-flight |
-|---|---|---|
-| **Upgrade** | `route/2` picks the new type | Transition forward, operator-initiated by cohort |
-| **Rollback** | `route/2` picks the previous type | Transition back — a *fallback* |
-| **Hotfix** | One fleet, edit in place | Same; propagates at the next workflow task |
-
-Forward transitions are an operator action against a cohort query, used to pull running executions onto a type that has a fix or a control the old one lacks. Backward transitions are a fallback, triggered by the execution itself:
-
-```elixir
-rescue
-  e in Fresha.Workflow.FallbackError -> Workflow.fallback!(reason: e)
-```
-
-Either way: same workflow ID, new run, chain linked, reason recorded in history. Nothing is passed but provenance — the successor derives the same keys and the ledger skips what is already done. The 24h budget spans the chain, so a late transition inherits what is left of it.
-
-Rules:
-
-- **A fallback target must contain every `:gate` its source has**, checked at compile time. `Booking.V2 → V1` compiles because the fraud check is not a gate; a payout type that dropped beneficiary verification would not.
-- Only a narrow, typed `FallbackError` triggers a fallback. Retryable failures exhaust their retry policy first.
-- **Compensate source-only steps** before handing off, or their partial state is orphaned.
-- **Debts survive the transition.** An `owe:` row is keyed to the booking, not the workflow, so it must *not* be compensated away — the review is still owed.
-- Single hop. The predecessor failing too pages a human.
-- **The trigger defaults to manual.** Stuck is visible and recoverable; silently degraded is neither. Auto-fallback converts a loud failure into a quiet one, which reads as more resilient and can be less safe. Opt in per family once the gate declarations have proven honest.
-
-## 6. Routing and rollout
+## 6. Routing
 
 ```elixir
 # the ONLY place in the codebase that names a workflow type
@@ -208,86 +155,62 @@ def route(:booking, salon_id) do
 end
 ```
 
-- **The flag is read by the caller**, never inside workflow code — a mid-execution flip would diverge on replay.
-- **A routing lookup must never fail a start.** Fail closed to the previous type.
-- Deterministic cohorts beat a percentage ramp: a canary salon is *always* on V2, so a support ticket is reproducible.
-- **Dashboards and batch queries key off `FreshaWorkflowFamily`, never `WorkflowType`** — otherwise every branch forks every dashboard. Stamp it at start, with `FreshaCanaryCohort`.
-- **Signal and query contracts are stable across a family.** A type may add handlers; it may not rename or remove them.
+- The flag is read by the caller, never inside workflow code — a mid-execution flip would diverge on replay.
+- A routing lookup must never fail a start. Fail closed to the previous type.
+- Dashboards and batch queries key off `FreshaWorkflowFamily`, never `WorkflowType`, or every branch forks every dashboard. Stamp it at start, with `FreshaCanaryCohort`.
+- Signal and query contracts are stable across a family: a type may add handlers, never rename or remove them.
 
-## 7. Recovery
+## 7. Enforcement
 
-| What's broken | Tool |
-|---|---|
-| An activity failing on bad input or a bad downstream | `activity pause` / `complete` / `fail` — no rewind |
-| A bug in a released type, replay-safe fix | Edit in place; propagates at the next workflow task |
-| A pivot already happened out of band | Pre-mark the ledger, then reset — the step re-runs and no-ops |
-| The type is structurally wrong for this execution | Transition to another type (§5) |
-| Unrecoverable | Terminate, compensate, restart |
-
-Two facts shape all of it:
-
-- **Reset rewinds; it cannot skip.** It copies a history prefix — the only freedom is prefix length. It cannot change workflow type, and it does not run compensations.
-- Because pivots are keyed, the default recovery is **re-run forward, not compensate.** Undos are for abandoning a partially-complete sequence: slot held, payment failed, release the slot.
-
-**Stall detection.** `TemporalReportedProblems` records the last workflow-task failure cause after successive failures. Workflow-task failures retry forever, so a stalled execution never *fails* and will not appear in error dashboards.
-
-**Operator overrides** mark **named** pivots as satisfied, with a reason and an operator recorded. There is no generic "skip step N" — arbitrary skips are arbitrary corruption, and under pressure it gets used by someone who does not know what that step guarded. Gates are not overridable at all: fix it, or the execution parks for review.
-
-## 8. Enforcement
-
-Compile-time (`@after_compile` AST scans) or a fingerprint manifest checked in CI. No runtime cost; failures land in review.
+Compile-time AST checks, or a fingerprint manifest in CI. Failures land in review, not at 2am.
 
 1. Every step module declares `class`, and `on_unavailable` where its dependency can be down.
 2. A `:pivot` exports `pivot_key/1`, referencing only business arguments.
-3. No `:irreversible` step precedes a `:pivot` in a step list.
-4. A `fallback_to:` target contains every `:gate` its source has.
+3. No `:irreversible` step precedes a `:pivot`.
+4. A `fallback_to:` target contains every gate its source has.
 5. A step's rejection path does not raise.
 6. A released step module's fingerprint has not changed.
 7. Workflow modules do not reference the flag client, and only `route/2` names a type.
 8. `workflow_execution_timeout` is not raised above 24h.
 
-The opinionated path has to be the *shortest* path, or engineers will call `temporalex` directly and we will have two standards. So the escape hatch is loud rather than absent: `@fresha_unsafe reason: "..."`, greppable and reviewable.
+Operator overrides mark named pivots as satisfied, with reason and operator recorded. There is no generic "skip step N" — under pressure it gets used by someone who does not know what that step guarded. Gates are not overridable at all: fix it, or the execution parks for review.
 
-## 9. Guarantees — for the README
+The opinionated path has to be the shortest path, or engineers will call `temporalex` directly and we will have two standards. So the escape hatch is loud rather than absent: `@fresha_unsafe reason: "..."`.
 
-> The library guarantees **at-most-once effect per business key**, **correct unwinding of incomplete sequences**, that **behaviour cannot change mid-flight except by a replay-safe bugfix**, and that **a control skipped for unavailability is recorded as a debt rather than lost**.
+## 8. Guarantees — for the README
+
+> Guaranteed: at-most-once effect per business key; correct unwinding of incomplete sequences; behaviour cannot change mid-flight except by a replay-safe bugfix; a control skipped for unavailability is recorded as a debt rather than lost.
 >
-> It guarantees nothing about whether the values were right, and it cannot guarantee a debt is ever paid.
+> Not guaranteed: that the values were right, or that a debt is ever paid.
 
 Freezing a type freezes our orchestration, not the downstream services our activities call.
 
-## 10. Open questions
+## 9. Open questions
 
-1. **Who owns the pivot ledger?** It is the only way to move work off a broken type. Nothing else here works without it.
-2. **Who owns each debt sweeper?** Every `owe:` tag needs a named owner and an SLA. An unread debt table is worse than no fail-open policy, because it looks like coverage.
-3. **Step granularity.** The fingerprint check is only as good as the decomposition, and step lists are only readable if steps are the right size. Needs a worked example on `booking`.
-4. **Replay corpus.** Production histories in a CI fixture needs a data-protection sign-off.
-5. **Bounds on fail-open.** Fail closed above a booking-value threshold? Page at what debt volume?
-6. **`temporalex` gaps.** Have: `patched?/1` (`workflow/api.ex:264`) and `continue_as_new!` with `:workflow_type` (`core/command_builder.ex:21`). Need: a client-side reset call and activity operations — the SDK only decodes `reset_workflow_failure_info` today.
+1. Who owns the pivot ledger? It is the only way to move work off a broken type. Nothing else here works without it.
+2. Who owns each debt sweeper? Every `owe:` tag needs an owner and an SLA. An unread debt table is worse than no fail-open policy, because it looks like coverage.
+3. Step granularity. Both the fingerprint check and the readability of step lists depend on it. Needs a worked example on `booking`.
+4. Replay corpus. Production histories in a CI fixture needs a data-protection sign-off.
+5. Bounds on fail-open. Fail closed above a booking-value threshold? Page at what debt volume?
+6. `temporalex` gaps. Have `patched?/1` (`workflow/api.ex:264`) and `continue_as_new!` with `:workflow_type` (`core/command_builder.ex:21`). Need a client-side reset call and activity operations.
 
-## 11. Rejected alternatives
+## 10. Rejected alternatives
 
-**Worker Deployment Versioning with pinned workflows.** Same guarantee, far more machinery, and it closes the hotfix path. See §2.
+`auto_upgrade` with patching as the strategy — works for structural change, and cannot cover a changed value, which is the property we need. `patched?` is kept as a tool for replay-hostile bugfixes (§5), rejected as the versioning strategy. See §2.
 
-**`auto_upgrade` as the default.** Requires every engineer to keep every change replay-compatible with every in-flight history, forever, and they will pay it unevenly. Type versioning keeps auto-upgrade's prize for the case that wants it — in-place bugfixes — and removes the risk for the case that does not.
+Failing closed when a control is unavailable — a business decision, recorded because a reviewer will question it: blocking bookings across the marketplace to avoid fraud exposure on a fraction of them is the worse trade. Decision owner: CTO. Bounds open as question 5.
 
-**Patching as the *strategy*.** `patched?` only gates structural divergence. Changing the deposit from 20% to 25% has nothing to gate, replays cleanly, and silently charges an in-flight booking at a rate the customer was never quoted. Kept as a tool, rejected as the strategy.
-
-**Failing closed when a control is unavailable.** A business decision, recorded because a reviewer will question it: blocking bookings across the marketplace to avoid fraud exposure on a fraction of them is the worse trade. Decision owner: CTO. Bounds open as question 5.
-
-**Workflow-scoped idempotency keys.** Reset-safe, but they break cross-type recovery, which is the whole mechanism here.
-
-**Per-workflow step annotations.** Declaring `class` and `kind` in each step list would let two types disagree about the same step's safety properties, and would make a type branch a multi-line diff. Properties belong to the step.
+Workflow-scoped idempotency keys — reset-safe, but they break cross-type recovery, which is the whole mechanism here.
 
 ## Appendix — API surface used
 
 Verified against `temporalio/api`, the `temporal` CLI, and this repository on 2026-08-04.
 
-- `ContinueAsNewWorkflowExecutionCommandAttributes.workflow_type` — transitions between types (§5).
-- `NewWorkflowExecutionInfo.workflow_execution_timeout` — *"including retries and continue as new"*; the 24h cap.
-- `Temporalex.Workflow.API.patched?/1` — `workflow/api.ex:264`; on replay, a patch ID absent from history returns `false` (`core/executor.ex:2363`).
-- `temporal workflow reset` — valid reset points are workflow-task boundaries; signals are re-applied by default; batch resets are limited to `FirstWorkflowTask` / `LastWorkflowTask` / `BuildId`.
+- `ContinueAsNewWorkflowExecutionCommandAttributes.workflow_type` — transitions between types.
+- `NewWorkflowExecutionInfo.workflow_execution_timeout` — "including retries and continue as new"; the 24h cap.
+- `Temporalex.Workflow.API.patched?/1` — `workflow/api.ex:264`; on replay a patch ID absent from history returns `false` (`core/executor.ex:2363`).
+- `temporal workflow reset` — valid reset points are workflow-task boundaries; signals re-applied by default.
 - `temporal activity` — `pause` / `unpause` / `complete` / `fail` / `reset` / `update-options`.
-- `TemporalReportedProblems` — stall alerting. Custom: `FreshaWorkflowFamily`, `FreshaCanaryCohort`.
+- `TemporalReportedProblems` — stall alerting; workflow-task failures retry forever, so a stalled execution never *fails* and will not appear in error dashboards. Custom: `FreshaWorkflowFamily`, `FreshaCanaryCohort`.
 
-**Deliberately unused:** Worker Deployments and Versions, `pinned` / `auto_upgrade` behaviours, `VersioningOverride`, ramping, `set-current-version`, drainage status, reset-with-move, and the `TemporalWorkerDeployment*` search attributes. See §2.
+Unused: Worker Deployments and Versions, `pinned` / `auto_upgrade`, `VersioningOverride`, ramping, `set-current-version`, drainage status, reset-with-move, `TemporalWorkerDeployment*` search attributes.
