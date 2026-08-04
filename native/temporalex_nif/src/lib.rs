@@ -2165,6 +2165,9 @@ fn workflow_start_options(
         duration_option_from_opts(opts, &[task_timeout(), workflow_task_timeout()])?;
     options.cron_schedule = keyword_get_string(opts, cron_schedule())?;
     options.search_attributes = search_attributes_option_from_opts(opts)?;
+    // Requires temporalio/sdk-rust#1443 (memo on WorkflowStartOptions). Until
+    // that is released and the pin below is bumped, this will not compile.
+    options.memo = memo_option_from_opts(opts)?;
     options.retry_policy = retry_policy_from_opts(opts)?;
     options.priority = priority_from_opts(opts)?;
     options.header = header_from_opts(opts)?;
@@ -2201,6 +2204,24 @@ fn header_from_opts(opts: Term) -> anyhow::Result<Option<Header>> {
     } else {
         Ok(Some(Header { fields }))
     }
+}
+
+/// Builds the start memo from a `:memo` map of key => term.
+///
+/// Memo is unindexed operator annotation returned when describing or listing a
+/// workflow — the counterpart to indexed search attributes, and needing no
+/// namespace registration.
+fn memo_option_from_opts(opts: Term) -> anyhow::Result<Option<Memo>> {
+    let fields = keyword_get_payload_map(opts, memo())?;
+
+    // An empty memo is absent rather than an empty proto message. The server
+    // rejects an empty memo on ModifyWorkflowProperties, so being consistent on
+    // the start path avoids the same surprise here.
+    if fields.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(Memo { fields }))
 }
 
 fn search_attributes_option_from_opts(
