@@ -330,7 +330,12 @@ defmodule Temporalex.Core.Executor do
           workflow_info:
             Map.merge(init.workflow_info || %{}, %{
               workflow_id: init.workflow_id,
-              workflow_type: workflow_type
+              workflow_type: workflow_type,
+              # Start headers, so workflow code can read context a client
+              # interceptor injected. Recorded in history, so reading them is
+              # deterministic — but anything derived from them and placed on an
+              # outbound command must be too.
+              headers: init.headers || %{}
             }),
           randomness_seed: init.randomness_seed,
           initialized?: true
@@ -697,7 +702,7 @@ defmodule Temporalex.Core.Executor do
   defp handle_workflow_op(state, from, thread_id, %Op.ContinueAsNew{} = op) do
     case validate_continue_as_new_call(state, thread_id) do
       :ok ->
-        case CommandBuilder.continue_as_new(state.workflow_type, op) do
+        case CommandBuilder.continue_as_new(state.workflow_type, inherit_headers(state, op)) do
           {:ok, command} ->
             state
             |> append_command(command)
@@ -936,6 +941,25 @@ defmodule Temporalex.Core.Executor do
       history_size_bytes: state.history_size_bytes,
       continue_as_new_suggested: state.continue_as_new_suggested
     })
+  end
+
+  # Temporal does not carry a run's headers into its continue-as-new successor —
+  # the new run's headers are exactly what the command sets. So trace context
+  # dies at the first continue-as-new unless it is copied forward.
+  #
+  # Opt-in rather than automatic, because `headers` is part of command identity:
+  # inheriting by default would change the ContinueAsNew command emitted by
+  # workflows already in flight and fail their replay on upgrade. The start
+  # headers come from history, so copying them is itself replay-safe.
+  defp inherit_headers(%State{} = state, %Op.ContinueAsNew{opts: opts} = op) do
+    case Keyword.pop(opts, :inherit_headers, false) do
+      {false, opts} ->
+        %{op | opts: opts}
+
+      {true, opts} ->
+        start_headers = Map.get(state.workflow_info || %{}, :headers, %{})
+        %{op | opts: Keyword.put_new(opts, :headers, start_headers)}
+    end
   end
 
   defp validate_continue_as_new_call(state, thread_id) do

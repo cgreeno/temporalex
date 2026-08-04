@@ -15,7 +15,7 @@ defmodule Temporalex.Client do
   defmodule Connection do
     @moduledoc false
 
-    defstruct [:pid, :backend, :backend_state, :namespace, :task_queue]
+    defstruct [:pid, :backend, :backend_state, :namespace, :task_queue, interceptors: []]
   end
 
   defmodule State do
@@ -25,7 +25,8 @@ defmodule Temporalex.Client do
       :backend,
       :backend_state,
       :namespace,
-      :task_queue
+      :task_queue,
+      interceptors: []
     ]
   end
 
@@ -497,7 +498,8 @@ defmodule Temporalex.Client do
            backend: backend,
            backend_state: backend_state,
            namespace: Keyword.get(opts, :namespace, @default_namespace),
-           task_queue: Keyword.get(opts, :task_queue, @default_task_queue)
+           task_queue: Keyword.get(opts, :task_queue, @default_task_queue),
+           interceptors: interceptors(opts)
          }}
 
       {:error, reason} ->
@@ -514,7 +516,8 @@ defmodule Temporalex.Client do
         backend: state.backend,
         backend_state: state.backend_state,
         namespace: state.namespace,
-        task_queue: state.task_queue
+        task_queue: state.task_queue,
+        interceptors: state.interceptors
       }}, state}
   end
 
@@ -524,14 +527,48 @@ defmodule Temporalex.Client do
     :ok
   end
 
+  # Validated at client start so a bad interceptor is a startup error rather than
+  # a crash on the first operation, long after the config was written.
+  defp interceptors(opts) do
+    opts
+    |> Keyword.get(:interceptors, [])
+    |> List.wrap()
+    |> Enum.map(&validate_interceptor/1)
+  end
+
+  defp validate_interceptor(module) when is_atom(module) do
+    Code.ensure_loaded!(module)
+
+    unless function_exported?(module, :intercept, 3) do
+      raise ArgumentError,
+            "#{inspect(module)} is not a Temporalex.Interceptor: it does not export intercept/3"
+    end
+
+    module
+  end
+
+  defp validate_interceptor(other) do
+    raise ArgumentError,
+          "expected an interceptor module, got: #{inspect(other)}"
+  end
+
   defp with_client_connection(client, operation, opts, fun) when is_function(fun, 2) do
     with {:ok, %Connection{} = connection} <- connection(client, operation) do
       monitor_ref = Process.monitor(connection.pid)
 
       try do
         if Process.alive?(connection.pid) do
-          opts = Keyword.put(opts, :client_monitor, {connection.pid, monitor_ref})
-          result = fun.(connection, opts)
+          context = %Temporalex.Interceptor.Context{operation: operation, client: client}
+
+          result =
+            Temporalex.Interceptor.run(connection.interceptors, context, opts, fn opts ->
+              # Stamped inside the innermost closure so interceptors never see it.
+              # It is an internal `receive` pattern in the backend: dropping it
+              # disables client-down detection (the caller then blocks for the
+              # full timeout), and corrupting it raises from a private function
+              # after the operation has already been issued.
+              fun.(connection, Keyword.put(opts, :client_monitor, {connection.pid, monitor_ref}))
+            end)
 
           case result do
             {:error, %{__struct__: Temporalex.ClientUnavailableError}} ->

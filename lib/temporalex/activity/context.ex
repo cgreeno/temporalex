@@ -20,7 +20,8 @@ defmodule Temporalex.Activity.Context do
             is_local: false,
             worker: nil,
             cancelled: nil,
-            cancel_reason: nil
+            cancel_reason: nil,
+            headers: %{}
 
   def heartbeat(%__MODULE__{} = context, details \\ nil) do
     with :ok <- check_not_cancelled(context),
