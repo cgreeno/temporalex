@@ -18,7 +18,7 @@ defmodule Temporalex.Native do
         _client,
         _task_queue,
         _namespace,
-        _build_id,
+        _versioning,
         _max_wf,
         _max_act,
         _pid,
