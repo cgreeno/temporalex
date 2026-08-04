@@ -22,7 +22,8 @@ defmodule Temporalex.Workflow.API do
     :search_attributes,
     :retry_policy,
     :versioning_intent,
-    :initial_versioning_behavior
+    :initial_versioning_behavior,
+    :inherit_headers
   ]
 
   def execute_activity(type, input, opts \\ []) when is_binary(type) and is_list(input) do
@@ -229,6 +230,32 @@ defmodule Temporalex.Workflow.API do
 
   def workflow_info do
     call!(%Op.WorkflowInfo{})
+  end
+
+  @doc """
+  The headers the workflow was started with.
+
+  This is how a workflow reads context a client interceptor injected — trace
+  context, a tenant id, a correlation id. Headers are recorded in history, so
+  reading them is deterministic and safe on replay.
+
+      %{"traceparent" => traceparent} = API.headers()
+
+  Propagating context onward is also safe as long as you copy these values
+  verbatim onto outbound activity or child-workflow `:headers`. Deriving a *new*
+  value per call — a fresh span id, say — is not: it lands in the command and
+  differs on replay. See `docs/scheduler_and_replay.md`.
+
+  > #### Continue-as-new drops them {: .warning}
+  >
+  > Temporal does not carry a run's headers into its continue-as-new successor,
+  > so this returns `%{}` from the second run onward unless the chain opts in
+  > with `API.continue_as_new!(input, inherit_headers: true)` or passes
+  > `:headers` explicitly. Only start headers are exposed; signal, update, and
+  > query headers are not readable yet.
+  """
+  def headers do
+    Map.get(workflow_info(), :headers, %{})
   end
 
   def cancelled? do

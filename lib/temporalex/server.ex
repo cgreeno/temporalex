@@ -536,7 +536,11 @@ defmodule Temporalex.Server do
       is_local: task.is_local,
       worker: state.name,
       cancelled: cancelled,
-      cancel_reason: task.cancel_reason
+      cancel_reason: task.cancel_reason,
+      # Headers the workflow attached when scheduling this activity — how trace
+      # context reaches activity code. Activities are not replayed, so anything
+      # may be done with them.
+      headers: task.headers || %{}
     }
   end
 
