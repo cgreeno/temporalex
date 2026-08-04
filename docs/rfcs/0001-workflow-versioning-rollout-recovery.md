@@ -7,7 +7,22 @@
 | **Date** | 2026-08-04 |
 | **Scope** | A Fresha library over `temporalex` (working name `Fresha.Workflow`). Elixir only. |
 
-## 1. The rule
+## 1. The four scenarios
+
+Everything here exists to answer these, and they are the test for any change to this design:
+
+| # | Scenario | Answered in |
+|---|---|---|
+| **1** | **Upgrade a workflow, and roll it back.** | §6 for new starts, §5 for executions already running |
+| **2** | **Canary a new version to a percentage or a cohort.** | §6 — a deterministic cohort, not a dice roll |
+| **3** | **A deploy introduces a bug and in-flight executions are stuck.** Get them back onto the version that works. | §7 for the recovery ladder, §5 for the fallback |
+| **4** | **Force saga steps to declare whether they change state**, so every state-changing step has an undo or an idempotency key and can be safely re-attempted — including by a different workflow. | §4 for the declarations, §3.4–3.5 for the keys and the ledger |
+
+Scenario 4 is not a peer of the others. It is the precondition for 1, 2, and 3: every recovery path re-executes side effects, so without it the other three are unsafe to attempt.
+
+### The rule
+
+All four reduce to one:
 
 > **A behaviour change ships as a new workflow *type*, not a new version of an existing type. Released types are immutable. Only new executions route to the new type.**
 
