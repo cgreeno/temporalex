@@ -143,6 +143,25 @@ down: "this node serves these workflows." That is a property of the
 deployable, not of the workflow code, which is why it cannot be derived and
 must be stated.
 
+## Task queues
+
+A task queue is a rendezvous string — nothing more. Starting a workflow
+writes its tasks under a name; workers long-poll a name; whoever polls the
+name you wrote to gets the work. There is no server-side registry of which
+worker runs which workflow type, so every start names its queue.
+
+| The queue is the unit of… | |
+| --- | --- |
+| decoupling | callers name a queue, never a host, pod, or process — whoever polls that name picks the work up |
+| scaling | more capacity = more workers polling the same name |
+| deployment | one queue ≈ one deployable, with its own release cadence and blast radius |
+| fairness & versioning | fairness keys and worker deployment versions attach per queue |
+
+Queues are not provisioned; a queue springs into existence the first time
+anyone uses its name. Which is what makes a typo dangerous: it does not
+error, it creates a new empty queue — and a workflow started there sits
+"Running" forever, because nothing polls it.
+
 ## Start a client and a worker
 
 ```elixir
@@ -152,6 +171,9 @@ children = [
    backend: Temporalex.Backend.TemporalCore,
    target: "http://127.0.0.1:7233",
    namespace: "default",
+   # Starts that pass no :task_queue inherit this one. Without it they go to
+   # "default" — which nothing here polls (see "Task queues" above).
+   task_queue: "checkout",
    # :etf (default) preserves full Elixir term fidelity.
    # :json makes payloads renderable by `temporal` CLI and non-Elixir
    # clients, at the cost of lossy term encoding (atoms → strings,
