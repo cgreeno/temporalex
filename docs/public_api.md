@@ -23,8 +23,13 @@ end
 
 ```elixir
 __workflow_type__/0
-__workflow_defaults__/0
+__queue__/0
+__client__/0
 ```
+
+With `queue:` given, `use` also generates the call-side surface (RFC 0002):
+`new/2`, `start/2`, `start!/2`, `execute/2`, `execute!/2`, `signal/4`,
+`signal!/4`, `query/4`, `query!/4` — all `defoverridable`.
 
 `run/1` returns:
 
