@@ -18,9 +18,9 @@ BEAM scheduling or mailbox timing.
 > ** NEXT and FINAL STAGE Before ALPHA TESTING **
 > Fix the usability of the SDK to make it easier and simpler than the vibe coded version 
 > Retest and verify and finish the liveview demo app
+>
+> 
 > Core design and scheduler authored by [@hansihe](https://github.com/hansihe);
-> see [`docs/scheduler_and_replay.md`](docs/scheduler_and_replay.md) and
-> [`docs/implementation_principles.md`](docs/implementation_principles.md).
 
 ---
 
