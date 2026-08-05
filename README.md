@@ -48,6 +48,40 @@ The Web UI lands at <http://localhost:8233>; the gRPC endpoint at
 
 ---
 
+## Define and call a workflow
+
+A workflow module declares what it is — behaviour, identity, address — and
+`use` generates the call-side surface:
+
+```elixir
+defmodule Greet do
+  use Temporalex.Workflow, queue: "greetings"
+
+  @impl true
+  def id(name), do: "greet-\#{name}"
+
+  @impl true
+  def run(name), do: {:ok, "Hello, \#{name}!"}
+end
+```
+
+```elixir
+greeting = Greet.execute!("Fresha")          # start, wait, get the answer
+handle   = Greet.start!("Fresha")            # start and move on
+greeting = Temporalex.await!(handle)         # collect later
+
+booking_id                                    # policy, when a call carries it
+|> Booking.new()
+|> Temporalex.retry(max_attempts: 3)
+|> Temporalex.fairness(salon_id)
+|> Temporalex.execute!()
+```
+
+`id/1` derives the workflow id — Temporal's idempotency key — so a duplicate
+start attaches to the running execution and a webhook can signal it knowing
+only the business key: `Booking.signal!(booking_id, "confirmed")`. Design and
+rationale: `docs/rfcs/0002-client-surface.md`.
+
 ## Define an activity
 
 ```elixir

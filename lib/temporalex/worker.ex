@@ -1,20 +1,33 @@
 defmodule Temporalex.Worker do
   @moduledoc """
   Supervisor for one Temporalex worker instance.
+
+  A worker is a poller + executor bound to one task queue — the deployment
+  topology written down: *this node serves these workflows*. The minimal
+  spec is just that statement:
+
+      {Temporalex.Worker, workflows: [Booking, Waitlist], activities: [Bookings.Activities]}
+
+  Everything else is derived:
+
+    * `task_queue:` — read from the workflow modules' `use ..., queue:`
+      declarations, with a **boot error if they disagree** (the misrouting
+      bug caught at startup instead of as a silent hang). Stating it
+      explicitly still works and overrides.
+    * `client:` — defaults to the app's default client.
+    * `name:` — derived from the queue, overridable.
   """
 
   use Supervisor
 
   def start_link(opts) do
-    name = Keyword.get(opts, :name)
-    Supervisor.start_link(__MODULE__, opts, name: name)
+    opts = resolve!(opts)
+    Supervisor.start_link(__MODULE__, opts, name: Keyword.fetch!(opts, :name))
   end
 
   @impl Supervisor
   def init(opts) do
     worker_name = Keyword.fetch!(opts, :name)
-    # Required — raises a clear KeyError if a caller omits the owning client.
-    _client = Keyword.fetch!(opts, :client)
 
     server_name = server_name(worker_name)
     executor_supervisor_name = executor_supervisor_name(worker_name)
@@ -33,6 +46,71 @@ defmodule Temporalex.Worker do
     ]
 
     Supervisor.init(children, strategy: :one_for_all)
+  end
+
+  @doc false
+  # Fills task_queue, client, and name from what the workflow modules already
+  # declare. Public (hidden) so the derivation is unit-testable.
+  #
+  # When neither the worker nor any workflow declares a queue, the worker
+  # falls through to the pre-RFC-0002 behaviour (inheriting the client's
+  # queue) — that fallback is scheduled to die in Phase 2, not here.
+  def resolve!(opts) do
+    task_queue =
+      Keyword.get(opts, :task_queue) || derive_queue!(Keyword.get(opts, :workflows, []))
+
+    opts
+    |> put_present(:task_queue, task_queue)
+    |> Keyword.put_new(:client, Temporalex.default_client())
+    |> put_name(task_queue)
+  end
+
+  defp put_present(opts, _key, nil), do: opts
+  defp put_present(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp put_name(opts, task_queue) do
+    cond do
+      Keyword.has_key?(opts, :name) ->
+        opts
+
+      is_binary(task_queue) ->
+        Keyword.put(opts, :name, Module.concat(Temporalex.Worker, task_queue))
+
+      true ->
+        raise ArgumentError, "a worker needs a :name when no task queue can be derived"
+    end
+  end
+
+  # nil when nothing declares a queue; raises only on disagreement — the
+  # misrouting bug this derivation exists to catch.
+  defp derive_queue!(workflows) do
+    declared =
+      workflows
+      |> Enum.map(fn module ->
+        # ensure_loaded?: in dev the modules in a children list are lazily
+        # loaded, and an unloaded module fails function_exported?/3 — which
+        # would silently fall through to the legacy queue fallback and
+        # resurrect the misrouting hang this derivation exists to catch.
+        loaded? = Code.ensure_loaded?(module)
+        {module, loaded? and function_exported?(module, :__queue__, 0) and module.__queue__()}
+      end)
+      |> Map.new()
+
+    case declared |> Map.values() |> Enum.filter(&is_binary/1) |> Enum.uniq() do
+      # Exactly one declared queue: modules without a declaration ride along.
+      [queue] -> queue
+      [] -> nil
+      _many -> raise_queue_mismatch(declared)
+    end
+  end
+
+  defp raise_queue_mismatch(declared) do
+    listing = Enum.map_join(declared, "\n", fn {m, q} -> "  #{inspect(m)} → #{inspect(q)}" end)
+
+    raise ArgumentError,
+          "one worker polls one task queue, but the listed workflows disagree:\n#{listing}\n" <>
+            "Split them across workers, or align their `use Temporalex.Workflow, queue:` " <>
+            "declarations"
   end
 
   def server_name(worker_name), do: Module.concat(worker_name, Server)

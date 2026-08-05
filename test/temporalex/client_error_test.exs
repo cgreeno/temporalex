@@ -77,6 +77,7 @@ defmodule Temporalex.ClientErrorTest do
               message: "refused"
             }} =
              Client.start_link(
+               name: nil,
                backend: ErrorBackend,
                start_client_error: {:connect_error, "refused"}
              )
@@ -169,7 +170,9 @@ defmodule Temporalex.ClientErrorTest do
   end
 
   defp start_client!(reasons) do
-    {:ok, pid} = Client.start_link(backend: ErrorBackend, reasons: reasons)
+    # name: nil — a deliberately unregistered client; unnamed now registers
+    # the app-wide default name, which async tests would race on.
+    {:ok, pid} = Client.start_link(name: nil, backend: ErrorBackend, reasons: reasons)
 
     on_exit(fn ->
       if Process.alive?(pid) do

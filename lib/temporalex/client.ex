@@ -33,18 +33,35 @@ defmodule Temporalex.Client do
   defmodule Handle do
     @moduledoc """
     Handle for a started workflow execution.
+
+    `await_timeout` is the default wait a start chain carried
+    (`Temporalex.timeout/2`); `Temporalex.await/2` uses it when the call
+    passes no `:timeout`.
     """
 
-    defstruct [:client, :workflow_id, :run_id, :workflow_type]
+    defstruct [:client, :workflow_id, :run_id, :workflow_type, :await_timeout]
+
+    @type t :: %__MODULE__{
+            client: atom() | pid(),
+            workflow_id: String.t(),
+            run_id: String.t() | nil,
+            workflow_type: String.t() | nil,
+            await_timeout: pos_integer() | :infinity | nil
+          }
   end
 
   @default_namespace "default"
   @default_task_queue "default"
 
   def start_link(opts) when is_list(opts) do
-    case Keyword.get(opts, :name) do
-      nil -> GenServer.start_link(__MODULE__, opts)
-      name -> GenServer.start_link(__MODULE__, opts, name: name)
+    # An unnamed client registers under the default name so workflow modules
+    # can resolve it with zero configuration. Two clients means naming at
+    # least one — a boot-time collision error, never silent. `name: nil`
+    # remains the escape hatch for a deliberately unregistered client.
+    case Keyword.fetch(opts, :name) do
+      {:ok, nil} -> GenServer.start_link(__MODULE__, opts)
+      {:ok, name} -> GenServer.start_link(__MODULE__, opts, name: name)
+      :error -> GenServer.start_link(__MODULE__, opts, name: Temporalex.default_client())
     end
   end
 
@@ -145,6 +162,7 @@ defmodule Temporalex.Client do
     end)
   end
 
+  @doc deprecated: "Use Temporalex.await/2 — get_result reads like a peek but blocks"
   def get_result(%Handle{} = handle, opts \\ []) when is_list(opts) do
     with_client_connection(handle.client, :get_result, opts, fn %Connection{} = connection,
                                                                 opts ->

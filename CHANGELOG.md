@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased
+
+### The client surface (RFC 0002, Phase 1)
+
+- **`use Temporalex.Workflow` takes `queue:`, `name:`, and `client:`** and —
+  when `queue:` is given — generates the call-side surface: `new/2`,
+  `start!/2`, `execute!/2`, `signal!/4`, `query!/4`, and tuple-returning
+  twins (all `defoverridable`). The shortest call is now
+  `Greet.execute!("Fresha")`.
+- **`id/1` derives the workflow id from the input** — Temporal's idempotency
+  key, stated once on the module instead of invented at every call site.
+  Starting with neither `id/1` nor `id:` raises with instructions;
+  `:generate` is the deliberate opt-out and stays a sentinel until the
+  terminal verb, so a reused `%Start{}` draws a fresh id per start.
+  `input/1` (optional) maps the caller's value to the durable input.
+- **Duplicate starts attach by default.** The generated surface pins
+  `id_conflict_policy: :use_existing` (Temporal's own default *fails*
+  duplicates); pass `id_conflict_policy: :fail` for loud duplicates.
+- **`Temporalex.Start` + chain steps on `Temporalex`**: `id`, `queue`,
+  `client`, `input`, `timeout`, `retry`, `priority`, `fairness`, `index`,
+  `headers`, `cron`, `run_timeout`, `execution_timeout`; terminal verbs
+  `start!`/`execute!` (and twins); `await!`/`await` on handles. Builders are
+  inert; a chain has exactly one terminal verb. A `timeout` on a
+  `start!`-ended chain rides the handle as the later await's default.
+- **The generated surface and the chain both raise inside workflow code** —
+  a live client call on replay is nondeterminism; the error points at the
+  child-workflow API. Activities are unaffected.
+- **Workers derive their queue** from the workflow modules (`Code.ensure_loaded?`
+  first, so lazily-loaded dev environments derive correctly), with a boot
+  error when modules disagree; `name:` and `client:` default too. The legacy
+  inherit-the-client's-queue fallback survives this phase and dies in
+  Phase 2.
+- **An unnamed `Temporalex.Client` now registers as the default client**
+  (`Temporalex.Client`), so single-connection apps configure nothing.
+  `name: nil` keeps a client deliberately unregistered. Two unnamed clients
+  — previously legal — now collide at boot.
+- `Temporalex.await/2` is the primary way to collect a result;
+  `Client.get_result/2` remains and is soft-deprecated in docs.
+- The low-level random-workflow-id fallback now logs a warning pointing at
+  `id/1` / `id: :generate`; it raises in Phase 2.
+- `__workflow_defaults__/0` (generated, documented, read by nothing) is
+  removed.
+
 ## 0.4.2 — 2026-08-03
 
 - Fix worker-crash blast radius: the poller bridge was spawn_linked from

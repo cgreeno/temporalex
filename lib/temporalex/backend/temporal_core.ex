@@ -221,7 +221,18 @@ defmodule Temporalex.Backend.TemporalCore do
 
     workflow_id =
       workflow_id ||
-        "temporalex-#{System.system_time(:millisecond)}-#{System.unique_integer([:positive])}"
+        (
+          require Logger
+
+          Logger.warning(
+            "starting #{workflow_type} with a silently generated workflow id — " <>
+              "the id is Temporal's idempotency key. Derive it (id/1 on the " <>
+              "workflow module) or opt out explicitly with id: :generate; " <>
+              "this fallback raises in a future release"
+          )
+
+          "temporalex-#{System.system_time(:millisecond)}-#{System.unique_integer([:positive])}"
+        )
 
     task_queue = Keyword.get(opts, :task_queue, state.task_queue)
     timeout = Keyword.get(opts, :timeout, state.start_timeout)
@@ -451,27 +462,35 @@ defmodule Temporalex.Backend.TemporalCore do
     Map.new(headers, fn {key, value} -> {to_string(key), to_string(value)} end)
   end
 
+  @native_start_opt_keys [
+    :headers,
+    :execution_timeout,
+    :workflow_execution_timeout,
+    :run_timeout,
+    :workflow_run_timeout,
+    :task_timeout,
+    :workflow_task_timeout,
+    :cron_schedule,
+    :search_attributes,
+    :retry_policy,
+    :id_reuse_policy,
+    :workflow_id_reuse_policy,
+    :id_conflict_policy,
+    :workflow_id_conflict_policy,
+    :static_summary,
+    :static_details,
+    :priority
+  ]
+
+  @doc false
+  # The allowlist is the silent-drop hazard RFC 0002 §10 documents: an option
+  # missing from it reaches neither the NIF nor an error. Exposed so a test
+  # can fail when the Start surface and this list drift apart.
+  def __native_start_opt_keys__, do: @native_start_opt_keys
+
   defp native_start_opts(opts) do
     opts
-    |> Keyword.take([
-      :headers,
-      :execution_timeout,
-      :workflow_execution_timeout,
-      :run_timeout,
-      :workflow_run_timeout,
-      :task_timeout,
-      :workflow_task_timeout,
-      :cron_schedule,
-      :search_attributes,
-      :retry_policy,
-      :id_reuse_policy,
-      :workflow_id_reuse_policy,
-      :id_conflict_policy,
-      :workflow_id_conflict_policy,
-      :static_summary,
-      :static_details,
-      :priority
-    ])
+    |> Keyword.take(@native_start_opt_keys)
     |> normalize_native_opts()
   end
 
