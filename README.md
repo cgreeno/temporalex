@@ -12,9 +12,12 @@ BEAM scheduling or mailbox timing.
 > **Status: 0.4.x.** This line is an architectural rewrite around a
 > deterministic core, a `Temporalex.Backend` boundary that isolates Temporal
 > Core / Rust details, and structured concurrency primitives `phase` and
-> `parallel`. The 0.x line is not backwards-compatible with 0.2.0. See
+> `parallel`. The 0.x line is not backwards-compatible with 0.3.0. See
 > [CHANGELOG.md](CHANGELOG.md) for the migration notes.
 >
+> ** NEXT and FINAL STAGE Before ALPHA TESTING **
+> Fix the usability of the SDK to make it easier and simpler than the vibe coded version 
+> Retest and verify and finish the liveview demo app
 > Core design and scheduler authored by [@hansihe](https://github.com/hansihe);
 > see [`docs/scheduler_and_replay.md`](docs/scheduler_and_replay.md) and
 > [`docs/implementation_principles.md`](docs/implementation_principles.md).
