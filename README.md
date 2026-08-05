@@ -9,7 +9,7 @@ explicit and structured — there is no implicit event loop. The runtime uses a
 sequences are reproducible from the same activation transcript regardless of
 BEAM scheduling or mailbox timing.
 
-> **Status: 0.4.x.** This line is an architectural rewrite around a
+> **Status: 0.5.x.** This line is an architectural rewrite around a
 > deterministic core, a `Temporalex.Backend` boundary that isolates Temporal
 > Core / Rust details, and structured concurrency primitives `phase` and
 > `parallel`. The 0.x line is not backwards-compatible with 0.3.0. See
@@ -20,7 +20,7 @@ BEAM scheduling or mailbox timing.
 > Retest and verify and finish the liveview demo app
 >
 > 
-> Core design and scheduler authored by [@hansihe](https://github.com/hansihe);
+> Core design and scheduler authored by [@hansihe](https://github.com/hansihe).
 
 ---
 
