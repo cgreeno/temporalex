@@ -88,8 +88,10 @@ the cautionary example: two spellings mean the API cannot even guide users to
 one.
 
 **P6 — Builders are inert; terminal verbs run; a bang raises.**
-Constructors and chain steps only produce data — they touch nothing and
-cannot fail.
+Constructors and chain steps only produce data — they touch nothing and have
+no failure *effects*. They may still raise `ArgumentError` on programmer
+misuse (an unknown option, a missing `id/1`): that is the loud-and-early
+guidance P2 demands, same as `MapSet.new(:not_enumerable)` raising.
 Terminal verbs perform the operation, in two spellings — `start!` raises on
 failure (for pipelines), `start` returns tagged tuples (for `with`). Docs
 lead with the bang forms and the shortest honest call.
@@ -525,14 +527,18 @@ Phase 1 — additive (target 0.5):
   all options today, `workflow.ex:6`, so this breaks nothing).
 - The generated surface appears; existing modules without `queue:` compile
   unchanged, and only raise if the *generated* functions are called.
-- `Temporalex.await!/await` land; `get_result/2` delegates and logs a
-  deprecation once.
+- `Temporalex.await!/await` land as the primary collection API, with
+  `get_result/2` soft-deprecated in docs (`@doc deprecated:`). A hard
+  `@deprecated` would emit compile warnings in every existing caller and
+  break `--warnings-as-errors` CI — the same reasoning as `id/1`'s
+  optional-callback mechanics.
 - The low-level random-id fallback logs a deprecation pointing at `id/1` /
   `:generate`.
 - `__workflow_defaults__/0` — generated, documented, read by nothing — is
   removed.
-- `%Temporalex.Handle{}` is today's `Temporalex.Client.Handle` moved and
-  extended with `await_timeout`; the old alias delegates for one minor.
+- `Temporalex.Client.Handle` is extended in place with `await_timeout`
+  rather than moved: renaming the struct would break every existing pattern
+  match, which is Phase-2-grade breakage. The rename question is deferred.
 - an unnamed `{Temporalex.Client, ...}` today runs *unregistered*; giving it
   the default registered name is a behaviour change. Two unnamed clients in
   one app — legal today — will collide at boot with an error telling them to
@@ -666,7 +672,7 @@ accident:
 | --- | --- | --- |
 | `id` / `id/1` | `runkey` | "run" means one incarnation in Temporal; inventing a word for the workflow id makes users learn a mapping the UI and CLI will contradict |
 | `queue:` | `task_queue:` | shorter; unambiguous in context |
-| `new` | — | the community constructor convention (`MapSet.new`, `Req.new`, `Ecto.Multi.new`): pure data, born valid, cannot fail — if construction ever validates, convention says `{:ok, t}` + `new!` |
+| `new` | — | the community constructor convention (`MapSet.new`, `Req.new`, `Ecto.Multi.new`): pure data, born valid, no effects. Raises `ArgumentError` on misuse; if construction ever validates against *external* state, convention says `{:ok, t}` + `new!` |
 | `index` | `search` | chain verbs describe what happens to the request now; searching happens later, done by someone else |
 | `with_signal` | `signal` (mid-chain) | `signal!` is the standalone sending verb; the same word must not mean *attach* in one position and *send* in another |
 | `await` | `get_result` | `get_result` reads like a peek but blocks; `await` says what it does |
