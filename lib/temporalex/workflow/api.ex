@@ -478,13 +478,16 @@ defmodule Temporalex.Workflow.API do
     end
   end
 
-  defp cancellation_error(%CancelledError{} = error), do: error
+  @doc false
+  # Public (undocumented) so the generated activity dispatch normalizes
+  # cancellations through the exact same function as the bang path.
+  def cancellation_error(%CancelledError{} = error), do: error
 
-  defp cancellation_error(reason) when is_binary(reason) do
+  def cancellation_error(reason) when is_binary(reason) do
     Failure.cancelled(reason)
   end
 
-  defp cancellation_error(reason) do
+  def cancellation_error(reason) do
     Failure.cancelled("cancelled", details: List.wrap(reason))
   end
 

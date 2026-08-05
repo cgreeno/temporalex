@@ -524,23 +524,30 @@ defmodule Temporalex.Core.Executor do
   end
 
   defp handle_workflow_op(state, from, thread_id, %Op.ExecuteLocalActivity{} = op) do
-    seq = state.next_seq
-    activity_id = Keyword.get(op.opts, :activity_id, "local-activity-#{seq}")
+    case CommandBuilder.validate_local_activity_opts(op.opts) do
+      :ok ->
+        seq = state.next_seq
+        activity_id = Keyword.get(op.opts, :activity_id, "local-activity-#{seq}")
 
-    command = %Command.ScheduleLocalActivity{
-      seq: seq,
-      thread_id: thread_id,
-      activity_id: activity_id,
-      type: op.type,
-      input: op.input,
-      opts: op.opts
-    }
+        command = %Command.ScheduleLocalActivity{
+          seq: seq,
+          thread_id: thread_id,
+          activity_id: activity_id,
+          type: op.type,
+          input: op.input,
+          opts: op.opts
+        }
 
-    state
-    |> append_command(command)
-    |> put_pending(seq, thread_id, from, op)
-    |> block_thread(thread_id)
-    |> Map.update!(:next_seq, &(&1 + 1))
+        state
+        |> append_command(command)
+        |> put_pending(seq, thread_id, from, op)
+        |> block_thread(thread_id)
+        |> Map.update!(:next_seq, &(&1 + 1))
+
+      {:error, reason} ->
+        reply_error(from, reason)
+        state
+    end
   end
 
   defp handle_workflow_op(state, from, thread_id, %Op.ExecuteChildWorkflow{} = op) do
