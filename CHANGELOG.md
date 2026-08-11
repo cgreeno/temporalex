@@ -17,7 +17,10 @@
 - **`local: true` definitions validate what local activities can honour** —
   `heartbeat_timeout:` or `task_queue:` on a local activity now refuses to
   compile with the why.
-- **`Temporalex.Testing.run_activity/4`** runs an activity's real
+- **Giving both `timeout:` and `start_to_close_timeout:` in one option list
+  raises** — they are two spellings of one knob and one would silently lose.
+  (Across layers both remain legal: the override retires the base's aliases.)
+- **`Temporalex.Testing.run_activity/4`** (and `run_activity!/4`) runs an activity's real
   implementation directly (no Temporal): fabricates a
   `Temporalex.Activity.Context` for `ctx`-taking activities, `context:`
   merges overrides, `cancelled: true` seeds a working cancellation flag.

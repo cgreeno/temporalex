@@ -148,6 +148,27 @@ defmodule Temporalex.ActivitySurfaceTest do
       assert Exception.message(error) =~ "allowed"
     end
 
+    test "both timeout spellings in one call raise instead of silently dropping one" do
+      error =
+        assert_raise ArgumentError, fn ->
+          Payments.charge!(100, timeout: 9_000, start_to_close_timeout: 1_000)
+        end
+
+      assert Exception.message(error) =~ "two spellings of one knob"
+    end
+
+    test "both spellings on one defactivity refuse to compile" do
+      assert_raise ArgumentError, ~r/two spellings of one knob/, fn ->
+        defmodule DoubleSpelled do
+          use Temporalex.Activity
+
+          defactivity nope(x), timeout: 9_000, start_to_close_timeout: 1_000 do
+            {:ok, x}
+          end
+        end
+      end
+    end
+
     test "valid call-site options still require workflow context to run" do
       # Validation passes, then dispatch refuses outside a workflow — proving
       # option checking happens first and the call would otherwise proceed.
@@ -207,6 +228,32 @@ defmodule Temporalex.ActivitySurfaceTest do
                )
     end
 
+    test "run_activity! unwraps success" do
+      assert Temporalex.Testing.run_activity!(Payments, :charge, [100]) == {:charged, 100}
+    end
+
+    test "run_activity! raises the error" do
+      defmodule Failing do
+        use Temporalex.Activity
+
+        defactivity boom(reason), start_to_close_timeout: 1_000 do
+          {:error, %ArgumentError{message: "bad #{reason}"}}
+        end
+
+        defactivity odd(x), start_to_close_timeout: 1_000 do
+          {:not_a_contract_shape, x}
+        end
+      end
+
+      assert_raise ArgumentError, "bad input", fn ->
+        Temporalex.Testing.run_activity!(Failing, :boom, ["input"])
+      end
+
+      assert_raise RuntimeError, ~r/must return/, fn ->
+        Temporalex.Testing.run_activity!(Failing, :odd, [1])
+      end
+    end
+
     test "context: on an activity that never sees ctx is a test bug and raises" do
       assert_raise ArgumentError, ~r/does not declare a ctx argument/, fn ->
         Temporalex.Testing.run_activity(Payments, :charge, [100], context: [attempt: 2])
@@ -249,6 +296,7 @@ defmodule Temporalex.ActivitySurfaceTest do
 
       Temporalex.Testing.complete_activity(run, activity, {:ok, :receipt})
       Temporalex.Testing.assert_completed(run, {:ok, :receipt})
+      Temporalex.Testing.assert_replay(run)
     end
 
     defmodule ShortSpelling do
@@ -288,6 +336,7 @@ defmodule Temporalex.ActivitySurfaceTest do
 
       Temporalex.Testing.complete_activity(run, activity, {:ok, 1})
       Temporalex.Testing.assert_completed(run, {:ok, 1})
+      Temporalex.Testing.assert_replay(run)
     end
 
     test "a per-activity start_to_close_timeout beats a module-default timeout: alias" do
@@ -300,6 +349,7 @@ defmodule Temporalex.ActivitySurfaceTest do
 
       Temporalex.Testing.complete_activity(run, activity, {:ok, 1})
       Temporalex.Testing.assert_completed(run, {:ok, 1})
+      Temporalex.Testing.assert_replay(run)
     end
 
     test "and the same-spelling override still works" do
@@ -311,6 +361,7 @@ defmodule Temporalex.ActivitySurfaceTest do
 
       Temporalex.Testing.complete_activity(run, activity, {:ok, :receipt})
       Temporalex.Testing.assert_completed(run, {:ok, :receipt})
+      Temporalex.Testing.assert_replay(run)
     end
 
     test "call-site options override the declaration on the wire" do
@@ -321,6 +372,7 @@ defmodule Temporalex.ActivitySurfaceTest do
 
       Temporalex.Testing.complete_activity(run, activity, {:ok, :receipt})
       Temporalex.Testing.assert_completed(run, {:ok, :receipt})
+      Temporalex.Testing.assert_replay(run)
     end
 
     test "a cancelled activity comes back as {:error, %CancelledError{}} — one result shape" do
@@ -331,6 +383,8 @@ defmodule Temporalex.ActivitySurfaceTest do
 
       assert {:ok, {:error, %Temporalex.Failure.CancelledError{message: "operator request"}}} =
                completed_result(run)
+
+      Temporalex.Testing.assert_replay(run)
     end
 
     test "a backend-delivered CancelledError passes through untouched" do
@@ -341,6 +395,7 @@ defmodule Temporalex.ActivitySurfaceTest do
       Temporalex.Testing.cancel_activity(run, activity, original)
 
       assert {:ok, {:error, ^original}} = completed_result(run)
+      Temporalex.Testing.assert_replay(run)
     end
 
     test "a non-binary cancellation reason is wrapped with its details kept" do
@@ -387,6 +442,13 @@ defmodule Temporalex.ActivitySurfaceTest do
       assert Temporalex.Activity.__dispatch_opts__(true) ==
                Temporalex.Core.CommandBuilder.__local_activity_opts__(),
              "surface @local_dispatch_opts drifted from CommandBuilder @local_activity_opts"
+    end
+
+    test "the timeout alias set matches the command builder's" do
+      assert Temporalex.Activity.__timeout_aliases__() ==
+               Temporalex.Core.CommandBuilder.__timeout_aliases__(),
+             "the alias set drifted — __merge_opts__ would stop retiring an " <>
+               "alias the command builder resolves, resurrecting the silent drop"
     end
   end
 

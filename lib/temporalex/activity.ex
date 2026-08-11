@@ -24,7 +24,10 @@ defmodule Temporalex.Activity do
   `Temporalex.Testing.run_activity/4`, no Temporal anywhere.
 
   Options given to `use Temporalex.Activity` become module-wide defaults;
-  per-activity options override them key by key. `local: true` marks a local
+  per-activity options override them key by key. Declared options are part
+  of a scheduled activity's replay identity, so treat module defaults as
+  values you will not change while runs are in flight — editing one shifts
+  the identity of every activity in the module at once. `local: true` marks a local
   activity (runs inside the workflow task) and narrows the allowed options —
   local activities cannot heartbeat or target another task queue.
 
@@ -114,19 +117,19 @@ defmodule Temporalex.Activity do
 
   @doc false
   def __module_defaults__!(module, defaults) do
-    validate_keys!(
-      defaults,
-      @dispatch_opts,
-      "use Temporalex.Activity in #{inspect(module)}",
-      false
-    )
-
+    where = "use Temporalex.Activity in #{inspect(module)}"
+    validate_single_timeout!(defaults, where)
+    validate_keys!(defaults, @dispatch_opts, where, false)
     defaults
   end
 
   # :timeout and :start_to_close_timeout are two spellings of one knob (the
-  # command builder reads them via find_option in that order).
+  # command builder reads them via find_option in that order). The set is
+  # owned by the command builder; a staleness test pins this copy to it.
   @timeout_aliases [:timeout, :start_to_close_timeout]
+
+  @doc false
+  def __timeout_aliases__, do: @timeout_aliases
 
   @doc false
   # The one merge rule, applied at every layer (module defaults → per-activity
@@ -149,6 +152,7 @@ defmodule Temporalex.Activity do
   # Runtime twin of the definition-time validation: call-site options must
   # survive the same allowlist, then override the declared options.
   def __call_opts__!(local?, declared, call_opts) do
+    validate_single_timeout!(call_opts, "this activity call")
     validate_keys!(call_opts, __dispatch_opts__(local?), "this activity call", local?)
     __merge_opts__(declared, call_opts)
   end
@@ -195,6 +199,8 @@ defmodule Temporalex.Activity do
     # Module defaults are set when the `use` line *evaluates*, which happens
     # after this macro *expands* — so they can only be read from generated
     # code. Per-activity opts have literal keys and validate right here.
+    validate_single_timeout!(opts, "defactivity #{name} in #{inspect(caller.module)}")
+
     validate_keys!(
       opts,
       if(local?, do: @local_dispatch_opts, else: @dispatch_opts),
@@ -316,6 +322,22 @@ defmodule Temporalex.Activity do
     unless is_boolean(local?) do
       raise ArgumentError,
             "local: on defactivity #{name} in #{inspect(module)} must be a literal boolean"
+    end
+  end
+
+  # Both spellings of the timeout in ONE keyword list is a code defect —
+  # find_option would keep :timeout and silently drop the other. Only ever
+  # called on a single layer's list: ACROSS layers both spellings are legal,
+  # because the override retires the base's aliases (__merge_opts__/2).
+  defp validate_single_timeout!(opts, where) do
+    case Enum.filter(@timeout_aliases, &Keyword.has_key?(opts, &1)) do
+      [_, _ | _] = both ->
+        raise ArgumentError,
+              "#{inspect(both)} given together for #{where} — they are two " <>
+                "spellings of one knob; keep exactly one"
+
+      _ ->
+        :ok
     end
   end
 

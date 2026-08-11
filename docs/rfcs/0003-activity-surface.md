@@ -173,6 +173,13 @@ end
 
 - `use Temporalex.Activity, opts` accepts the same dispatch options
   `defactivity` does; per-activity options win key-by-key.
+- **Module defaults widen the replay blast radius of an option edit.**
+  Declared options are part of a scheduled activity's command identity, so
+  editing one fails replay for in-flight runs — that was always true
+  per-activity, but one edited `use` line now shifts the identity of every
+  activity in the module at once. Module defaults are for values you do not
+  intend to change while runs are in flight; a value you expect to tune
+  belongs on the `defactivity` or at the call site.
 - `name:` sets the wire type verbatim. The naming ledger entry mirrors
   RFC 0002's: the default (module + function) is right until the first
   rename; `name:` is the escape hatch you set *before* you need it.

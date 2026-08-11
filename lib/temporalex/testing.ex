@@ -70,6 +70,32 @@ defmodule Temporalex.Testing do
     end
   end
 
+  @doc """
+  Like `run_activity/4` but unwraps success and raises failures.
+
+  Activities must return `{:ok, value}` or `{:error, reason}` (the server
+  enforces the same contract); anything else raises here too, so a test
+  fails the same way production would.
+
+      Payments |> Temporalex.Testing.run_activity!(:charge, [100])
+  """
+  def run_activity!(module, name, args, opts \\ []) do
+    case run_activity(module, name, args, opts) do
+      {:ok, value} ->
+        value
+
+      {:error, %{__exception__: true} = error} ->
+        raise error
+
+      {:error, reason} ->
+        raise "activity #{name} returned {:error, #{inspect(reason)}}"
+
+      other ->
+        raise "activity #{name} returned #{inspect(other)} — activities must " <>
+                "return {:ok, value} or {:error, reason}"
+    end
+  end
+
   defp fetch_activity!(module, name, arity) do
     unless Code.ensure_loaded?(module) and function_exported?(module, :__temporal_activities__, 0) do
       raise ArgumentError,

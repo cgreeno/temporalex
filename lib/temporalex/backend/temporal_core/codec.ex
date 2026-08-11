@@ -841,7 +841,9 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
 
   defp command_to_proto(%Command.ScheduleLocalActivity{} = command, _default_task_queue) do
     opts = command.opts || []
-    timeout_ms = keyword_millis(opts, [:timeout, :start_to_close_timeout]) || 60_000
+
+    timeout_ms =
+      keyword_millis(opts, Temporalex.Core.CommandBuilder.__timeout_aliases__()) || 60_000
 
     with {:ok, start_to_close_timeout} <-
            duration_from_ms(timeout_ms, "local activity start_to_close_timeout"),
