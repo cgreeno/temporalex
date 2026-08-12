@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### The activity surface (RFC 0003)
+
+- **Module-level option defaults**: `use Temporalex.Activity, start_to_close_timeout: 30_000`
+  applies to every activity in the module; per-activity options override key
+  by key.
+- **`name:` on `defactivity`** decouples the wire type from the module name,
+  so renaming a module no longer strands in-flight workflows that scheduled
+  the old type.
+- **Call-site keyword options on dispatch**: `Activities.charge!(amount, timeout: 10_000)`
+  overrides the declaration for one call. Unknown options raise listing what
+  is allowed — at the definition, at the call, and (new) on local-activity
+  dispatch, which previously accepted anything and silently dropped it.
+- **`local: true` definitions validate what local activities can honour** —
+  `heartbeat_timeout:` or `task_queue:` on a local activity now refuses to
+  compile with the why.
+- **Giving both `timeout:` and `start_to_close_timeout:` in one option list
+  raises** — they are two spellings of one knob and one would silently lose.
+  (Across layers both remain legal: the override retires the base's aliases.)
+- **`Temporalex.Testing.run_activity/4`** (and `run_activity!/4`) runs an activity's real
+  implementation directly (no Temporal): fabricates a
+  `Temporalex.Activity.Context` for `ctx`-taking activities, `context:`
+  merges overrides, `cancelled: true` seeds a working cancellation flag.
+- **Breaking: duplicate activity names in one module refuse to compile.**
+  Previously `defactivity foo(a)` + `defactivity foo(a, b)` compiled but
+  shared one wire type, and the server registry silently kept only one.
+  Now the second definition raises at compile time.
+- **Breaking: cancelled activities are `{:error, %Temporalex.Failure.CancelledError{}}`.**
+  Generated dispatch no longer returns the third `{:cancelled, error}` shape;
+  rewrite matches as `{:error, %Temporalex.Failure.CancelledError{} = e}`.
+  (The low-level `Temporalex.Workflow.API.execute_activity/3` is unchanged.)
+- **`Temporalex.Activity.heartbeat/2` and `cancelled?/1`** as short
+  spellings of the `Context` verbs.
+
 ## 0.5.0 — 2026-08-05
 
 ### The client surface (RFC 0002, Phase 1)

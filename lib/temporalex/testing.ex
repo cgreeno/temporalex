@@ -28,6 +28,127 @@ defmodule Temporalex.Testing do
   end
 
   @doc """
+  Runs an activity's real implementation directly — no Temporal anywhere.
+
+  This is the unit-test entry point for activity bodies (the workflow-side
+  `assert_next_activity`/`complete_activity` kit is the complement: it tests
+  the workflow by mocking the activity; this runs the activity itself).
+
+      assert {:ok, receipt} = Temporalex.Testing.run_activity(Activities, :charge, [100])
+
+  For activities that declare a `ctx` argument, a `Temporalex.Activity.Context`
+  is fabricated with honest defaults (`attempt: 1`, the real wire type, no
+  worker — so `heartbeat/2` is a no-op) and `context:` merges overrides:
+
+      Temporalex.Testing.run_activity(Activities, :poll, [job],
+        context: [attempt: 3, cancelled: true]
+      )
+
+  `cancelled: true` seeds the cancellation flag so `Activity.cancelled?/1`
+  and heartbeats report cancellation. Passing `context:` to an activity that
+  never declares `ctx` raises — that test would be asserting fiction.
+
+  Returns whatever the implementation returns, untouched.
+  """
+  def run_activity(module, name, args, opts \\ [])
+      when is_atom(module) and is_atom(name) and is_list(args) and is_list(opts) do
+    activity = fetch_activity!(module, name, length(args))
+    context_overrides = Keyword.get(opts, :context)
+
+    cond do
+      activity.context? ->
+        context = test_activity_context(activity, context_overrides || [])
+        apply(module, activity.implementation, [context | args])
+
+      is_nil(context_overrides) ->
+        apply(module, activity.implementation, args)
+
+      true ->
+        raise ArgumentError,
+              "#{inspect(module)}.#{name} does not declare a ctx argument — " <>
+                "drop context: or add ctx as the first defactivity argument"
+    end
+  end
+
+  @doc """
+  Like `run_activity/4` but unwraps success and raises failures.
+
+  Activities must return `{:ok, value}` or `{:error, reason}` (the server
+  enforces the same contract); anything else raises here too, so a test
+  fails the same way production would.
+
+      Payments |> Temporalex.Testing.run_activity!(:charge, [100])
+  """
+  def run_activity!(module, name, args, opts \\ []) do
+    case run_activity(module, name, args, opts) do
+      {:ok, value} ->
+        value
+
+      {:error, %{__exception__: true} = error} ->
+        raise error
+
+      {:error, reason} ->
+        raise "activity #{name} returned {:error, #{inspect(reason)}}"
+
+      other ->
+        raise "activity #{name} returned #{inspect(other)} — activities must " <>
+                "return {:ok, value} or {:error, reason}"
+    end
+  end
+
+  defp fetch_activity!(module, name, arity) do
+    unless Code.ensure_loaded?(module) and function_exported?(module, :__temporal_activities__, 0) do
+      raise ArgumentError,
+            "#{inspect(module)} is not an activity module — expected `use Temporalex.Activity`"
+    end
+
+    activities = module.__temporal_activities__()
+
+    case Enum.find(activities, &(&1.name == name and &1.arity == arity)) do
+      nil ->
+        available =
+          Enum.map_join(activities, ", ", fn a -> "#{a.name}/#{a.arity}" end)
+
+        raise ArgumentError,
+              "no activity #{name}/#{arity} in #{inspect(module)} — defined: #{available}"
+
+      activity ->
+        activity
+    end
+  end
+
+  defp test_activity_context(activity, overrides) do
+    valid_keys = Map.keys(%Temporalex.Activity.Context{}) -- [:__struct__]
+
+    case Keyword.keys(overrides) -- valid_keys do
+      [] ->
+        :ok
+
+      unknown ->
+        raise ArgumentError,
+              "unknown context field(s) #{inspect(unknown)} for " <>
+                "run_activity #{activity.name} — valid: #{inspect(valid_keys)}"
+    end
+
+    overrides =
+      case Keyword.fetch(overrides, :cancelled) do
+        {:ok, cancelled} when is_boolean(cancelled) ->
+          flag = :atomics.new(1, signed: false)
+          if cancelled, do: :atomics.put(flag, 1, 1)
+          Keyword.put(overrides, :cancelled, flag)
+
+        _ ->
+          # absent (cancelled?/1 treats nil as false) or a raw atomics ref
+          overrides
+      end
+
+    struct!(
+      Temporalex.Activity.Context,
+      Keyword.merge([activity_type: activity.type, attempt: 1], overrides)
+    )
+  end
+
+  @doc """
   Consumes and returns the next scheduled activity command.
   """
   def assert_next_activity(%Run{} = run, opts \\ []) when is_list(opts) do

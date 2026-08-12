@@ -17,6 +17,22 @@ defmodule Temporalex.Core.CommandBuilder do
     :cancellation_type,
     :do_not_eagerly_execute
   ]
+  # Two spellings of one knob; find_option resolves them in this order.
+  # Owned here so the surface (Temporalex.Activity) and the codec consume one
+  # definition — a third alias added to only one layer resurrects the silent
+  # drop the surface exists to remove.
+  @timeout_aliases [:timeout, :start_to_close_timeout]
+
+  @local_activity_opts [
+    :activity_id,
+    :timeout,
+    :schedule_to_close_timeout,
+    :schedule_to_start_timeout,
+    :start_to_close_timeout,
+    :headers,
+    :retry_policy,
+    :cancellation_type
+  ]
   @continue_as_new_opts [
     :workflow_type,
     :task_queue,
@@ -80,6 +96,34 @@ defmodule Temporalex.Core.CommandBuilder do
        }}
     end
   end
+
+  # Local-activity commands are built in the codec, so the executor validates
+  # options here before emitting the command — a misspelled or unsupported
+  # option (heartbeat_timeout on a local activity, say) must error, not
+  # silently do nothing.
+  def validate_local_activity_opts(opts) do
+    with {:ok, opts} <- keyword_options(opts, "local activity options") do
+      case Keyword.keys(opts) -- @local_activity_opts do
+        [] ->
+          :ok
+
+        unknown ->
+          validation_error(
+            "unknown local activity option(s): #{inspect(unknown)} — " <>
+              "allowed: #{inspect(@local_activity_opts)}"
+          )
+      end
+    end
+  end
+
+  @doc false
+  def __activity_opts__, do: @activity_opts
+
+  @doc false
+  def __timeout_aliases__, do: @timeout_aliases
+
+  @doc false
+  def __local_activity_opts__, do: @local_activity_opts
 
   def continue_as_new(default_workflow_type, %Op.ContinueAsNew{input: input, opts: opts}) do
     with {:ok, opts} <- keyword_options(opts, "continue_as_new! options"),
@@ -193,7 +237,7 @@ defmodule Temporalex.Core.CommandBuilder do
   end
 
   defp activity_timeout_ms(opts) do
-    timeout = find_option(opts, [:timeout, :start_to_close_timeout]) || 60_000
+    timeout = find_option(opts, @timeout_aliases) || 60_000
     non_negative_millis(timeout, "activity timeout")
   end
 

@@ -59,10 +59,19 @@ end
 
 Each `defactivity` generates:
 
-1. A dispatch function with the declared name, for workflow code.
-2. A bang dispatch function named `<activity_name>!/N`, for workflow code that should unwrap success and raise failures or cancellation.
-3. An implementation function named `__<activity_name>__/N`, for server-side activity execution.
+1. A dispatch function with the declared name, for workflow code. Returns
+   `{:ok, value}` or `{:error, error}` (a cancelled activity is
+   `{:error, %Temporalex.Failure.CancelledError{}}`). Takes optional trailing
+   keyword options that override the declaration for one call
+   (`charge(amount, timeout: 10_000)`); unknown options raise.
+2. A bang dispatch function named `<activity_name>!` (same arities as the dispatch function, including the trailing options), for workflow code that should unwrap success and raise failures or cancellation.
+3. An implementation function named `__<activity_name>__/N`, for server-side activity execution. Unit-test it via `Temporalex.Testing.run_activity/4` rather than calling it by its generated name.
 4. Module metadata through `__temporal_activities__/0`.
+
+Options on `use Temporalex.Activity` are module-wide defaults; per-activity
+options override them key by key. `name:` on `defactivity` sets the wire
+type verbatim. `local: true` narrows the allowed options to what local
+activities can honour (no `heartbeat_timeout:`, no `task_queue:`).
 
 The dispatch function reads `:__temporal_context__` and calls the executor:
 
@@ -74,7 +83,8 @@ If no workflow context exists, the dispatch function raises with a clear error e
 
 ## Activity Type Strings
 
-Activity type strings are derived from module and function name:
+Activity type strings are derived from module and function name (unless
+`name:` on `defactivity` pins the wire type verbatim):
 
 ```elixir
 "MyApp.Activities.Payment.charge"

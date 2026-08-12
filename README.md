@@ -86,9 +86,12 @@ rationale: `docs/rfcs/0002-client-surface.md`.
 
 ```elixir
 defmodule MyApp.Activities.Payment do
-  use Temporalex.Activity
+  # options on `use` are module-wide defaults; per-activity options override
+  use Temporalex.Activity, start_to_close_timeout: 30_000
 
-  defactivity charge(amount), start_to_close_timeout: 30_000 do
+  # name: pins the wire type, so renaming the module can't strand
+  # in-flight workflows
+  defactivity charge(amount), name: "payment.charge" do
     {:ok, "charge-#{amount}"}
   end
 
@@ -99,6 +102,20 @@ defmodule MyApp.Activities.Payment do
     {:ok, "#{prefix}-#{System.unique_integer([:positive])}"}
   end
 end
+```
+
+Workflow code calls `Payment.charge!(amount)` — policy lives at the
+definition, the call site names only data. One-off overrides are keyword
+options, validated against what the backend honours:
+
+```elixir
+Payment.charge!(amount, timeout: 10_000)
+```
+
+Unit-test the implementation directly — no Temporal anywhere:
+
+```elixir
+assert {:ok, receipt} = Temporalex.Testing.run_activity(Payment, :charge, [100])
 ```
 
 ## Structured errors
