@@ -157,6 +157,14 @@ defmodule Temporalex.ActivitySurfaceTest do
       assert Exception.message(error) =~ "two spellings of one knob"
     end
 
+    test "both spellings on use defaults refuse to compile" do
+      assert_raise ArgumentError, ~r/two spellings of one knob/, fn ->
+        defmodule DoubleDefaults do
+          use Temporalex.Activity, timeout: 9_000, start_to_close_timeout: 1_000
+        end
+      end
+    end
+
     test "both spellings on one defactivity refuse to compile" do
       assert_raise ArgumentError, ~r/two spellings of one knob/, fn ->
         defmodule DoubleSpelled do
@@ -251,6 +259,20 @@ defmodule Temporalex.ActivitySurfaceTest do
 
       assert_raise RuntimeError, ~r/must return/, fn ->
         Temporalex.Testing.run_activity!(Failing, :odd, [1])
+      end
+    end
+
+    test "run_activity! raises with the reason for non-exception errors" do
+      defmodule PlainError do
+        use Temporalex.Activity
+
+        defactivity nope(reason), start_to_close_timeout: 1_000 do
+          {:error, reason}
+        end
+      end
+
+      assert_raise RuntimeError, ~r/:gateway_down/, fn ->
+        Temporalex.Testing.run_activity!(PlainError, :nope, [:gateway_down])
       end
     end
 
@@ -406,6 +428,8 @@ defmodule Temporalex.ActivitySurfaceTest do
 
       assert {:ok, {:error, %Temporalex.Failure.CancelledError{details: [{:shard_rebalance, 4}]}}} =
                completed_result(run)
+
+      Temporalex.Testing.assert_replay(run)
     end
 
     defp completed_result(run) do
