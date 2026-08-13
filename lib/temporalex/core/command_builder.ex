@@ -58,11 +58,15 @@ defmodule Temporalex.Core.CommandBuilder do
          {:ok, activity_id} <- activity_id_from_opts(opts, seq),
          {:ok, task_queue} <- optional_string_option(opts, :task_queue, "activity task_queue"),
          {:ok, timeout_ms} <- activity_timeout_ms(opts),
+         # ScheduleToClose caps TOTAL time across all retry attempts. Defaulting
+         # it (as this once did, to start_to_close) makes the whole-order budget
+         # equal one attempt's budget, so a timed-out attempt can never retry.
+         # Unset means Temporal's own convention: capped by the workflow run
+         # timeout only.
          {:ok, schedule_to_close_timeout_ms} <-
-           duration_from_opts(
+           optional_duration_from_opts(
              opts,
              [:schedule_to_close_timeout],
-             timeout_ms,
              "activity schedule_to_close_timeout"
            ),
          {:ok, schedule_to_start_timeout_ms} <-
@@ -239,13 +243,6 @@ defmodule Temporalex.Core.CommandBuilder do
   defp activity_timeout_ms(opts) do
     timeout = find_option(opts, @timeout_aliases) || 60_000
     non_negative_millis(timeout, "activity timeout")
-  end
-
-  defp duration_from_opts(opts, keys, default_ms, option_name) do
-    case find_option(opts, keys) do
-      nil -> non_negative_millis(default_ms, option_name)
-      ms -> non_negative_millis(ms, option_name)
-    end
   end
 
   defp optional_duration_from_opts(opts, keys, option_name) do

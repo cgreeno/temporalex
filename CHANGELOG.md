@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`schedule_to_close_timeout` no longer defaults to `start_to_close_timeout`**
+  (#22). ScheduleToClose caps total time across all retry attempts, so the old
+  default made the whole-order budget equal one attempt's budget — any attempt
+  that timed out consumed the entire cap and the server reported the failure
+  non-retryable, silently disabling timeout-driven retries. Fast-failing raises
+  retried fine, which hid the bug until the first genuinely hung call. Now
+  unset unless the caller passes `schedule_to_close_timeout:` (Temporal's own
+  convention: capped by the workflow run timeout). Applies to regular and
+  local activities.
+  **Replay note (regular activities only):** the scheduled-activity command
+  identity includes this field, so in-flight runs started under the old
+  implicit default will fail replay on workers running this version. Drain
+  in-flight runs across the upgrade, or pin the old behaviour explicitly
+  with `schedule_to_close_timeout:` equal to your `start_to_close_timeout:`.
+  Local activities are unaffected: their command identity carries the raw
+  options, which this fix does not touch.
+
 ### The activity surface (RFC 0003)
 
 - **Module-level option defaults**: `use Temporalex.Activity, start_to_close_timeout: 30_000`

@@ -139,7 +139,7 @@ Common commands:
   task_queue: String.t() | nil,
   input: [term()],
   headers: map(),
-  schedule_to_close_timeout_ms: non_neg_integer(),
+  schedule_to_close_timeout_ms: non_neg_integer() | nil,
   schedule_to_start_timeout_ms: non_neg_integer() | nil,
   start_to_close_timeout_ms: non_neg_integer(),
   heartbeat_timeout_ms: non_neg_integer() | nil,

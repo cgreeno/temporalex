@@ -16,7 +16,12 @@ defmodule Temporalex.LocalActivityIntegrationTest do
     use Temporalex.Activity
 
     @doc "Local activity: doubles its input in-process on the worker."
-    defactivity double_local(value), local: true, start_to_close_timeout: 5_000 do
+    # The explicit schedule_to_close covers the local codec's explicit-value
+    # branch (#22); the other local activities exercise the unset default.
+    defactivity double_local(value),
+      local: true,
+      start_to_close_timeout: 5_000,
+      schedule_to_close_timeout: 9_000 do
       {:ok, value * 2}
     end
 

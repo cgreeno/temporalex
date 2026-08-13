@@ -1129,7 +1129,7 @@ defmodule Temporalex.CoreExecutorTest do
           activity_id: "activity-0",
           type: "#{inspect(Activities)}.echo",
           input: [:value],
-          schedule_to_close_timeout_ms: 1_000,
+          schedule_to_close_timeout_ms: nil,
           start_to_close_timeout_ms: 1_000
         }
       ]
@@ -1693,7 +1693,7 @@ defmodule Temporalex.CoreExecutorTest do
           activity_id: "activity-0",
           type: "#{inspect(Activities)}.echo",
           input: [:b1],
-          schedule_to_close_timeout_ms: 1_000,
+          schedule_to_close_timeout_ms: nil,
           start_to_close_timeout_ms: 1_000
         }
       ]
