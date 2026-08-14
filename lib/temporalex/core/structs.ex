@@ -220,7 +220,7 @@ defmodule Temporalex.Core.Command.ScheduleActivity do
     task_queue: nil,
     input: [],
     headers: %{},
-    schedule_to_close_timeout_ms: 60_000,
+    schedule_to_close_timeout_ms: nil,
     schedule_to_start_timeout_ms: nil,
     start_to_close_timeout_ms: 60_000,
     heartbeat_timeout_ms: nil,

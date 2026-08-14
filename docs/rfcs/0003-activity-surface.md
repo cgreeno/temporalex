@@ -213,7 +213,11 @@ retry), and other Temporal SDKs refuse to default it at all.
 Decision: **left as-is for now**, revisit before 1.0. The options on the
 table when it reopens: require a timeout at definition (compile-time raise,
 module defaults making it one line per module), or keep a default and make
-it loud. Recording the disagreement so it isn't re-litigated from scratch:
+it loud. **Coupling to note when reopening:** since #22,
+`schedule_to_close_timeout` is unset by default, so this 60s fallback is
+the only thing guaranteeing Temporal's "at least one of
+schedule_to_close / start_to_close" requirement — removing the default
+must add that validation in the same change. Recording the disagreement so it isn't re-litigated from scratch:
 a shorter default (e.g. 2s) was considered and rejected — it converts
 "forgot an option" into "duplicate side effects under production load,"
 which is a worse failure than refusing to compile.
