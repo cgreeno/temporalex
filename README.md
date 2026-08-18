@@ -149,6 +149,24 @@ failures arrive unwrapped, as the raised error itself.
 activity under its retry policy. `type:` is the string that a retry policy's
 `non_retryable_error_types` matches on.
 
+To match on the type without reaching through the wrapper by hand — and
+without caring which of the two shapes arrived — use the guard, which works
+in `case`, `with`, and function heads:
+
+```elixir
+import Temporalex.Failure, only: [is_failure: 2]
+
+case Activities.charge(amount) do
+  {:ok, charge}                                    -> ...
+  {:error, e} when is_failure(e, "AmountTooLarge") -> ...  # e.retry_state still available
+end
+```
+
+`Temporalex.Failure.type/1`, `retry_state/1` and `activity_type/1` read the
+same fields for logging paths. An unstructured `raise` in an activity has no
+`type` to match — those arrive as the exception itself, so match them by
+struct.
+
 ## Define a workflow
 
 ```elixir

@@ -11,6 +11,24 @@
   additive: activity dispatch still returns the
   `%Temporalex.Failure.ActivityError{}` wrapper with the raised error as its
   `cause`.
+- **`Temporalex.Failure.is_failure/2`** — a guard for matching a failure by
+  its Temporal type, in `case`, `with`, and function heads:
+
+  ```elixir
+  import Temporalex.Failure, only: [is_failure: 2]
+
+  {:error, e} when is_failure(e, "AmountTooLarge") -> refund(e)
+  ```
+
+  It checks both depths, because a remote activity's failure arrives wrapped
+  in `%ActivityError{}` while a local activity's arrives as the business
+  error itself. The error stays whole, so `e.retry_state` and
+  `e.activity_type` remain reachable. Shapes with no type to compare — a
+  `nil` cause, an unstructured `raise`, a non-map reason — do not match
+  rather than raising.
+- **`Temporalex.Failure.type/1`, `cause/1`, `retry_state/1` and
+  `activity_type/1`** — nil-safe accessors for logging and telemetry paths
+  where patterns do not reach.
 
 ### Documented
 

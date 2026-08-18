@@ -90,6 +90,62 @@ defmodule Temporalex.Failure do
   alias Temporalex.Failure.CancelledError
 
   @doc """
+  True when `error` is a failure of `type` — at either depth.
+
+  A guard, so it works in `case`, `with`, and function heads:
+
+      import Temporalex.Failure, only: [is_failure: 2]
+
+      case Payments.charge(amount) do
+        {:ok, charge}                                    -> ship(charge)
+        {:error, e} when is_failure(e, "AmountTooLarge") -> refund(e)
+        {:error, e}                                      -> escalate(e)
+      end
+
+  Both depths are checked because failures arrive in two shapes: a remote
+  activity's failure is wrapped in a `Temporalex.Failure.ActivityError` whose
+  `cause` carries the `type`, while a local activity's arrives as the
+  business error itself. `e` stays whole either way, so the wrapper's
+  diagnostics (`retry_state`, `activity_type`) remain reachable.
+
+  Shapes with no type to compare — a `nil` cause, an unstructured `raise`
+  whose cause is a bare exception, a non-map reason — simply do not match,
+  rather than raising.
+  """
+  defguard is_failure(error, type)
+           when (is_map(error) and is_map_key(error, :type) and
+                   :erlang.map_get(:type, error) == type) or
+                  (is_map(error) and is_map_key(error, :cause) and
+                     is_map(:erlang.map_get(:cause, error)) and
+                     is_map_key(:erlang.map_get(:cause, error), :type) and
+                     :erlang.map_get(:type, :erlang.map_get(:cause, error)) == type)
+
+  @doc """
+  The failure's Temporal type string, at either depth, or `nil`.
+
+  For the places patterns do not reach — logging, telemetry, error
+  reporting — so call sites stop hand-writing `error.cause.type`.
+  """
+  def type(%{type: type}), do: type
+  def type(%{cause: %{type: type}}), do: type
+  def type(_error), do: nil
+
+  @doc "The wrapped cause, or `nil`."
+  def cause(%{cause: cause}), do: cause
+  def cause(_error), do: nil
+
+  @doc """
+  How a failed activity ended — `:non_retryable_failure`,
+  `:maximum_attempts_reached`, … — or `nil` when the failure carries none.
+  """
+  def retry_state(%{retry_state: retry_state}), do: retry_state
+  def retry_state(_error), do: nil
+
+  @doc "Which activity failed, or `nil`."
+  def activity_type(%{activity_type: activity_type}), do: activity_type
+  def activity_type(_error), do: nil
+
+  @doc """
   Build an application failure.
 
   `:type` is the stable string matched by Temporal retry policies.
