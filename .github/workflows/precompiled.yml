@@ -83,7 +83,14 @@ jobs:
           project-version: ${{ env.PROJECT_VERSION }}
           target: ${{ matrix.target }}
           nif-version: ${{ matrix.nif }}
-          use-cross: ${{ matrix.use-cross || false }}
+          # Passed raw, NOT defaulted with `|| false`: composite-action inputs
+          # are strings, and the string "false" is truthy in the action's
+          # `if:` — an explicit false made mac jobs install the Linux cross
+          # binary. Unset yields "", which is falsy. Ask me how I know.
+          use-cross: ${{ matrix.use-cross }}
+          # v0.2.5 images are focal-based; v0.2.4's xenial images ship a
+          # proto2-only protoc from 2015 that cannot parse sdk-core's protos.
+          cross-version: v0.2.5
           project-dir: "native/temporalex_nif"
 
       - name: Upload artifact
