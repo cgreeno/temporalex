@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`fetch_workflow_history/2,3` returns parsed history** (#27, breaking):
+  `{:ok, %Temporalex.History{}}` with every event's id, server timestamp,
+  kind (`:workflow_execution_started`, `:activity_task_scheduled`, …) and
+  attributes. `raw: true` returns the encoded protobuf replay-fixture form
+  (the old shape). The docstring's reference to a nonexistent
+  `Temporalex.Replay` is gone (#35).
+- **`Temporalex.Replay`** (#28): replay a recorded history against current
+  workflow code — the pre-deploy compatibility check. `replay(history,
+  workflows: [...])` returns `:ok` or `{:error, {:nondeterminism, detail}}`;
+  `decode/1` reads `raw: true` fixture files for CI suites. Covers starts,
+  activities (parallel and failed included, **inputs compared** — input
+  drift is nondeterminism), timers, signals, cancellation,
+  and terminals; anything else refuses loudly
+  with `{:unsupported_event, type, id}` — a replay that skips part of the
+  record proves nothing. Concretely: histories containing **patch markers,
+  continue-as-new, child workflows, local activities, or updates** are
+  declined outright for now (patches first on the roadmap) — a refusal,
+  not a false verdict. Built on the deterministic executor's own
+  divergence detection (not the vacuous core replay path abandoned in May).
+- **`Temporalex.History.stuck_reason/1`** (#29): the SDK-native answer to
+  "why is this workflow stuck" — reads the latest failed workflow task's
+  failure message, cause, and event id out of history, no CLI or Web UI
+  required. Plus `History.events/2` and `History.last/2` filters.
+
+### Fixed
+
+- **Failure messages now speak.** A workflow-task failure recorded from an
+  exception carries the exception's own message, and non-exception reasons
+  are inspected into the message rather than discarded — previously both
+  collapsed to the string "Temporalex activation failure", which is what an
+  operator saw in the UI and in `stuck_reason/1`.
+
 ## 0.5.1 — 2026-08-18
 
 ### Changed

@@ -291,7 +291,10 @@ defmodule Temporalex.TemporalClientSemanticsTest do
               cause: %Temporalex.Failure.ApplicationError{} = failure
             }} = Client.update_workflow(handle, "add", [-1], timeout: 15_000)
 
-    assert failure.message == "Temporalex update rejected"
+    # The rejection reason rides in the message since the failure-encoding
+    # fix (non-exception reasons are inspected in, not discarded).
+    assert failure.message =~ "Temporalex update rejected"
+    assert failure.message =~ "not_accepting_update"
     assert failure.details == [not_accepting_update: "add"]
 
     assert :ok = Client.signal_workflow(handle, "finish", [], timeout: 10_000)

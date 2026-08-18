@@ -1,11 +1,9 @@
 defmodule Temporalex.FetchHistoryIntegrationTest do
   @moduledoc """
-  Coverage for `Temporalex.Client.fetch_workflow_history/2,3`.
-
-  History is returned as encoded protobuf rather than JSON: `.temporal.api.history`
-  is not in temporalio-common's pbjson list, so `History`'s derived serde impl is
-  not proto-JSON compatible. Bytes are what a replay worker consumes and what to
-  check in as a replay fixture.
+  Coverage for `Temporalex.Client.fetch_workflow_history/2,3`: parsed
+  `%Temporalex.History{}` by default (#27), `raw: true` for the encoded
+  protobuf replay-fixture form, and `stuck_reason/1` reading a stuck
+  workflow's failed-task reason out of live history (#29).
 
   Connects to a Temporal dev server at 127.0.0.1:7233. Skipped by default; run
   with `mix test --include external`.
@@ -29,6 +27,18 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
     def run(n) do
       {:ok, doubled} = Activities.double(n)
       {:ok, doubled}
+    end
+  end
+
+  defmodule TimerSignalWorkflow do
+    use Temporalex.Workflow
+
+    alias Temporalex.Workflow.API
+
+    def run(n) do
+      :ok = API.sleep(50)
+      {:ok, args} = API.wait_for_signal("proceed")
+      {:ok, {n, args}}
     end
   end
 
@@ -68,7 +78,7 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
         name: worker,
         client: client,
         task_queue: task_queue,
-        workflows: [Workflow, LongerWorkflow],
+        workflows: [Workflow, LongerWorkflow, Stuck, TimerSignalWorkflow],
         activities: [Activities]
       )
 
@@ -84,12 +94,38 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
     {:ok, client: client}
   end
 
-  test "returns protobuf bytes for a completed workflow", %{client: client} do
+  test "returns parsed events for a completed workflow", %{client: client} do
     handle = run_workflow(client)
 
-    assert {:ok, bytes} = Temporalex.Client.fetch_workflow_history(handle, timeout: 15_000)
-    assert is_binary(bytes)
+    assert {:ok, %Temporalex.History{} = history} =
+             Temporalex.Client.fetch_workflow_history(handle, timeout: 15_000)
 
+    assert history.workflow_id == handle.workflow_id
+
+    types = Enum.map(history.events, & &1.type)
+    assert List.first(types) == :workflow_execution_started
+    assert List.last(types) == :workflow_execution_completed
+    assert :activity_task_scheduled in types
+    assert :activity_task_completed in types
+
+    # Ordered, timestamped, attributed.
+    ids = Enum.map(history.events, & &1.id)
+    assert ids == Enum.sort(ids)
+    assert %DateTime{} = List.first(history.events).time
+
+    started = Temporalex.History.last(history, :workflow_execution_started)
+    assert started.attributes.workflow_type =~ "Workflow"
+
+    assert Temporalex.History.stuck_reason(history) == nil
+  end
+
+  test "raw: true returns the encoded protobuf replay-fixture form", %{client: client} do
+    handle = run_workflow(client)
+
+    assert {:ok, bytes} =
+             Temporalex.Client.fetch_workflow_history(handle, raw: true, timeout: 15_000)
+
+    assert is_binary(bytes)
     # Protobuf keeps strings uncompressed, so a real History carries the
     # workflow type and activity type verbatim.
     assert bytes =~ "Workflow"
@@ -100,17 +136,16 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
   test "works by workflow id without a handle", %{client: client} do
     handle = run_workflow(client)
 
-    assert {:ok, bytes} =
+    assert {:ok, %Temporalex.History{events: events}} =
              Temporalex.Client.fetch_workflow_history(client, handle.workflow_id, timeout: 15_000)
 
-    assert is_binary(bytes) and byte_size(bytes) > 200
+    assert length(events) > 5
   end
 
-  # Smoke test for completeness: more events must yield more bytes, so a fetch
-  # that returned only the tail (or a fixed prefix) fails here. It does NOT
-  # exercise pagination — that needs >1000 events. The real assertion for this
-  # NIF is the fetch -> replay round trip, once the replay worker exists.
-  test "returns more bytes for a history with more events", %{client: client} do
+  # Smoke test for completeness: more activities must yield more events, so a
+  # fetch that returned only the tail (or a fixed prefix) fails here. It does
+  # NOT exercise pagination — that needs >1000 events.
+  test "a history with more activities has more events", %{client: client} do
     {:ok, one_activity} =
       Temporalex.Client.fetch_workflow_history(run_workflow(client), timeout: 15_000)
 
@@ -125,7 +160,89 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
     {:ok, three_activities} =
       Temporalex.Client.fetch_workflow_history(longer_handle, timeout: 15_000)
 
-    assert byte_size(three_activities) > byte_size(one_activity)
+    assert length(Temporalex.History.events(three_activities, :activity_task_completed)) == 3
+    assert length(Temporalex.History.events(one_activity, :activity_task_completed)) == 1
+    assert length(three_activities.events) > length(one_activity.events)
+  end
+
+  defmodule Stuck do
+    use Temporalex.Workflow
+
+    # Blocks the executor thread past its did-not-yield bound (5s), which
+    # fails the ACTIVATION — a workflow-task failure the server retries —
+    # rather than failing the workflow. The workflow sits Running, stuck,
+    # which is exactly the state stuck_reason/1 exists to explain.
+    def run(_input) do
+      Process.sleep(30_000)
+      {:ok, :never}
+    end
+  end
+
+  @tag timeout: 90_000
+  test "stuck_reason reads a stuck workflow's failed-task reason from live history",
+       %{client: client} do
+    {:ok, handle} =
+      Temporalex.Client.start_workflow(client, Stuck, nil,
+        workflow_id: "fetch-history-stuck-#{System.unique_integer([:positive])}",
+        timeout: 10_000
+      )
+
+    # Wait out the first activation abort (5s) plus server round trips, then
+    # poll history until the WorkflowTaskFailed event lands.
+    reason =
+      Enum.reduce_while(1..30, nil, fn _, _ ->
+        Process.sleep(1_000)
+
+        with {:ok, history} <- Temporalex.Client.fetch_workflow_history(handle, timeout: 15_000),
+             %{} = reason <- Temporalex.History.stuck_reason(history) do
+          {:halt, reason}
+        else
+          _ -> {:cont, nil}
+        end
+      end)
+
+    assert %{message: message, event_id: event_id} = reason,
+           "no workflow_task_failed event appeared — the stuck repro never failed a task"
+
+    assert is_integer(event_id)
+
+    # Two executor writers race to set the failure reason (the did-not-yield
+    # watchdog vs the killed thread's exit during teardown) — either way the
+    # recorded failure must carry a usable message and the right cause.
+    assert is_binary(message) and message != ""
+    assert reason.cause == :WORKFLOW_TASK_FAILED_CAUSE_WORKFLOW_WORKER_UNHANDLED_FAILURE
+
+    # Stop the retry loop; the workflow is unrecoverable by design.
+    Temporalex.Client.terminate_workflow(handle, reason: "stuck repro done")
+  end
+
+  test "a fetched history replays clean against the same code — the round trip",
+       %{client: client} do
+    handle = run_workflow(client)
+
+    {:ok, history} = Temporalex.Client.fetch_workflow_history(handle, timeout: 15_000)
+    assert :ok = Temporalex.Replay.replay(history, workflows: [Workflow])
+
+    # And the fixture path: raw bytes -> decode -> replay.
+    {:ok, bytes} = Temporalex.Client.fetch_workflow_history(handle, raw: true, timeout: 15_000)
+    {:ok, decoded} = Temporalex.Replay.decode(bytes)
+    assert :ok = Temporalex.Replay.replay(decoded, workflows: [Workflow])
+  end
+
+  test "a timer+signal history replays clean — real durations and signal payloads",
+       %{client: client} do
+    {:ok, handle} =
+      Temporalex.Client.start_workflow(client, TimerSignalWorkflow, 7,
+        workflow_id: "fetch-history-ts-#{System.unique_integer([:positive])}",
+        timeout: 10_000
+      )
+
+    Process.sleep(300)
+    :ok = Temporalex.Client.signal_workflow(handle, "proceed", [:go], timeout: 10_000)
+    assert {:ok, {7, [:go]}} = Temporalex.Client.get_result(handle, timeout: 15_000)
+
+    {:ok, history} = Temporalex.Client.fetch_workflow_history(handle, timeout: 15_000)
+    assert :ok = Temporalex.Replay.replay(history, workflows: [TimerSignalWorkflow])
   end
 
   test "unknown workflow id errors rather than returning empty bytes", %{client: client} do

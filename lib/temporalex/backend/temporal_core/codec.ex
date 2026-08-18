@@ -96,6 +96,44 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
     use_ramping_version: :CONTINUE_AS_NEW_VERSIONING_BEHAVIOR_USE_RAMPING_VERSION
   }
 
+  @history :"temporal.api.history.v1.History"
+
+  # The NIF returns a workflow's history as an encoded
+  # temporal.api.history.v1.History. Decoded here — behind the backend
+  # boundary — into plain event maps; the Client wraps them in the public
+  # Temporalex.History structs. Attribute payload fields stay encoded:
+  # decoding them requires codec context and no current consumer needs it.
+  def history_from_bytes(bytes) when is_binary(bytes) do
+    with {:ok, proto} <- decode(@history, bytes, defaults: true) do
+      {:ok, Enum.map(Map.get(proto, :events, []), &history_event_from_proto/1)}
+    end
+  end
+
+  defp history_event_from_proto(proto) do
+    {type, attributes} =
+      case Map.get(proto, :attributes) do
+        {key, value} -> {event_type_from_attributes_key(key), value}
+        _ -> {:unknown, nil}
+      end
+
+    %{
+      id: Map.get(proto, :event_id),
+      time: Map.get(proto, :event_time),
+      type: type,
+      attributes: attributes
+    }
+  end
+
+  # :workflow_task_failed_event_attributes -> :workflow_task_failed. The
+  # oneof key is the authoritative kind; the enum field duplicates it in a
+  # SCREAMING form nobody wants to pattern-match.
+  defp event_type_from_attributes_key(key) do
+    key
+    |> Atom.to_string()
+    |> String.replace_suffix("_event_attributes", "")
+    |> String.to_atom()
+  end
+
   def workflow_activation_from_bytes(bytes) when is_binary(bytes) do
     with {:ok, proto} <- decode(@workflow_activation, bytes, defaults: true) do
       workflow_activation_from_proto(proto)
@@ -1105,11 +1143,15 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
   end
 
   defp failure_to_proto(term, default_message) do
+    # Exceptions speak for themselves: an activation failure recorded as
+    # "Temporalex activation failure" instead of the exception's own message
+    # is a diagnosability hole — that string is what stuck_reason/1 and the
+    # Temporal UI show an operator.
     message =
-      if is_binary(term) and term != "" do
-        term
-      else
-        default_message
+      cond do
+        is_binary(term) and term != "" -> term
+        is_exception(term) -> Exception.message(term)
+        true -> "#{default_message}: #{inspect(term, limit: 5, printable_limit: 200)}"
       end
 
     %{
