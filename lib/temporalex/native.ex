@@ -1,12 +1,40 @@
 defmodule Temporalex.Native do
   @moduledoc false
 
+  # Consumers download a precompiled NIF from the GitHub release matching
+  # this version — no Rust toolchain or protoc needed. Building from source
+  # instead:
+  #   * in this repo, always (Mix.env() is :dev/:test here and :prod when
+  #     compiled as a dependency), or
+  #   * anywhere, with TEMPORALEX_BUILD=1.
   # crate/path defaults live HERE (not only in config/config.exs) because a
-  # dependency's config files are never evaluated by consumers — without
-  # these options the Hex package fails to compile with
-  # "Could not cd to native/temporalex". App-env config still overrides
-  # (config/config.exs sets :mode per env for this repo's own builds).
-  use Rustler, otp_app: :temporalex, crate: :temporalex_nif, path: "native/temporalex_nif"
+  # dependency's config files are never evaluated by consumers.
+  # force_build: is only PASSED when true — an always-present key (even
+  # false) would defeat rustler_precompiled's Keyword.put_new fallback to
+  # `config :rustler_precompiled, force_build: [temporalex: true]`, which is
+  # the remedy its own download-failure message tells consumers to use.
+  @force_build System.get_env("TEMPORALEX_BUILD") in ["1", "true"] or
+                 Mix.env() in [:dev, :test]
+
+  @precompiled_opts [
+                      otp_app: :temporalex,
+                      crate: "temporalex_nif",
+                      path: "native/temporalex_nif",
+                      base_url:
+                        "https://github.com/cgreeno/temporalex/releases/download/v#{Mix.Project.config()[:version]}",
+                      version: Mix.Project.config()[:version],
+                      nif_versions: ["2.15"],
+                      targets: ~w(
+                        aarch64-apple-darwin
+                        x86_64-apple-darwin
+                        aarch64-unknown-linux-gnu
+                        x86_64-unknown-linux-gnu
+                        aarch64-unknown-linux-musl
+                        x86_64-unknown-linux-musl
+                      )
+                    ] ++ if(@force_build, do: [force_build: true], else: [])
+
+  use RustlerPrecompiled, @precompiled_opts
 
   def create_runtime(_telemetry_opts), do: :erlang.nif_error(:nif_not_loaded)
 
