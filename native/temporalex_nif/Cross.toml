@@ -2,16 +2,37 @@
 [build.env]
 passthrough = ["RUSTFLAGS"]
 
-# Cross-compilation containers need protoc: temporalio-sdk-core generates
-# its protobuf bindings at build time.
+# temporalio-sdk-core generates its protobuf bindings at build time, and the
+# versioned cross images are deliberately old (16.04-era, for broad glibc
+# compatibility of the built artifact) — their apt protoc is 2.6, which is
+# proto2-only. So a pinned modern protoc binary is downloaded instead. It
+# always targets linux-x86_64: pre-build runs inside the image, and every
+# cross image executes on the x86_64 build host regardless of the Rust
+# target being cross-compiled.
 [target.aarch64-unknown-linux-gnu]
-pre-build = ["apt-get update && apt-get install -y protobuf-compiler"]
+pre-build = [
+  "apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates",
+  "curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip -o /tmp/protoc.zip",
+  "unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' && chmod +x /usr/local/bin/protoc",
+]
 
 [target.x86_64-unknown-linux-gnu]
-pre-build = ["apt-get update && apt-get install -y protobuf-compiler"]
+pre-build = [
+  "apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates",
+  "curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip -o /tmp/protoc.zip",
+  "unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' && chmod +x /usr/local/bin/protoc",
+]
 
 [target.aarch64-unknown-linux-musl]
-pre-build = ["apt-get update && apt-get install -y protobuf-compiler"]
+pre-build = [
+  "apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates",
+  "curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip -o /tmp/protoc.zip",
+  "unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' && chmod +x /usr/local/bin/protoc",
+]
 
 [target.x86_64-unknown-linux-musl]
-pre-build = ["apt-get update && apt-get install -y protobuf-compiler"]
+pre-build = [
+  "apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates",
+  "curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip -o /tmp/protoc.zip",
+  "unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' && chmod +x /usr/local/bin/protoc",
+]
