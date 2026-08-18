@@ -1,0 +1,102 @@
+# Precompiled NIF build matrix.
+#
+# Three ways this runs:
+#   * pull_request touching native code or this file — validates every
+#     target still compiles before anything merges (artifacts discarded).
+#   * workflow_call — the Hex release workflow builds the real artifacts
+#     through this same matrix, so the release can never use steps that
+#     were not PR-validated.
+#   * workflow_dispatch — manual smoke run from the Actions tab.
+#
+# Naming and packaging follow rustler_precompiled's conventions via
+# philss/rustler-precompiled-action; RustlerPrecompiled in
+# Temporalex.Native must list exactly these targets and NIF versions.
+
+name: Precompiled NIFs
+
+on:
+  pull_request:
+    paths:
+      - "native/**"
+      - ".github/workflows/precompiled.yml"
+  workflow_call: {}
+  workflow_dispatch: {}
+
+env:
+  CRATE: temporalex_nif
+
+jobs:
+  build:
+    name: ${{ matrix.target }} (NIF ${{ matrix.nif }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        nif: ["2.15"]
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+        # Merged per-target (keyed on the base dimension). Musl cannot link a
+        # cdylib against a static CRT, hence the RUSTFLAGS.
+        include:
+          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-14 }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, use-cross: true }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04, use-cross: true }
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            use-cross: true
+            rustflags: "-C target-feature=-crt-static"
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04
+            use-cross: true
+            rustflags: "-C target-feature=-crt-static"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract project version
+        shell: bash
+        run: |
+          PROJECT_VERSION="$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs)"
+          test -n "$PROJECT_VERSION" || { echo "::error::could not extract @version from mix.exs"; exit 1; }
+          echo "PROJECT_VERSION=$PROJECT_VERSION" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # macOS builds run on the host, so protoc must be on the host; the
+      # cross containers get theirs from native/temporalex_nif/Cross.toml.
+      - name: Install protoc (macOS host builds)
+        if: startsWith(matrix.os, 'macos')
+        run: brew install protobuf
+
+      - name: Build the NIF
+        id: build
+        uses: philss/rustler-precompiled-action@v1.1.4
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags || '' }}
+        with:
+          project-name: ${{ env.CRATE }}
+          project-version: ${{ env.PROJECT_VERSION }}
+          target: ${{ matrix.target }}
+          nif-version: ${{ matrix.nif }}
+          # Passed raw, NOT defaulted with `|| false`: composite-action inputs
+          # are strings, and the string "false" is truthy in the action's
+          # `if:` — an explicit false made mac jobs install the Linux cross
+          # binary. Unset yields "", which is falsy. Ask me how I know.
+          use-cross: ${{ matrix.use-cross }}
+          # v0.2.5 images are focal-based; v0.2.4's xenial images ship a
+          # proto2-only protoc from 2015 that cannot parse sdk-core's protos.
+          cross-version: v0.2.5
+          project-dir: "native/temporalex_nif"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.file-name }}
+          path: ${{ steps.build.outputs.file-path }}
