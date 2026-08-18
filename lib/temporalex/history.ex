@@ -23,7 +23,10 @@ defmodule Temporalex.History do
   Event `attributes` are the transport-shaped maps of the corresponding
   Temporal event-attributes message (payload fields stay encoded); the
   `type` is the event's kind as a readable atom, e.g.
-  `:activity_task_scheduled`.
+  `:activity_task_scheduled`. Treat `attributes` as an escape hatch, not a
+  contract: field names follow Temporal's protos and may shift with them —
+  the helpers on this module (`events/2`, `last/2`, `stuck_reason/1`) are
+  the supported surface.
   """
 
   defstruct [:workflow_id, :run_id, events: []]

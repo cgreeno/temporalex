@@ -30,6 +30,18 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
     end
   end
 
+  defmodule TimerSignalWorkflow do
+    use Temporalex.Workflow
+
+    alias Temporalex.Workflow.API
+
+    def run(n) do
+      :ok = API.sleep(50)
+      {:ok, args} = API.wait_for_signal("proceed")
+      {:ok, {n, args}}
+    end
+  end
+
   # Same shape, more activities — so more history events. Exists only so the
   # completeness smoke test has two histories of different lengths to compare.
   defmodule LongerWorkflow do
@@ -66,7 +78,7 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
         name: worker,
         client: client,
         task_queue: task_queue,
-        workflows: [Workflow, LongerWorkflow, Stuck],
+        workflows: [Workflow, LongerWorkflow, Stuck, TimerSignalWorkflow],
         activities: [Activities]
       )
 
@@ -202,6 +214,35 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
 
     # Stop the retry loop; the workflow is unrecoverable by design.
     Temporalex.Client.terminate_workflow(handle, reason: "stuck repro done")
+  end
+
+  test "a fetched history replays clean against the same code — the round trip",
+       %{client: client} do
+    handle = run_workflow(client)
+
+    {:ok, history} = Temporalex.Client.fetch_workflow_history(handle, timeout: 15_000)
+    assert :ok = Temporalex.Replay.replay(history, workflows: [Workflow])
+
+    # And the fixture path: raw bytes -> decode -> replay.
+    {:ok, bytes} = Temporalex.Client.fetch_workflow_history(handle, raw: true, timeout: 15_000)
+    {:ok, decoded} = Temporalex.Replay.decode(bytes)
+    assert :ok = Temporalex.Replay.replay(decoded, workflows: [Workflow])
+  end
+
+  test "a timer+signal history replays clean — real durations and signal payloads",
+       %{client: client} do
+    {:ok, handle} =
+      Temporalex.Client.start_workflow(client, TimerSignalWorkflow, 7,
+        workflow_id: "fetch-history-ts-#{System.unique_integer([:positive])}",
+        timeout: 10_000
+      )
+
+    Process.sleep(300)
+    :ok = Temporalex.Client.signal_workflow(handle, "proceed", [:go], timeout: 10_000)
+    assert {:ok, {7, [:go]}} = Temporalex.Client.get_result(handle, timeout: 15_000)
+
+    {:ok, history} = Temporalex.Client.fetch_workflow_history(handle, timeout: 15_000)
+    assert :ok = Temporalex.Replay.replay(history, workflows: [TimerSignalWorkflow])
   end
 
   test "unknown workflow id errors rather than returning empty bytes", %{client: client} do

@@ -10,6 +10,16 @@
   attributes. `raw: true` returns the encoded protobuf replay-fixture form
   (the old shape). The docstring's reference to a nonexistent
   `Temporalex.Replay` is gone (#35).
+- **`Temporalex.Replay`** (#28): replay a recorded history against current
+  workflow code — the pre-deploy compatibility check. `replay(history,
+  workflows: [...])` returns `:ok` or `{:error, {:nondeterminism, detail}}`;
+  `decode/1` reads `raw: true` fixture files for CI suites. Covers starts,
+  activities (parallel and failed included, **inputs compared** — input
+  drift is nondeterminism), timers, signals, cancellation,
+  and terminals; anything else refuses loudly
+  with `{:unsupported_event, type, id}` — a replay that skips part of the
+  record proves nothing. Built on the deterministic executor's own
+  divergence detection (not the vacuous core replay path abandoned in May).
 - **`Temporalex.History.stuck_reason/1`** (#29): the SDK-native answer to
   "why is this workflow stuck" — reads the latest failed workflow task's
   failure message, cause, and event id out of history, no CLI or Web UI

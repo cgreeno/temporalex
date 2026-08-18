@@ -511,17 +511,14 @@ defmodule Temporalex.Client do
 
   # The backend hands back plain event maps (or raw bytes when raw: true);
   # the public shape is Temporalex.History.
-  defp wrap_history({:ok, events}, workflow_id, run_id, opts) when is_list(events) do
-    if Keyword.get(opts, :raw, false) do
-      {:ok, events}
-    else
-      {:ok,
-       %Temporalex.History{
-         workflow_id: workflow_id,
-         run_id: run_id,
-         events: Enum.map(events, &struct!(Temporalex.History.Event, &1))
-       }}
-    end
+  # raw: true results are bytes and fall through the passthrough clause.
+  defp wrap_history({:ok, events}, workflow_id, run_id, _opts) when is_list(events) do
+    {:ok,
+     %Temporalex.History{
+       workflow_id: workflow_id,
+       run_id: run_id,
+       events: Enum.map(events, &struct!(Temporalex.History.Event, &1))
+     }}
   end
 
   defp wrap_history(other, _workflow_id, _run_id, _opts), do: other
