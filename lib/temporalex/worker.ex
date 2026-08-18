@@ -10,10 +10,13 @@ defmodule Temporalex.Worker do
 
   Everything else is derived:
 
-    * `task_queue:` — read from the workflow modules' `use ..., queue:`
-      declarations, with a **boot error if they disagree** (the misrouting
-      bug caught at startup instead of as a silent hang). Stating it
-      explicitly still works and overrides.
+    * the task queue has exactly **one source**: derived from the workflow
+      modules' `use ..., queue:` declarations (boot error if they disagree).
+      Passing `task_queue:` alongside declaring modules is a boot error —
+      redundant or contradictory, either way the modules own it. Only a
+      worker whose modules declare nothing (activity-only workers, or
+      workflow modules without `queue:`) takes — and then **requires** —
+      an explicit `task_queue:`.
     * `client:` — defaults to the app's default client.
     * `name:` — derived from the queue, overridable.
   """
@@ -52,32 +55,72 @@ defmodule Temporalex.Worker do
   # Fills task_queue, client, and name from what the workflow modules already
   # declare. Public (hidden) so the derivation is unit-testable.
   #
-  # When neither the worker nor any workflow declares a queue, the worker
-  # falls through to the pre-RFC-0002 behaviour (inheriting the client's
-  # queue) — that fallback is scheduled to die in Phase 2, not here.
+  # The queue has exactly one source. The pre-RFC-0002 fallback (silently
+  # inheriting the client's queue) is dead: a worker with no queue from
+  # either source refuses to boot.
   def resolve!(opts) do
     task_queue =
-      Keyword.get(opts, :task_queue) || derive_queue!(Keyword.get(opts, :workflows, []))
+      agree_queue!(
+        Keyword.get(opts, :task_queue),
+        derive_queue!(Keyword.get(opts, :workflows, []))
+      )
+      |> validate_queue!()
 
     opts
-    |> put_present(:task_queue, task_queue)
+    |> Keyword.put(:task_queue, task_queue)
     |> Keyword.put_new(:client, Temporalex.default_client())
     |> put_name(task_queue)
   end
 
-  defp put_present(opts, _key, nil), do: opts
-  defp put_present(opts, key, value), do: Keyword.put(opts, key, value)
+  # Exactly one queue source. task_queue: alongside declaring modules is
+  # refused whether it agrees or not: an agreeing copy is drift waiting to
+  # happen, and a contradicting one is broken by construction — the worker
+  # would poll one queue while the modules' generated starts target the
+  # other, and those workflows would sit Running forever, unclaimed.
+  defp agree_queue!(nil, nil) do
+    raise ArgumentError,
+          "a worker needs a task queue: declare `use Temporalex.Workflow, " <>
+            "queue: ...` on the workflow modules, or pass task_queue: on a " <>
+            "worker whose modules declare none (activity-only workers). " <>
+            "Inheriting the client's queue is no longer supported"
+  end
 
+  defp agree_queue!(nil, declared), do: declared
+  defp agree_queue!(explicit, nil), do: explicit
+
+  defp agree_queue!(explicit, declared) do
+    consequence =
+      if explicit == declared do
+        "It is redundant today and drift waiting to happen — the modules " <>
+          "own the queue."
+      else
+        "The worker would poll #{inspect(explicit)} while the modules' " <>
+          "generated starts target #{inspect(declared)} — those workflows " <>
+          "would sit Running forever, unclaimed."
+      end
+
+    raise ArgumentError,
+          "task_queue: #{inspect(explicit)} is specified alongside the " <>
+            "workflow modules' declared queue: #{inspect(declared)}. " <>
+            consequence <>
+            " Drop task_queue: — it is derived from the modules"
+  end
+
+  # By here agree_queue! has raised on absence, so the only bad shapes left
+  # are non-binary or empty values.
+  defp validate_queue!(queue) when is_binary(queue) and queue != "", do: queue
+
+  defp validate_queue!(other) do
+    raise ArgumentError,
+          "the task queue must be a non-empty string, got: #{inspect(other)}"
+  end
+
+  # validate_queue!/1 has already guaranteed a non-empty binary.
   defp put_name(opts, task_queue) do
-    cond do
-      Keyword.has_key?(opts, :name) ->
-        opts
-
-      is_binary(task_queue) ->
-        Keyword.put(opts, :name, Module.concat(Temporalex.Worker, task_queue))
-
-      true ->
-        raise ArgumentError, "a worker needs a :name when no task queue can be derived"
+    if Keyword.has_key?(opts, :name) do
+      opts
+    else
+      Keyword.put(opts, :name, Module.concat(Temporalex.Worker, task_queue))
     end
   end
 
