@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Precompiled NIFs (#25)
+
+- **Consumers no longer need a Rust toolchain or protoc.** `Temporalex.Native`
+  now loads a precompiled NIF from the GitHub release matching the package
+  version (mac arm64/x86_64, linux gnu/musl × arm64/x86_64, NIF 2.15),
+  pinned by a checksum file shipped in the hex package. Set
+  `TEMPORALEX_BUILD=1` to compile from source instead (requires Rust and
+  protoc, exactly as before). Building from a checkout of this repo always
+  compiles from source.
+- Releases now build the NIF matrix in CI and attach artifacts to the
+  GitHub release before publishing to hex; the same matrix validates on
+  any PR touching `native/**`.
+
 ### Fixed
 
 - **`schedule_to_close_timeout` no longer defaults to `start_to_close_timeout`**

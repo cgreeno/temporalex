@@ -33,8 +33,11 @@ defp deps do
 end
 ```
 
-Requirements: Elixir `~> 1.17`, Rust toolchain (the NIF crate compiles on first
-build against `temporalio/sdk-rust` v0.4.0).
+Requirements: Elixir `~> 1.17`. The NIF ships precompiled for common targets
+(macOS arm64/x86_64, Linux gnu/musl arm64/x86_64) — no Rust toolchain needed.
+To compile from source instead, set `TEMPORALEX_BUILD=1` (requires Rust and
+protoc; the crate builds against `temporalio/sdk-rust` v0.4.0). Checkouts of
+this repository always build from source.
 
 ## Run a Temporal dev server
 

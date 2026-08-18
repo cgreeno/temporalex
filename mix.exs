@@ -47,7 +47,8 @@ defmodule Temporalex.MixProject do
     [
       {:jason, "~> 1.4"},
       {:pb, "~> 0.1.0"},
-      {:rustler, "~> 0.37", runtime: false},
+      {:rustler, "~> 0.37", runtime: false, optional: true},
+      {:rustler_precompiled, "~> 0.8"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
@@ -66,6 +67,7 @@ defmodule Temporalex.MixProject do
         native/temporalex_nif/src
         native/temporalex_nif/Cargo.toml
         native/temporalex_nif/Cargo.lock
+        native/temporalex_nif/Cross.toml
         priv/proto
         .formatter.exs
         mix.exs
@@ -73,6 +75,7 @@ defmodule Temporalex.MixProject do
         LICENSE
         CHANGELOG.md
         docs
+        checksum-*.exs
       )
     ]
   end
