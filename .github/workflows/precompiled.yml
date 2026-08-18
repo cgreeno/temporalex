@@ -61,7 +61,9 @@ jobs:
       - name: Extract project version
         shell: bash
         run: |
-          echo "PROJECT_VERSION=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs)" >> "$GITHUB_ENV"
+          PROJECT_VERSION="$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs)"
+          test -n "$PROJECT_VERSION" || { echo "::error::could not extract @version from mix.exs"; exit 1; }
+          echo "PROJECT_VERSION=$PROJECT_VERSION" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:

@@ -35,9 +35,13 @@ end
 
 Requirements: Elixir `~> 1.17`. The NIF ships precompiled for common targets
 (macOS arm64/x86_64, Linux gnu/musl arm64/x86_64) — no Rust toolchain needed.
-To compile from source instead, set `TEMPORALEX_BUILD=1` (requires Rust and
-protoc; the crate builds against `temporalio/sdk-rust` v0.4.0). Checkouts of
-this repository always build from source.
+
+On any other platform (Windows, BSDs), or to compile from source by choice:
+set `TEMPORALEX_BUILD=1` **and** add `{:rustler, ">= 0.0.0", optional: true}`
+to your own deps (it is an optional dependency here, so it is not in your
+tree by default). Source builds require Rust and protoc; the crate builds
+against `temporalio/sdk-rust` v0.4.0. Checkouts of this repository always
+build from source.
 
 ## Run a Temporal dev server
 
