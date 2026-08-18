@@ -18,7 +18,10 @@
   drift is nondeterminism), timers, signals, cancellation,
   and terminals; anything else refuses loudly
   with `{:unsupported_event, type, id}` — a replay that skips part of the
-  record proves nothing. Built on the deterministic executor's own
+  record proves nothing. Concretely: histories containing **patch markers,
+  continue-as-new, child workflows, local activities, or updates** are
+  declined outright for now (patches first on the roadmap) — a refusal,
+  not a false verdict. Built on the deterministic executor's own
   divergence detection (not the vacuous core replay path abandoned in May).
 - **`Temporalex.History.stuck_reason/1`** (#29): the SDK-native answer to
   "why is this workflow stuck" — reads the latest failed workflow task's
