@@ -9,17 +9,8 @@ explicit and structured — there is no implicit event loop. The runtime uses a
 sequences are reproducible from the same activation transcript regardless of
 BEAM scheduling or mailbox timing.
 
-> **Status: 0.5.x.** This line is an architectural rewrite around a
-> deterministic core, a `Temporalex.Backend` boundary that isolates Temporal
-> Core / Rust details, and structured concurrency primitives `phase` and
-> `parallel`. The 0.x line is not backwards-compatible with 0.3.0. See
-> [CHANGELOG.md](CHANGELOG.md) for the migration notes.
+> **Status: alpha** — in alpha testing on production non-critical flows.
 >
-> ** NEXT and FINAL STAGE Before ALPHA TESTING **
-> Fix the usability of the SDK to make it easier and simpler than the vibe coded version 
-> Retest and verify and finish the liveview demo app
->
-> 
 > Core design and scheduler authored by [@hansihe](https://github.com/hansihe).
 
 ---
@@ -29,7 +20,7 @@ BEAM scheduling or mailbox timing.
 ```elixir
 # mix.exs
 defp deps do
-  [{:temporalex, "~> 0.4.0"}]
+  [{:temporalex, "~> 0.5"}]
 end
 ```
 
@@ -127,17 +118,14 @@ assert {:ok, receipt} = Temporalex.Testing.run_activity(Payment, :charge, [100])
 
 ## Structured errors
 
-Activities can raise `Temporalex.ApplicationError` (or return `{:error,
-reason}`); the workflow sees a typed exception with the cause preserved:
+Activities fail with `Temporalex.fail!/2`, or by returning `{:error, reason}`.
+The workflow receives Temporal's failure tree, which preserves the business
+error as the cause:
 
 ```elixir
 defactivity charge(amount) do
   if amount > 10_000 do
-    raise %Temporalex.ApplicationError{
-      message: "amount exceeds limit",
-      type: "AmountTooLarge",
-      non_retryable: true
-    }
+    Temporalex.fail!("amount exceeds limit", type: "AmountTooLarge", retry: false)
   else
     {:ok, amount}
   end
@@ -145,10 +133,21 @@ end
 
 # In the workflow:
 case Activities.charge(amount) do
-  {:ok, charge}                                                    -> ...
-  {:error, %Temporalex.ActivityFailure{cause: %{type: "AmountTooLarge"}}} -> ...
+  {:ok, charge}                                 -> ...
+  {:error, %{cause: %{type: "AmountTooLarge"}}} -> ...
 end
 ```
+
+The outer layer is the `%Temporalex.Failure.ActivityError{}` that Temporal
+wraps a failed task-queue activity in. It is kept rather than folded away
+because it records which activity failed and how it ended: `retry_state`
+(`:non_retryable_failure` or `:maximum_attempts_reached`), `activity_type` and
+`activity_id`. Activities declared `local: true` are the exception. Their
+failures arrive unwrapped, as the raised error itself.
+
+`retry: false` makes the failure final. Otherwise Temporal retries the
+activity under its retry policy. `type:` is the string that a retry policy's
+`non_retryable_error_types` matches on.
 
 ## Define a workflow
 

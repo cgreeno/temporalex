@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`Temporalex.fail!/2`** raises an application failure from named options:
+  `Temporalex.fail!("amount exceeds limit", type: "AmountTooLarge", retry: false)`.
+  It delegates to `Temporalex.Failure.application!/2`, which stays. `retry:`
+  maps to `retryable?:`. The error shape is unchanged, so this release is
+  additive: activity dispatch still returns the
+  `%Temporalex.Failure.ActivityError{}` wrapper with the raised error as its
+  `cause`.
+
+### Documented
+
+- **Local and task-queue activity failures do not share a shape.** A failed
+  task-queue activity reaches the workflow wrapped in
+  `%Temporalex.Failure.ActivityError{}`. A failed `local: true` activity
+  reaches it as the raised error itself, unwrapped. Workflow code cannot use
+  one match for both. Behaviour is unchanged and was previously undocumented.
+  Failed local activities now have test coverage in
+  `test/temporalex/integration/local_activity_test.exs`, where they had none.
+
 ## 0.5.2 — 2026-08-18
 
 ### Added

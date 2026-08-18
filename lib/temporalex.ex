@@ -198,6 +198,41 @@ defmodule Temporalex do
   @spec await!(Client.Handle.t(), keyword()) :: term()
   def await!(%Client.Handle{} = handle, opts \\ []), do: handle |> await(opts) |> unwrap!()
 
+  @doc """
+  Raises an application failure describing a business outcome.
+
+      Temporalex.fail!("amount exceeds limit", type: "AmountTooLarge", retry: false)
+
+  Called from an activity, this fails the current attempt. Temporal retries
+  it under the activity's retry policy unless `retry: false`. `type:` is the
+  stable string that retry policies and workflow matches key on.
+
+  Called from workflow code, this fails the workflow. That is final unless
+  the workflow was started with a retry policy, in which case `retry: false`
+  makes it final.
+
+  Options: `type:`, `retry:` (default true), `details:`. Use
+  `Temporalex.Failure.application!/2` to set a nested `:cause`.
+  """
+  @spec fail!(String.t() | atom()) :: no_return()
+  def fail!(message), do: fail!(message, [])
+
+  @spec fail!(String.t() | atom(), keyword()) :: no_return()
+  def fail!(message, opts) when is_list(opts) do
+    case Enum.uniq(Keyword.keys(opts)) -- [:type, :retry, :details] do
+      [] ->
+        :ok
+
+      unknown ->
+        raise ArgumentError,
+              "unknown option(s) #{inspect(unknown)} for Temporalex.fail!/2. " <>
+                "allowed: [:type, :retry, :details]"
+    end
+
+    {retry, opts} = Keyword.pop(opts, :retry, true)
+    Temporalex.Failure.application!(message, Keyword.put(opts, :retryable?, retry))
+  end
+
   @doc false
   def default_client, do: @default_client
 
