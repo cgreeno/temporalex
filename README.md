@@ -154,7 +154,7 @@ end
 
 ```elixir
 defmodule MyApp.Workflows.Checkout do
-  use Temporalex.Workflow
+  use Temporalex.Workflow, queue: "checkout"
 
   alias Temporalex.Workflow.API
 
@@ -200,9 +200,9 @@ a Phoenix deployment creating bookings, say — needs just a client and no
 worker at all: it never polls.
 
 The worker entry in your supervision tree is the deployment topology written
-down: "this node serves these workflows." That is a property of the
-deployable, not of the workflow code, which is why it cannot be derived and
-must be stated.
+down: "this node serves these workflows." The *list of modules* is that
+statement — a property of the deployable — and the task queue derives from
+the modules' `queue:` declarations, so it is never stated twice.
 
 ## Task queues
 
@@ -243,7 +243,8 @@ children = [
   {Temporalex.Worker,
    name: MyApp.Worker,
    client: MyApp.Temporal,
-   task_queue: "checkout",
+   # The queue derives from the workflow modules' queue: declarations —
+   # stating task_queue: here too is a boot error (one queue, one source).
    workflows: [MyApp.Workflows.Checkout],
    activities: [MyApp.Activities.Payment]}
 ]
@@ -310,7 +311,6 @@ and so answers "which release executed this task?" from history or the Web UI:
 {Temporalex.Worker,
  name: MyApp.Worker,
  client: MyApp.Temporal,
- task_queue: "checkout",
  build_id: System.get_env("BUILD_ID", "dev"),
  workflows: [MyApp.Workflows.Checkout]}
 ```

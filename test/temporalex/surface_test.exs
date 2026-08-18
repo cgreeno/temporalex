@@ -267,8 +267,29 @@ defmodule Temporalex.SurfaceTest do
       assert resolved[:task_queue] == "bookings"
     end
 
-    test "explicit task_queue: wins" do
-      resolved = Temporalex.Worker.resolve!(workflows: [Booking], task_queue: "override", name: W)
+    test "an explicit task_queue: is refused even when it agrees — one source" do
+      error =
+        assert_raise ArgumentError, fn ->
+          Temporalex.Worker.resolve!(workflows: [Booking], task_queue: "bookings", name: W)
+        end
+
+      assert Exception.message(error) =~ "drift"
+      assert Exception.message(error) =~ "Drop task_queue:"
+    end
+
+    test "an explicit task_queue: contradicting the declarations refuses to boot" do
+      error =
+        assert_raise ArgumentError, fn ->
+          Temporalex.Worker.resolve!(workflows: [Booking], task_queue: "stale-config", name: W)
+        end
+
+      assert Exception.message(error) =~ "stale-config"
+      assert Exception.message(error) =~ "bookings"
+      assert Exception.message(error) =~ "unclaimed"
+    end
+
+    test "explicit task_queue: still wins when nothing declares a queue" do
+      resolved = Temporalex.Worker.resolve!(workflows: [Legacy], task_queue: "override", name: W)
       assert resolved[:task_queue] == "override"
     end
 
@@ -283,13 +304,38 @@ defmodule Temporalex.SurfaceTest do
       assert Exception.message(error) =~ "Anonymous"
     end
 
-    test "no declaration anywhere keeps the legacy fallback and requires a name" do
-      resolved = Temporalex.Worker.resolve!(workflows: [Legacy], name: W, client: C)
-      refute Keyword.has_key?(resolved, :task_queue)
-
-      assert_raise ArgumentError, ~r/needs a :name/, fn ->
-        Temporalex.Worker.resolve!(workflows: [Legacy])
+    test "disagreeing modules raise even when an explicit task_queue: is present" do
+      # The explicit value used to short-circuit derivation and mask a broken
+      # module set; derivation now always runs first.
+      assert_raise ArgumentError, ~r/disagree/, fn ->
+        Temporalex.Worker.resolve!(
+          workflows: [Booking, Anonymous],
+          task_queue: "bookings",
+          name: W
+        )
       end
+    end
+
+    test "a non-string or empty task queue is refused with the value named" do
+      for bad <- [~c"charlist", :atom, 42, ""] do
+        error =
+          assert_raise ArgumentError, fn ->
+            Temporalex.Worker.resolve!(workflows: [Legacy], task_queue: bad, name: W)
+          end
+
+        assert Exception.message(error) =~ "non-empty string"
+        assert Exception.message(error) =~ inspect(bad)
+      end
+    end
+
+    test "no queue from either source refuses to boot — the client fallback is dead" do
+      error =
+        assert_raise ArgumentError, fn ->
+          Temporalex.Worker.resolve!(workflows: [Legacy], name: W, client: C)
+        end
+
+      assert Exception.message(error) =~ "needs a task queue"
+      assert Exception.message(error) =~ "no longer supported"
     end
 
     test "client defaults to the default client" do

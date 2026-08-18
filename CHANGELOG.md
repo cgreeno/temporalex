@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Changed
+
+- **A worker's task queue now has exactly one source** (#30, breaking).
+  When the workflow modules declare `queue:`, passing `task_queue:` at all
+  refuses to boot — a contradicting value made the worker poll the wrong
+  queue while the modules' generated starts sat unclaimed forever, and an
+  agreeing value is drift waiting to happen. When no module declares,
+  `task_queue:` is **required**: the pre-RFC-0002 fallback of silently
+  inheriting the client's queue is gone (Phase 2 of RFC 0002 §11, executed
+  early). Migration: workers of queue-declaring modules drop `task_queue:`;
+  activity-only and legacy workers state it explicitly. Also newly caught:
+  workflow modules that disagree **among themselves** now raise even when an
+  explicit `task_queue:` is present — the explicit value used to mask the
+  broken module set entirely.
 ### Precompiled NIFs (#25)
 
 - **Consumers no longer need a Rust toolchain or protoc.** `Temporalex.Native`

@@ -155,6 +155,8 @@ Example test shape:
   start_supervised({Temporalex.Worker,
     name: MyApp.Temporal,
     client: MyApp.TemporalClient,
+    # MyWorkflow declares no queue:, so the worker must state one
+    task_queue: "test-queue",
     workflows: [MyWorkflow],
     activities: []
   })

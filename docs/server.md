@@ -47,7 +47,8 @@ Worker configuration should include:
 {Temporalex.Worker,
   name: MyApp.Temporal,
   client: MyApp.TemporalClient,
-  task_queue: "my-queue",
+  # the task queue derives from the workflow modules' queue: declarations;
+  # task_queue: is stated only when no module declares one
   workflows: [MyApp.Workflows.Checkout],
   activities: [MyApp.Activities.Payment],
   max_concurrent_workflow_tasks: 5,

@@ -114,6 +114,7 @@ defmodule Temporalex.ServerIntegrationTest do
                  name: worker,
                  client: client,
                  test_owner: self(),
+                 task_queue: "dead-client-test",
                  workflows: [ActivityWorkflow],
                  activities: []
                )

@@ -25,7 +25,12 @@ defmodule Temporalex.BackendConformanceTest do
 
     start_supervised!(
       {Temporalex.Worker,
-       name: name, client: client, test_owner: self(), workflows: [Workflow], activities: []}
+       name: name,
+       client: client,
+       test_owner: self(),
+       task_queue: "backend-conformance",
+       workflows: [Workflow],
+       activities: []}
     )
 
     %{client: client, worker: name}
