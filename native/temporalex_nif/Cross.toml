@@ -1,3 +1,7 @@
+# RUSTFLAGS must reach the cross container (musl needs -crt-static).
+[build.env]
+passthrough = ["RUSTFLAGS"]
+
 # Cross-compilation containers need protoc: temporalio-sdk-core generates
 # its protobuf bindings at build time.
 [target.aarch64-unknown-linux-gnu]
