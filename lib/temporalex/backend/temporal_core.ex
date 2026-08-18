@@ -416,8 +416,13 @@ defmodule Temporalex.Backend.TemporalCore do
              empty_to_nil(run_id),
              self(),
              ref
-           ) do
-      await_ref(:workflow_history_fetched, ref, timeout, client_monitor(opts))
+           ),
+         {:ok, bytes} <- await_ref(:workflow_history_fetched, ref, timeout, client_monitor(opts)) do
+      if Keyword.get(opts, :raw, false) do
+        {:ok, bytes}
+      else
+        Codec.history_from_bytes(bytes)
+      end
     end
   end
 

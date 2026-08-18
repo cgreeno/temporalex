@@ -455,12 +455,16 @@ defmodule Temporalex.Client do
   end
 
   @doc """
-  Fetches a workflow's history as an opaque binary.
+  Fetches a workflow's history, parsed.
 
-  Feed the result to `Temporalex.Replay` to check current workflow code against
-  a real execution, or write it to a file as a replay fixture. Treat it as
-  opaque — it is encoded protobuf, and parsing it in application code would put
-  backend transport detail somewhere it does not belong.
+  Returns `{:ok, %Temporalex.History{}}` — every event with its id, server
+  timestamp, kind (`:workflow_execution_started`, `:activity_task_scheduled`,
+  `:workflow_task_failed`, …) and attributes. `Temporalex.History.stuck_reason/1`
+  reads the latest failed workflow task's failure out of it — the SDK-native
+  answer to "why is this workflow stuck".
+
+  Pass `raw: true` for the undecoded `temporal.api.history.v1.History`
+  protobuf instead — the format to write to disk as a replay fixture.
   """
   def fetch_workflow_history(%Handle{} = handle, opts \\ []) when is_list(opts) do
     with_client_connection(handle.client, :fetch_workflow_history, opts, fn %Connection{} =
@@ -479,6 +483,7 @@ defmodule Temporalex.Client do
         run_id: handle.run_id,
         workflow_type: handle.workflow_type
       )
+      |> wrap_history(handle.workflow_id, handle.run_id, opts)
     end)
   end
 
@@ -500,8 +505,26 @@ defmodule Temporalex.Client do
         workflow_id: workflow_id,
         run_id: run_id
       )
+      |> wrap_history(workflow_id, run_id, opts)
     end)
   end
+
+  # The backend hands back plain event maps (or raw bytes when raw: true);
+  # the public shape is Temporalex.History.
+  defp wrap_history({:ok, events}, workflow_id, run_id, opts) when is_list(events) do
+    if Keyword.get(opts, :raw, false) do
+      {:ok, events}
+    else
+      {:ok,
+       %Temporalex.History{
+         workflow_id: workflow_id,
+         run_id: run_id,
+         events: Enum.map(events, &struct!(Temporalex.History.Event, &1))
+       }}
+    end
+  end
+
+  defp wrap_history(other, _workflow_id, _run_id, _opts), do: other
 
   @impl GenServer
   def init(opts) do
