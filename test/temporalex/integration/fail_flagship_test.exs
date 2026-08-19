@@ -57,6 +57,7 @@ defmodule Temporalex.FailFlagshipIntegrationTest do
       case Payments.charge(amount) do
         {:ok, charge} -> {:ok, charge}
         {:error, e} when is_failure(e, "AmountTooLarge") -> {:ok, :limit_exceeded}
+        {:error, other} -> {:ok, {:guard_missed, other}}
       end
     end
 

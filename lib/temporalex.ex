@@ -212,8 +212,9 @@ defmodule Temporalex do
   makes it final.
 
   Options: `type:` (a non-empty string — the wire value Temporal matches
-  retry policies against; a non-string is refused rather than silently
-  replaced when encoded), `retry:` (`true` or `false`, default `true`),
+  retry policies against; anything else, `nil` included, is refused rather
+  than silently replaced when encoded — omit the option to get the default
+  type), `retry:` (`true` or `false`, default `true`),
   `details:`. Use `Temporalex.Failure.application!/2` to set a nested
   `:cause`.
   """
@@ -234,7 +235,11 @@ defmodule Temporalex do
 
     {retry, opts} = Keyword.pop(opts, :retry, true)
     validate_retry!(retry)
-    validate_type!(Keyword.get(opts, :type))
+
+    case Keyword.fetch(opts, :type) do
+      :error -> :ok
+      {:ok, type} -> validate_type!(type)
+    end
 
     Temporalex.Failure.application!(message, Keyword.put(opts, :retryable?, retry))
   end
@@ -254,7 +259,6 @@ defmodule Temporalex do
   # default when the codec encodes it, so retry policies and remote matches
   # silently never fire. Refused rather than stringified, because coercing
   # would break an in-process match on the original term instead.
-  defp validate_type!(nil), do: :ok
   defp validate_type!(type) when is_binary(type) and type != "", do: :ok
 
   defp validate_type!(type) do

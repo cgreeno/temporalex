@@ -40,14 +40,20 @@ defmodule Temporalex.FailTest do
     end
 
     test "a non-binary type: is refused — it would be dropped on the wire" do
-      for bad <- [:AtomType, 42, "", nil_to_atom()] do
+      # nil included deliberately: an explicit `type: nil` is a present option
+      # with a bad value, not an absent one, and it used to slip through and be
+      # replaced by the generic default on the wire.
+      for bad <- [:AtomType, 42, "", nil] do
         error = assert_raise ArgumentError, fn -> Temporalex.fail!("m", type: bad) end
         assert Exception.message(error) =~ "must be a non-empty String.t()"
+        assert Exception.message(error) =~ inspect(bad)
       end
     end
 
-    # nil is the "absent" signal, so it must be spelled deliberately here.
-    defp nil_to_atom, do: :nil_but_not_nil
+    test "an omitted type: is still fine — absent is not the same as nil" do
+      error = assert_raise Temporalex.Failure.ApplicationError, fn -> Temporalex.fail!("m") end
+      assert error.type == "Temporalex.ApplicationError"
+    end
 
     test "unknown options raise listing what is allowed" do
       error =
