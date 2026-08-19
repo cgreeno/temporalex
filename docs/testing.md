@@ -17,6 +17,36 @@ This is different from Temporal dev-server integration tests. Dev-server tests
 are still valuable for SDK/backend conformance, but most application workflow
 tests should stay deterministic, local, and fast.
 
+## Running the external suite
+
+External tests (`@moduletag :external`) need a Temporal dev server at
+`127.0.0.1:7233` and are excluded by default:
+
+```
+mix test                     # unit only
+mix test --include external  # unit + live
+```
+
+**Only one external run at a time.** They share the dev server, and several
+declare a fixed task queue (`use Temporalex.Workflow, queue: "surface-greet"`
+and friends) that cannot be made unique per run: `use` options are evaluated
+at compile time, so two runs of one build share the string, and a worker may
+not override a declared queue (RFC 0002's one-source rule). Two concurrent
+runs therefore poll the same queue, Temporal delivers each task to whichever
+worker asks first, and one run executes the other's workflows — which shows up
+as a failure that does not reproduce.
+
+`test/test_helper.exs` prevents this: an external run holds a listening socket
+on port 47233 for its duration, and a second run refuses to start with an
+explanatory message. The lock is a socket rather than a file so the OS releases
+it if a run crashes. A watchdog note for future work: proper isolation would be
+a Temporal namespace per run, which would scope the queues and allow parallel
+runs.
+
+Beware the same hazard when delegating to another agent: either it runs the
+suite or you do, never both in one worktree — concurrent runs also fight over
+`_build` and the compiled NIF.
+
 ## Basic Shape
 
 Temporalex does not provide an ExUnit case-template macro. Import the helpers
