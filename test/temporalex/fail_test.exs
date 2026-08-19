@@ -31,6 +31,24 @@ defmodule Temporalex.FailTest do
       assert error.details == [amount: 10_001]
     end
 
+    test "a non-boolean retry: is refused at the call site, not in the codec" do
+      for bad <- [nil, "false", 0, :no] do
+        error = assert_raise ArgumentError, fn -> Temporalex.fail!("m", retry: bad) end
+        assert Exception.message(error) =~ "retry: must be true or false"
+        assert Exception.message(error) =~ inspect(bad)
+      end
+    end
+
+    test "a non-binary type: is refused — it would be dropped on the wire" do
+      for bad <- [:AtomType, 42, "", nil_to_atom()] do
+        error = assert_raise ArgumentError, fn -> Temporalex.fail!("m", type: bad) end
+        assert Exception.message(error) =~ "must be a non-empty String.t()"
+      end
+    end
+
+    # nil is the "absent" signal, so it must be spelled deliberately here.
+    defp nil_to_atom, do: :nil_but_not_nil
+
     test "unknown options raise listing what is allowed" do
       error =
         assert_raise ArgumentError, fn -> Temporalex.fail!("x", retryable: false) end

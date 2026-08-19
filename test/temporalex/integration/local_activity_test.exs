@@ -42,6 +42,8 @@ defmodule Temporalex.LocalActivityIntegrationTest do
   defmodule Workflow do
     use Temporalex.Workflow
 
+    import Temporalex.Failure, only: [is_failure: 2]
+
     def run({:local, n}) do
       {:ok, doubled} = Activities.double_local(n)
       {:ok, doubled + 1}
@@ -59,9 +61,11 @@ defmodule Temporalex.LocalActivityIntegrationTest do
     end
 
     def run({:declined, n}) do
+      # The guard must match the bare shape the local path produces, too.
       case Activities.decline_local(n) do
         {:ok, _} -> {:ok, :unexpected_success}
-        {:error, failure} -> {:ok, {:declined, failure}}
+        {:error, e} when is_failure(e, "LocalDeclined") -> {:ok, {:declined, e}}
+        {:error, other} -> {:ok, {:guard_missed, other}}
       end
     end
   end

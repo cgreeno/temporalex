@@ -46,6 +46,9 @@ defmodule Temporalex.FailFlagshipIntegrationTest do
   defmodule Checkout do
     use Temporalex.Workflow, queue: "fail-flagship"
 
+    # The guard against a real server-produced failure, not a hand-built one.
+    import Temporalex.Failure, only: [is_failure: 2]
+
     @impl true
     def id(key), do: "fail-flagship-#{key}"
 
@@ -53,7 +56,7 @@ defmodule Temporalex.FailFlagshipIntegrationTest do
     def run({:charge, amount}) do
       case Payments.charge(amount) do
         {:ok, charge} -> {:ok, charge}
-        {:error, %{cause: %{type: "AmountTooLarge"}}} -> {:ok, :limit_exceeded}
+        {:error, e} when is_failure(e, "AmountTooLarge") -> {:ok, :limit_exceeded}
       end
     end
 

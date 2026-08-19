@@ -211,8 +211,11 @@ defmodule Temporalex do
   the workflow was started with a retry policy, in which case `retry: false`
   makes it final.
 
-  Options: `type:`, `retry:` (default true), `details:`. Use
-  `Temporalex.Failure.application!/2` to set a nested `:cause`.
+  Options: `type:` (a non-empty string — the wire value Temporal matches
+  retry policies against; a non-string is refused rather than silently
+  replaced when encoded), `retry:` (`true` or `false`, default `true`),
+  `details:`. Use `Temporalex.Failure.application!/2` to set a nested
+  `:cause`.
   """
   @spec fail!(String.t() | atom()) :: no_return()
   def fail!(message), do: fail!(message, [])
@@ -230,7 +233,36 @@ defmodule Temporalex do
     end
 
     {retry, opts} = Keyword.pop(opts, :retry, true)
+    validate_retry!(retry)
+    validate_type!(Keyword.get(opts, :type))
+
     Temporalex.Failure.application!(message, Keyword.put(opts, :retryable?, retry))
+  end
+
+  # Validated here rather than left to the codec: `non_retryable: not retryable?`
+  # raises a bare "argument error" at the encoding boundary, naming neither
+  # fail!/2 nor retry:, and by then the activity has already failed.
+  defp validate_retry!(retry) when is_boolean(retry), do: :ok
+
+  defp validate_retry!(retry) do
+    raise ArgumentError,
+          "retry: must be true or false, got: #{inspect(retry)}"
+  end
+
+  # A non-binary type is worse than unsupported: it survives in-process (so a
+  # unit test matching on it passes) and is then replaced by the generic
+  # default when the codec encodes it, so retry policies and remote matches
+  # silently never fire. Refused rather than stringified, because coercing
+  # would break an in-process match on the original term instead.
+  defp validate_type!(nil), do: :ok
+  defp validate_type!(type) when is_binary(type) and type != "", do: :ok
+
+  defp validate_type!(type) do
+    raise ArgumentError,
+          "type: must be a non-empty String.t(), got: #{inspect(type)} — it is " <>
+            "the wire string Temporal matches retry policies and other SDKs " <>
+            "against, and a non-string is replaced by a generic default when " <>
+            "encoded"
   end
 
   @doc false

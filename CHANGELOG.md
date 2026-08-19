@@ -11,6 +11,10 @@
   additive: activity dispatch still returns the
   `%Temporalex.Failure.ActivityError{}` wrapper with the raised error as its
   `cause`.
+  `type:` must be a non-empty string and `retry:` a boolean; both are
+  refused at the call site rather than downgraded or crashing later in the
+  codec (an atom `type:` used to survive in-process and then be replaced by
+  a generic default on the wire, so retry policies silently never matched).
 - **`Temporalex.Failure.is_failure/2`** — a guard for matching a failure by
   its Temporal type, in `case`, `with`, and function heads:
 
