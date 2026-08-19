@@ -122,6 +122,77 @@ defmodule Temporalex.FailureGuardTest do
     end
   end
 
+  describe "nesting depth — the shapes Temporal actually produces" do
+    alias Temporalex.Failure.WorkflowExecutionError
+
+    # A child workflow that failed because an activity in it failed. Depth 3,
+    # and the nesting documented in docs/failure_model_proposal.md.
+    defp child_wrapped(type) do
+      %WorkflowExecutionError{
+        workflow_type: "Bookings.Payment",
+        cause: %ActivityError{
+          activity_type: "Payments.charge",
+          retry_state: :maximum_attempts_reached,
+          cause: %ApplicationError{message: "over limit", type: type}
+        }
+      }
+    end
+
+    test "the guard matches a child-workflow-wrapped activity failure (depth 3)" do
+      matched =
+        case {:error, child_wrapped("AmountTooLarge")} do
+          {:error, e} when is_failure(e, "AmountTooLarge") -> :matched
+          {:error, _e} -> :missed
+        end
+
+      assert matched == :matched
+    end
+
+    test "accessors see through the child-workflow wrapper" do
+      e = child_wrapped("AmountTooLarge")
+
+      assert Failure.type(e) == "AmountTooLarge"
+      # The diagnostics the wrapper exists for must not be hidden by depth.
+      assert Failure.retry_state(e) == :maximum_attempts_reached
+      assert Failure.activity_type(e) == "Payments.charge"
+    end
+
+    test "types/1 lists the chain outermost first" do
+      nested = %ApplicationError{
+        message: "outer",
+        type: "Outer",
+        cause: %ApplicationError{message: "inner", type: "Inner"}
+      }
+
+      assert Failure.types(nested) == ["Outer", "Inner"]
+      assert Failure.types(child_wrapped("AmountTooLarge")) == ["AmountTooLarge"]
+      assert Failure.types(:not_a_failure) == []
+    end
+
+    test "failure?/2 goes deeper than the guard can" do
+      # Nested child workflows: depth 4. The guard is bounded at three levels
+      # because a guard cannot recurse; failure?/2 walks the whole chain.
+      deep = %WorkflowExecutionError{cause: child_wrapped("AmountTooLarge")}
+
+      guard_matched =
+        case {:error, deep} do
+          {:error, e} when is_failure(e, "AmountTooLarge") -> :matched
+          {:error, _e} -> :missed
+        end
+
+      assert guard_matched == :missed, "if the guard now recurses, drop the documented bound"
+      assert Failure.failure?(deep, "AmountTooLarge")
+      assert Failure.type(deep) == "AmountTooLarge"
+      assert Failure.retry_state(deep) == :maximum_attempts_reached
+    end
+
+    test "failure?/2 is false for a type that is not in the chain" do
+      refute Failure.failure?(child_wrapped("AmountTooLarge"), "GatewayDeclined")
+      refute Failure.failure?(:not_a_failure, "AmountTooLarge")
+      refute Failure.failure?(%RuntimeError{message: "boom"}, "AmountTooLarge")
+    end
+  end
+
   describe "accessors" do
     test "type/1 reads either depth, nil when absent" do
       assert Failure.type(wrapped("AmountTooLarge")) == "AmountTooLarge"

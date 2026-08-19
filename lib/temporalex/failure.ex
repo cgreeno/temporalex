@@ -89,8 +89,17 @@ defmodule Temporalex.Failure do
   alias Temporalex.Failure.ApplicationError
   alias Temporalex.Failure.CancelledError
 
+  defguardp typed(error, type)
+            when is_map(error) and is_map_key(error, :type) and
+                   :erlang.map_get(:type, error) == type
+
+  defguardp caused(error)
+            when is_map(error) and is_map_key(error, :cause) and
+                   is_map(:erlang.map_get(:cause, error))
+
   @doc """
-  True when `error` is a failure of `type` — at either depth.
+  True when `error` is a failure of `type`, at any of the depths
+  Temporal nests failures at.
 
   A guard, so it works in `case`, `with`, and function heads:
 
@@ -111,39 +120,80 @@ defmodule Temporalex.Failure do
   Shapes with no type to compare — a `nil` cause, an unstructured `raise`
   whose cause is a bare exception, a non-map reason — simply do not match,
   rather than raising.
+
+  A guard cannot recurse, so this checks **three levels**: the error, its
+  cause, and its cause's cause. That covers the shapes Temporal produces —
+  a remote activity failure (`ActivityError` → `ApplicationError`) and a
+  child workflow wrapping one (`WorkflowExecutionError` → `ActivityError` →
+  `ApplicationError`). For arbitrary depth — nested child workflows — use
+  `failure?/2`, which walks the whole chain but is a function rather than a
+  guard.
   """
   defguard is_failure(error, type)
-           when (is_map(error) and is_map_key(error, :type) and
-                   :erlang.map_get(:type, error) == type) or
-                  (is_map(error) and is_map_key(error, :cause) and
-                     is_map(:erlang.map_get(:cause, error)) and
-                     is_map_key(:erlang.map_get(:cause, error), :type) and
-                     :erlang.map_get(:type, :erlang.map_get(:cause, error)) == type)
+           when typed(error, type) or
+                  (caused(error) and typed(:erlang.map_get(:cause, error), type)) or
+                  (caused(error) and caused(:erlang.map_get(:cause, error)) and
+                     typed(:erlang.map_get(:cause, :erlang.map_get(:cause, error)), type))
 
   @doc """
-  The failure's Temporal type string, at either depth, or `nil`.
+  Every Temporal failure type in the error's cause chain, outermost first.
+
+  Temporal nests failures: a failed remote activity arrives as an
+  `ActivityError` wrapping the business `ApplicationError`, and a child
+  workflow wraps that again. This flattens the chain to the types it
+  carries, so callers do not walk it by hand.
+  """
+  def types(error), do: error |> chain() |> Enum.flat_map(&List.wrap(own_type(&1)))
+
+  @doc """
+  Whether `type` appears anywhere in the error's cause chain.
+
+  The unbounded companion to `is_failure/2`: a function rather than a guard,
+  so it works at any nesting depth but not in a `when` clause.
+  """
+  def failure?(error, type), do: type in types(error)
+
+  @doc """
+  The failure's Temporal type string — the outermost one in the chain — or
+  `nil`.
 
   For the places patterns do not reach — logging, telemetry, error
   reporting — so call sites stop hand-writing `error.cause.type`.
   """
-  def type(%{type: type}), do: type
-  def type(%{cause: %{type: type}}), do: type
-  def type(_error), do: nil
+  def type(error), do: error |> types() |> List.first()
 
-  @doc "The wrapped cause, or `nil`."
+  @doc "The wrapped cause, one level down, or `nil`."
   def cause(%{cause: cause}), do: cause
   def cause(_error), do: nil
 
   @doc """
   How a failed activity ended — `:non_retryable_failure`,
-  `:maximum_attempts_reached`, … — or `nil` when the failure carries none.
+  `:maximum_attempts_reached`, … — or `nil` when nothing in the chain
+  carries one. Found at whatever depth it sits, so a child workflow's
+  wrapper does not hide the activity's retry state.
   """
-  def retry_state(%{retry_state: retry_state}), do: retry_state
-  def retry_state(_error), do: nil
+  def retry_state(error), do: first_field(error, :retry_state)
 
-  @doc "Which activity failed, or `nil`."
-  def activity_type(%{activity_type: activity_type}), do: activity_type
-  def activity_type(_error), do: nil
+  @doc "Which activity failed, at whatever depth it sits, or `nil`."
+  def activity_type(error), do: first_field(error, :activity_type)
+
+  # The cause chain, outermost first. A non-map (or absent) cause ends it,
+  # so an unstructured raise or a bare reason terminates cleanly.
+  defp chain(error) when is_map(error) do
+    case Map.get(error, :cause) do
+      nil -> [error]
+      cause -> [error | chain(cause)]
+    end
+  end
+
+  defp chain(_error), do: []
+
+  defp own_type(%{type: type}), do: type
+  defp own_type(_error), do: nil
+
+  defp first_field(error, key) do
+    error |> chain() |> Enum.find_value(fn link -> Map.get(link, key) end)
+  end
 
   @doc """
   Build an application failure.
