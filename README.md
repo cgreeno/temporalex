@@ -163,9 +163,15 @@ end
 ```
 
 `Temporalex.Failure.type/1`, `retry_state/1` and `activity_type/1` read the
-same fields for logging paths. An unstructured `raise` in an activity has no
-`type` to match — those arrive as the exception itself, so match them by
-struct.
+same fields for logging paths, at whatever depth they sit. An unstructured
+`raise` in an activity has no `type` to match — those arrive as the exception
+itself, so match them by struct.
+
+Temporal nests failures, so the guard checks three levels: the error, its
+cause, and its cause's cause — enough for a bare local failure, a remote
+activity's `ActivityError` wrapper, and a child workflow wrapping one. Guards
+cannot recurse, so for deeper nesting use `Temporalex.Failure.failure?/2`,
+which walks the whole chain.
 
 ## Define a workflow
 

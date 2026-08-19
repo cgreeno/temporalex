@@ -24,15 +24,23 @@
   {:error, e} when is_failure(e, "AmountTooLarge") -> refund(e)
   ```
 
-  It checks both depths, because a remote activity's failure arrives wrapped
-  in `%ActivityError{}` while a local activity's arrives as the business
-  error itself. The error stays whole, so `e.retry_state` and
-  `e.activity_type` remain reachable. Shapes with no type to compare — a
-  `nil` cause, an unstructured `raise`, a non-map reason — do not match
-  rather than raising.
-- **`Temporalex.Failure.type/1`, `cause/1`, `retry_state/1` and
+  It checks the three depths Temporal nests failures at: the error itself (a
+  local activity's failure arrives bare), its cause (a remote activity's is
+  wrapped in `%ActivityError{}`), and its cause's cause (a child workflow
+  wrapping one of those). A guard cannot recurse, so deeper nesting — nested
+  child workflows — needs `failure?/2` below. The error stays whole, so
+  `e.retry_state` and `e.activity_type` remain reachable. Shapes with no
+  type to compare — a `nil` cause, an unstructured `raise`, a non-map
+  reason — do not match rather than raising.
+- **`Temporalex.Failure.failure?/2`** — the unbounded companion to the
+  guard: walks the whole cause chain, at the cost of being a function rather
+  than usable in `when`.
+- **`Temporalex.Failure.types/1`, `type/1`, `cause/1`, `retry_state/1` and
   `activity_type/1`** — nil-safe accessors for logging and telemetry paths
-  where patterns do not reach.
+  where patterns do not reach. `types/1` flattens the cause chain outermost
+  first; `retry_state/1` and `activity_type/1` find their field at whatever
+  depth it sits, so a child workflow's wrapper does not hide which activity
+  failed or whether its retries were exhausted.
 
 ### Documented
 
