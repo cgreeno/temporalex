@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`Temporalex.fail!/2`** raises an application failure from named options:
+  `Temporalex.fail!("amount exceeds limit", type: "AmountTooLarge", retry: false)`.
+  It delegates to `Temporalex.Failure.application!/2`, which stays. `retry:`
+  maps to `retryable?:`. The error shape is unchanged, so this release is
+  additive: activity dispatch still returns the
+  `%Temporalex.Failure.ActivityError{}` wrapper with the raised error as its
+  `cause`.
+  `type:` must be a non-empty string and `retry:` a boolean; both are
+  refused at the call site rather than downgraded or crashing later in the
+  codec (an atom `type:` used to survive in-process and then be replaced by
+  a generic default on the wire, so retry policies silently never matched).
+- **`Temporalex.Failure.is_failure/2`** — a guard for matching a failure by
+  its Temporal type, in `case`, `with`, and function heads:
+
+  ```elixir
+  import Temporalex.Failure, only: [is_failure: 2]
+
+  {:error, e} when is_failure(e, "AmountTooLarge") -> refund(e)
+  ```
+
+  It checks both depths, because a remote activity's failure arrives wrapped
+  in `%ActivityError{}` while a local activity's arrives as the business
+  error itself. The error stays whole, so `e.retry_state` and
+  `e.activity_type` remain reachable. Shapes with no type to compare — a
+  `nil` cause, an unstructured `raise`, a non-map reason — do not match
+  rather than raising.
+- **`Temporalex.Failure.type/1`, `cause/1`, `retry_state/1` and
+  `activity_type/1`** — nil-safe accessors for logging and telemetry paths
+  where patterns do not reach.
+
+### Documented
+
+- **Local and task-queue activity failures do not share a shape.** A failed
+  task-queue activity reaches the workflow wrapped in
+  `%Temporalex.Failure.ActivityError{}`. A failed `local: true` activity
+  reaches it as the raised error itself, unwrapped. Workflow code cannot use
+  one match for both. Behaviour is unchanged and was previously undocumented.
+  Failed local activities now have test coverage in
+  `test/temporalex/integration/local_activity_test.exs`, where they had none.
+
 ## 0.5.2 — 2026-08-18
 
 ### Added

@@ -29,10 +29,20 @@ defmodule Temporalex.LocalActivityIntegrationTest do
     defactivity double_remote(value), start_to_close_timeout: 5_000 do
       {:ok, value * 2}
     end
+
+    @doc "Local activity that fails deliberately and finally."
+    defactivity decline_local(amount),
+      local: true,
+      start_to_close_timeout: 5_000,
+      retry_policy: [maximum_attempts: 1] do
+      Temporalex.fail!("locally declined: #{amount}", type: "LocalDeclined", retry: false)
+    end
   end
 
   defmodule Workflow do
     use Temporalex.Workflow
+
+    import Temporalex.Failure, only: [is_failure: 2]
 
     def run({:local, n}) do
       {:ok, doubled} = Activities.double_local(n)
@@ -48,6 +58,15 @@ defmodule Temporalex.LocalActivityIntegrationTest do
       {:ok, a} = Activities.double_local(n)
       {:ok, b} = Activities.double_remote(a)
       {:ok, b}
+    end
+
+    def run({:declined, n}) do
+      # The guard must match the bare shape the local path produces, too.
+      case Activities.decline_local(n) do
+        {:ok, _} -> {:ok, :unexpected_success}
+        {:error, e} when is_failure(e, "LocalDeclined") -> {:ok, {:declined, e}}
+        {:error, other} -> {:ok, {:guard_missed, other}}
+      end
     end
   end
 
@@ -125,6 +144,31 @@ defmodule Temporalex.LocalActivityIntegrationTest do
 
     # 3 → local doubles to 6 → remote doubles to 12
     assert {:ok, 12} = Temporalex.Client.get_result(handle, timeout: 15_000)
+  end
+
+  # Pins an asymmetry with the remote path, established empirically against a
+  # live server: a failed REMOTE activity arrives wrapped in
+  # %Failure.ActivityError{} with the raised error as its cause (see
+  # structured_errors_test.exs), but a failed LOCAL activity arrives as the
+  # raised error itself. Both paths decode through the same
+  # activity_resolution_from_proto, so whether the wrapper exists is decided
+  # upstream of Elixir, not here. Workflow code matching on activity failures
+  # therefore cannot use one shape for both.
+  test "a failed local activity reaches the workflow unwrapped", %{client: client} do
+    workflow_id = "la-declined-#{System.unique_integer([:positive])}"
+
+    {:ok, handle} =
+      Temporalex.Client.start_workflow(client, Workflow, {:declined, 42},
+        workflow_id: workflow_id,
+        timeout: 10_000
+      )
+
+    assert {:ok, {:declined, failure}} = Temporalex.Client.get_result(handle, timeout: 15_000)
+
+    assert %Temporalex.Failure.ApplicationError{} = failure
+    assert failure.type == "LocalDeclined"
+    assert failure.message == "locally declined: 42"
+    assert failure.retryable? == false
   end
 
   defp temporal_available? do
