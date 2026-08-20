@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`defactivity` argument shapes.** The generated dispatch wrappers used the
+  author's argument patterns as *expressions* to build the activity input,
+  which broke three ways. A bare `_` failed to compile with Elixir's "invalid
+  use of `_`", blaming the language rather than the macro. Two arguments like
+  `(_x, x)` collided once the underscore was stripped, turning the wrapper
+  head into a match of `x` against itself. Worst, a **pattern argument was
+  re-built** rather than forwarded — `defactivity charge(%{amount: amount})`
+  sent `%{amount: amount}` to the activity, silently dropping every other key
+  the caller passed. Wrappers now forward opaque values and never
+  destructure; the implementation keeps the author's patterns.
+- **Default-valued arguments now refuse to compile, with the reason.**
+  `defactivity charge(amount, currency \\ "GBP")` cannot work: dispatch
+  appends its own optional options argument, so the arities overlap and
+  `charge(100, [timeout: 5_000])` is ambiguous — currency or call options?
+  Previously this failed with "undefined function `\\/2`".
+
 ## 0.5.3 — 2026-08-19
 
 ### Added

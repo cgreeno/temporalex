@@ -216,7 +216,20 @@ defmodule Temporalex.Activity do
     # arg unused in the implementation body. This lets `defactivity foo(_x)`
     # compile warning-free: the wrapper reads `x`, the impl leaves `_x` unused.
     # (A bare `_` has no name to read and is unsupported — args must be named.)
-    public_args = Enum.map(dispatch_args, &strip_underscore/1)
+    validate_arg_shapes!(caller.module, name, args_ast)
+
+    # The dispatch/bang wrappers forward values; they never destructure. So
+    # their heads are opaque generated vars rather than the author's patterns.
+    # That matters three ways: a bare `_` has no name to forward, two args
+    # like (_x, x) would collide once the underscore was stripped, and a
+    # pattern such as %{amount: amount} used to be re-built as an expression
+    # in the input list — silently dropping every other key on the way to the
+    # activity. The implementation keeps the author's patterns verbatim.
+    public_args =
+      dispatch_args
+      |> Enum.with_index()
+      |> Enum.map(fn {_arg, index} -> Macro.var(:"arg#{index}", __MODULE__) end)
+
     call_opts_var = Macro.var(:call_opts, __MODULE__)
     dispatch_head = {name, meta, public_args ++ [{:\\, [], [call_opts_var, []]}]}
     bang_head = {bang_name, meta, public_args ++ [{:\\, [], [call_opts_var, []]}]}
@@ -375,12 +388,24 @@ defmodule Temporalex.Activity do
 
   defp dispatch_args(args), do: {args, false}
 
-  defp strip_underscore({name, meta, context}) when is_atom(name) do
-    case Atom.to_string(name) do
-      "_" <> rest when rest != "" -> {String.to_atom(rest), meta, context}
-      _ -> {name, meta, context}
-    end
-  end
+  # Default-valued arguments cannot work: dispatch appends its own optional
+  # options argument, so `charge(amount, currency \\ "GBP")` would produce
+  # arities 1..3 and `charge(100, [timeout: 5_000])` would be ambiguous — is
+  # the list a currency or the call options? Refused with that explanation
+  # rather than resolved cleverly.
+  defp validate_arg_shapes!(module, name, args_ast) do
+    Enum.each(args_ast, fn
+      {:\\, _meta, [_arg, _default]} ->
+        raise ArgumentError,
+              "defactivity #{name} in #{inspect(module)} has a default-valued " <>
+                "argument, which is not supported: the generated dispatch " <>
+                "appends its own optional options argument, so the arities " <>
+                "would overlap and a trailing keyword list would be ambiguous " <>
+                "(currency or call options?). Define a second activity, or " <>
+                "take a map and default inside the body."
 
-  defp strip_underscore(arg), do: arg
+      _arg ->
+        :ok
+    end)
+  end
 end

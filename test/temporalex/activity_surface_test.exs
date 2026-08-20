@@ -139,6 +139,82 @@ defmodule Temporalex.ActivitySurfaceTest do
     end
   end
 
+  describe "argument shapes" do
+    defmodule Shapes do
+      use Temporalex.Activity, start_to_close_timeout: 5_000
+
+      # A bare underscore: nothing to forward by name, which used to be a
+      # CompileError ("invalid use of _") blaming Elixir rather than the macro.
+      defactivity ignores(_) do
+        {:ok, :ignored}
+      end
+
+      # Two args where stripping the underscore would collide on `x` and turn
+      # the wrapper head into a match of x against x.
+      defactivity collides(_x, x) do
+        {:ok, x}
+      end
+
+      # A pattern argument: the wrapper used to REBUILD this as an expression
+      # in the input list, silently dropping every key not named here.
+      defactivity destructures(%{amount: amount}) do
+        {:ok, amount}
+      end
+    end
+
+    test "a bare underscore argument compiles and dispatches" do
+      assert Temporalex.Testing.run_activity(Shapes, :ignores, [:anything]) == {:ok, :ignored}
+      assert function_exported?(Shapes, :ignores, 1)
+      assert function_exported?(Shapes, :ignores, 2)
+    end
+
+    test "an ignored arg does not collide with a real one of the same name" do
+      assert Temporalex.Testing.run_activity(Shapes, :collides, [:ignored, :kept]) == {:ok, :kept}
+    end
+
+    defmodule ShapesWorkflow do
+      use Temporalex.Workflow
+
+      def run(map) do
+        {:ok, amount} = Shapes.destructures(map)
+        {:ok, amount}
+      end
+    end
+
+    test "a pattern argument forwards the WHOLE value, not the destructured part" do
+      # The wrapper must not reconstruct the map: :currency has to survive the
+      # trip to the activity even though the pattern names only :amount.
+      {:ok, run} =
+        Temporalex.Testing.start_workflow(ShapesWorkflow, %{amount: 100, currency: "GBP"})
+
+      activity = Temporalex.Testing.assert_next_activity(run)
+
+      assert activity.input == [%{amount: 100, currency: "GBP"}],
+             "the pattern rebuilt the input and dropped keys: #{inspect(activity.input)}"
+
+      Temporalex.Testing.complete_activity(run, activity, {:ok, 100})
+      Temporalex.Testing.assert_completed(run, 100)
+    end
+
+    test "a default-valued argument refuses to compile, with the reason" do
+      error =
+        assert_raise ArgumentError, fn ->
+          defmodule Defaulted do
+            use Temporalex.Activity
+
+            defactivity charge(amount, currency \\ "GBP") do
+              {:ok, {amount, currency}}
+            end
+          end
+        end
+
+      message = Exception.message(error)
+      assert message =~ "default-valued argument"
+      assert message =~ "options argument"
+      assert message =~ "ambiguous"
+    end
+  end
+
   describe "call-site options" do
     test "unknown call-site options raise before anything is dispatched" do
       error =
