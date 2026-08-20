@@ -70,6 +70,36 @@ the same workflow id can run concurrently in two namespaces, and that
 sdk-core refuses a second in-process worker on the same namespace + queue
 (scale a single worker with `max_concurrent_*` instead).
 
+### Tests that document a server limitation
+
+Some behaviour we expose cannot be demonstrated on any server we can run
+against. `:priority_effect` is the case today: it queues a backlog of
+low-priority workflows plus one high-priority one and asserts the
+high-priority one is dispatched early. That fails on
+`temporalio/auto-setup:1.27`, which accepts priority and ignores it.
+
+Such a test is excluded on its own tag and run by name:
+
+```
+mix test --include priority_effect
+```
+
+Two things to copy if you write another:
+
+* **Tag it *instead of* `:external`, not as well.** ExUnit's `include` beats
+  `exclude`, so a test tagged both runs on `--include external` and breaks CI.
+  Add the tag to the `server_tags` list in `test/test_helper.exs` so it still
+  gets a per-run namespace, and to the `exclude:` list so it stays off by
+  default.
+* **Pair it with a canary in the normal suite.** A test nobody runs tells you
+  nothing. The paired canary asserts the limitation still holds — for priority,
+  that the WorkflowExecutionStarted event records no priority at all — so the
+  day the server gains support, a green suite goes red and names the follow-up
+  work. Pin the observer too
+  (`test/temporalex/backend/temporal_core/priority_decode_test.exs`): an
+  "the field is absent" assertion passes just as happily when the *decoder* is
+  blind, so prove separately that a present field would be seen.
+
 Notes:
 
 * A freshly registered namespace is not immediately usable — the server caches

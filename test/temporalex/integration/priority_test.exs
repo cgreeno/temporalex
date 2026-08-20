@@ -7,18 +7,43 @@ defmodule Temporalex.PriorityIntegrationTest do
   That the option is accepted end to end, that omitting it is unchanged, and
   that the three documented limits are enforced with clear errors.
 
-  ## What is NOT asserted, and why
+  And that the server still ignores it — see the canary below.
 
-  That the server *records* the priority. It does not, on the dev server this
-  suite runs against (`temporalio/auto-setup:1.27`) — `describe` and the
-  WorkflowExecutionStarted event both report `priority: null`.
+  ## What the server does with it, and why that is asserted here
 
-  That is not a bug here. Starting a workflow with `temporal workflow start
-  --priority-key 2 --fairness-key ... --fairness-weight 2.5` — Temporal's own
-  client — produces `null` on the same server. The field is sent the way
-  sdk-rust sends it (`StartWorkflowExecutionRequest.priority`); recording it
-  needs a newer server. Asserting round-trip here would mean writing a test
-  that can only fail for reasons unrelated to this code.
+  Nothing, on the dev server this suite runs against
+  (`temporalio/auto-setup:1.27`). Two separate observations:
+
+    * It does not *record* it. The WorkflowExecutionStarted event carries no
+      priority at all, and `temporal workflow describe` reports
+      `priority: null` — including for workflows started by the `temporal`
+      CLI itself with `--priority-key`. So this is the server, not our send
+      path (which puts it on `StartWorkflowExecutionRequest.priority` the way
+      sdk-rust does).
+
+    * It does not *enforce* it either. Queue a backlog of `priority_key: 5`
+      workflows plus one `priority_key: 1` on an empty task queue, then start
+      the worker: the high-priority one runs LAST. Reproduced with the default
+      five pollers and with a single poller, so it is not a poller artefact.
+
+  An earlier version of this file argued that asserting the first observation
+  would be "a test that can only fail for reasons unrelated to this code".
+  That was the wrong conclusion from a right premise. We do not want to assert
+  that priority *round-trips* — that would indeed fail on our own server. We
+  want to be told the day it starts working, because that is the day this
+  option stops being decorative. So the canary asserts the current answer and
+  fails loudly, with instructions, when it changes.
+
+  The observer is pinned separately, in
+  `test/temporalex/backend/temporal_core/priority_decode_test.exs`: a started
+  event that *does* carry priority decodes with it intact. Without that, the
+  canary would pass just as well if we were simply blind to the field.
+
+  The enforcement experiment lives in
+  `test/temporalex/integration/priority_effect_test.exs`, excluded by default
+  because it fails on every server we can currently run against. It is the
+  demonstration we owe the feature, kept executable so it is one flag away
+  rather than a paragraph someone has to rebuild from scratch.
 
   Skipped by default; run with `mix test --include external`.
   """
@@ -124,6 +149,43 @@ defmodule Temporalex.PriorityIntegrationTest do
     test "fairness_weight must be positive", %{client: client} do
       assert {:error, error} = run(client, priority: [fairness_weight: 0.0])
       assert Exception.message(error) =~ "fairness_weight must be greater than 0"
+    end
+  end
+
+  describe "server support canary" do
+    test "the server still records no priority", %{client: client} do
+      priority = [priority_key: 1, fairness_key: "salon-4291", fairness_weight: 2.5]
+      workflow_id = "priority-canary-#{System.unique_integer([:positive])}"
+
+      {:ok, handle} =
+        Temporalex.Client.start_workflow(client, Workflow, 7,
+          workflow_id: workflow_id,
+          priority: priority
+        )
+
+      assert {:ok, 7} = Temporalex.Client.get_result(handle, timeout: 15_000)
+      assert {:ok, history} = Temporalex.Client.fetch_workflow_history(handle)
+
+      started = Temporalex.History.last(history, :workflow_execution_started)
+      assert started, "no WorkflowExecutionStarted event — the history shape changed"
+
+      assert Map.get(started.attributes, :priority) == nil, """
+      GOOD NEWS, ACTION NEEDED: the server now records priority. We sent
+      #{inspect(priority)} and it came back as
+      #{inspect(Map.get(started.attributes, :priority))}.
+
+      This assertion exists to catch exactly this moment. Now:
+
+        1. Run the enforcement experiment — `mix test --include external \
+      --include priority_effect` — and see whether dispatch order actually
+           honours the key. Recording and enforcing are separate questions.
+        2. Surface priority on describe. WorkflowExecutionInfo carries it
+           (field 24) but describe_to_term in native/temporalex_nif/src/lib.rs
+           does not map it, so today users can set a field they cannot read.
+        3. Drop the "Server support" admonition in Temporalex.Client.start_workflow
+           and this module's moduledoc, and replace this canary with a
+           round-trip assertion.
+      """
     end
   end
 

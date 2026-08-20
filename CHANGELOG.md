@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **`:priority` is now known to be inert on supported servers, and tested as
+  such.** `temporalio/auto-setup:1.27` accepts priority and fairness and then
+  neither records nor enforces them: the WorkflowExecutionStarted event carries
+  no priority at all, and a high-priority workflow queued last behind a backlog
+  of low-priority ones is still dispatched last (measured by the server's own
+  close times, with both five pollers and one). The option is unchanged and
+  still validated; what changed is that the limitation is now pinned by a
+  canary that fails when a server starts recording priority, so it cannot go
+  unnoticed. The enforcement demonstration ships excluded, as
+  `--include priority_effect`.
+
 ## 0.5.3 — 2026-08-19
 
 ### Added
