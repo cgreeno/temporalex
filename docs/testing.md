@@ -17,6 +17,76 @@ This is different from Temporal dev-server integration tests. Dev-server tests
 are still valuable for SDK/backend conformance, but most application workflow
 tests should stay deterministic, local, and fast.
 
+## Running the external suite
+
+External tests (`@moduletag :external`) need a Temporal dev server at
+`127.0.0.1:7233` and are excluded by default:
+
+```
+mix test                     # unit only
+mix test --include external  # unit + live
+```
+
+**Each run gets its own Temporal namespace**, created by
+`test_support/temporal_namespace.ex` and named `temporalex-test-<time>-<pid>`.
+That is what makes concurrent runs safe, and the reason is worth knowing:
+several tests declare a *fixed* task queue — `use Temporalex.Workflow,
+queue: "surface-greet"` and friends — which cannot be made unique per run.
+`use` options are evaluated at compile time, so two runs of one build share
+the string, and a worker may not override a declared queue (RFC 0002's
+one-source rule). Two runs in the *same* namespace would therefore poll the
+same queue, and Temporal would deliver each task to whichever worker asked
+first: one run executing the other's workflows, surfacing as a failure that
+does not reproduce.
+
+Task queues are namespace-scoped, so the isolation goes one level up instead.
+Identical queue names in different namespaces never meet.
+
+### The rule for new end-to-end tests
+
+**Every E2E test runs in a namespace, never in `default` on a shared server.**
+Two shapes satisfy that, and new tests must pick one deliberately:
+
+1. **Shared dev server, per-run namespace** (the common case) — pass
+   `namespace: Temporalex.TestSupport.Namespace.name()` wherever a client is
+   started, and pass `--namespace` to any `temporal` CLI invocation so the CLI
+   talks to the same namespace the workers poll. Task queues may then be fixed
+   strings safely.
+2. **Its own dev server** — `Temporalex.TestSupport.TemporalDevServer.start!/1`
+   picks a free port, so such a test is already isolated by port and should
+   stay on `namespace: "default"` (its private server has no per-run
+   namespace).
+
+Mixing them is the trap: a test that starts its own server but asks for the
+run namespace will fail, because that namespace exists on the *shared* server.
+`temporal_core_integration_test`, `temporal_worker_restart_test`,
+`temporal_client_semantics_test` and `temporal_cli_smoke_test` are the
+own-server tests today.
+
+Race conditions between namespaces and queues are themselves tested — see
+`test/temporalex/integration/queue_isolation_test.exs`, which pins that
+identical queue names in different namespaces cannot reach each other, that
+the same workflow id can run concurrently in two namespaces, and that
+sdk-core refuses a second in-process worker on the same namespace + queue
+(scale a single worker with `max_concurrent_*` instead).
+
+Notes:
+
+* A freshly registered namespace is not immediately usable — the server caches
+  its namespace registry — so setup polls `operator namespace describe` until
+  it succeeds rather than assuming.
+* Without the `temporal` CLI on `PATH`, setup warns and falls back to
+  `default`. A single run is unaffected; two concurrent runs would then
+  interfere, so install the CLI if you run suites in parallel.
+* Namespaces are left behind rather than deleted. A dev server is ephemeral,
+  and keeping them makes a failed run's history inspectable
+  (`temporal workflow list --namespace temporalex-test-...`).
+* Namespaces do **not** fix two runs sharing one worktree's `_build` and
+  compiled NIF. That fails loudly with compile errors rather than silently
+  stealing tasks, so it is a caution rather than something to engineer
+  around: when delegating to another agent, either it runs the suite or you
+  do, not both in the same worktree.
+
 ## Basic Shape
 
 Temporalex does not provide an ExUnit case-template macro. Import the helpers

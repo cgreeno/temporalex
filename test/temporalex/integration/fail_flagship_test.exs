@@ -76,7 +76,7 @@ defmodule Temporalex.FailFlagshipIntegrationTest do
         name: client,
         backend: Temporalex.Backend.TemporalCore,
         target: "http://127.0.0.1:7233",
-        namespace: "default"
+        namespace: Temporalex.TestSupport.Namespace.name()
       )
 
     {:ok, worker_pid} =

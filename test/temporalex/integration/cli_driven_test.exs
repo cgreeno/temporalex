@@ -101,7 +101,7 @@ defmodule Temporalex.CliDrivenIntegrationTest do
         name: client_name,
         backend: Temporalex.Backend.TemporalCore,
         target: "http://127.0.0.1:7233",
-        namespace: "default",
+        namespace: Temporalex.TestSupport.Namespace.name(),
         task_queue: task_queue,
         payload_codec: :json
       )
@@ -343,7 +343,12 @@ defmodule Temporalex.CliDrivenIntegrationTest do
   # ──────────────────────────── helpers ────────────────────────────
 
   defp cli(args) do
-    System.cmd("temporal", args ++ ["--address", "127.0.0.1:7233"], stderr_to_stdout: true)
+    System.cmd(
+      "temporal",
+      args ++
+        ["--address", "127.0.0.1:7233", "--namespace", Temporalex.TestSupport.Namespace.name()],
+      stderr_to_stdout: true
+    )
   end
 
   # Parses free-form CLI output, so the branching is irreducible.

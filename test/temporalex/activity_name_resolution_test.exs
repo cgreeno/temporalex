@@ -32,7 +32,7 @@ defmodule Temporalex.ActivityNameResolutionTest do
        client: client,
        backend: TestBackend,
        test_owner: self(),
-       namespace: "default",
+       namespace: Temporalex.TestSupport.Namespace.name(),
        task_queue: "probe9",
        workflows: [WF],
        activities: [Acts]}

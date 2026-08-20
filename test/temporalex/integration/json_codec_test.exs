@@ -52,7 +52,7 @@ defmodule Temporalex.JsonCodecIntegrationTest do
         name: client_name,
         backend: Temporalex.Backend.TemporalCore,
         target: "http://127.0.0.1:7233",
-        namespace: "default",
+        namespace: Temporalex.TestSupport.Namespace.name(),
         task_queue: task_queue,
         payload_codec: :json
       )
@@ -118,7 +118,9 @@ defmodule Temporalex.JsonCodecIntegrationTest do
         "--workflow-id",
         workflow_id,
         "--address",
-        "127.0.0.1:7233"
+        "127.0.0.1:7233",
+        "--namespace",
+        Temporalex.TestSupport.Namespace.name()
       ])
 
     assert exit_code == 0,
@@ -144,6 +146,8 @@ defmodule Temporalex.JsonCodecIntegrationTest do
              workflow_id,
              "--address",
              "127.0.0.1:7233",
+             "--namespace",
+             Temporalex.TestSupport.Namespace.name(),
              "--output",
              "json"
            ],

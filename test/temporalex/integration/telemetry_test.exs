@@ -147,7 +147,7 @@ defmodule Temporalex.TelemetryIntegrationTest do
         name: name,
         backend: Temporalex.Backend.TemporalCore,
         target: @target,
-        namespace: "default"
+        namespace: Temporalex.TestSupport.Namespace.name()
       )
 
     case Temporalex.Client.start_link(opts) do

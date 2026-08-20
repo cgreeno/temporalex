@@ -85,7 +85,7 @@ defmodule Temporalex.ServerIntegrationTest do
        name: name,
        client: client,
        test_owner: self(),
-       namespace: "default",
+       namespace: Temporalex.TestSupport.Namespace.name(),
        task_queue: "temporalex-test",
        workflows: [ActivityWorkflow, SignalWorkflow, QueryWorkflow],
        activities: [Activities]}
@@ -387,7 +387,7 @@ defmodule Temporalex.ServerIntegrationTest do
       workflow_id: "wf-activity",
       run_id: "run-activity",
       workflow_type: inspect(ActivityWorkflow),
-      namespace: "default",
+      namespace: Temporalex.TestSupport.Namespace.name(),
       task_queue: "temporalex-test",
       input: input,
       attempt: 1,

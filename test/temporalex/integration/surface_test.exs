@@ -101,7 +101,7 @@ defmodule Temporalex.SurfaceIntegrationTest do
         name: client,
         backend: Temporalex.Backend.TemporalCore,
         target: "http://127.0.0.1:7233",
-        namespace: "default"
+        namespace: Temporalex.TestSupport.Namespace.name()
       )
 
     # The worker spec the RFC promises: no name, no task_queue — both derived
@@ -145,7 +145,7 @@ defmodule Temporalex.SurfaceIntegrationTest do
         Temporalex.Client.start_link(
           backend: Temporalex.Backend.TemporalCore,
           target: "http://127.0.0.1:7233",
-          namespace: "default"
+          namespace: Temporalex.TestSupport.Namespace.name()
         )
 
       assert Process.whereis(Temporalex.Client) == client_pid

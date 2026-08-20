@@ -64,7 +64,7 @@ defmodule Temporalex.ServerExtrasTest do
        client: client,
        backend: TestBackend,
        test_owner: self(),
-       namespace: "default",
+       namespace: Temporalex.TestSupport.Namespace.name(),
        task_queue: "extras-queue",
        workflows: [SimpleWorkflow, ActivityWorkflow],
        activities: [Activities]}
