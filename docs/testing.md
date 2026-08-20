@@ -78,11 +78,24 @@ this was written against was `temporalio/auto-setup:1.27`, i.e. server 1.27.4.
 This repo pins no server image, so nothing keeps the two in step, and the gap
 is not theoretical — it cost us a merged commit:
 
-`:priority` is accepted by both, recorded and enforced by 1.31.2, and silently
-dropped by 1.27.4. A test asserting the 1.27.4 behaviour passed locally, went
-green through review, merged, and turned CI red on the next run. The
-`:priority` tests now assert that the server records what we send, so on 1.27.4
-they fail — deliberately, with the version check in the failure message.
+`:priority` is accepted by every version, recorded by 1.29.7 and 1.31.2, and
+silently dropped by 1.27.4. A test asserting the 1.27.4 behaviour passed
+locally, went green through review, merged, and turned CI red on the next run.
+The `:priority` tests now assert that the server records what we send, so on
+1.27.4 they fail — deliberately, with the version check in the failure message.
+
+Measured, so nobody has to re-derive it:
+
+| server | source | records `:priority` |
+|---|---|---|
+| 1.27.4 | `temporalio/auto-setup:1.27` | no |
+| 1.29.7 | `temporalio/auto-setup:1.29.7` | yes — full suite 466/0 |
+| 1.31.2 | `temporal server start-dev` | yes — full suite 466/0 |
+
+Note there is **no `auto-setup:1.31` image**: that repository's newest tag is
+1.29.7 (`:latest` is 1.29.3), and the CLI bundles a newer server than the
+published images. So 1.29.7 is the current ceiling for a compose-based stack,
+and it is sufficient.
 
 So: run the external suite against `temporal server start-dev`, or keep the
 container current. When a test passes locally and fails in CI, check the

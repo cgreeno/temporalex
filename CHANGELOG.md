@@ -4,8 +4,8 @@
 
 ### Changed
 
-- **`:priority` needs a current server, and the suite now says so.** Server
-  1.31.2 records all three fields exactly as sent; server 1.27.4 — the
+- **`:priority` needs a current server, and the suite now says so.** Servers
+  1.29.7 and 1.31.2 record all three fields exactly as sent; server 1.27.4 — the
   `temporalio/auto-setup:1.27` container in use locally when this was written —
   accepts them and silently drops them. The external suite now asserts the round-trip,
   so the difference fails loudly with the version to check instead of being

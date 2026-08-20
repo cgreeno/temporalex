@@ -126,11 +126,10 @@ defmodule Temporalex.Client do
   > #### Server support {: .warning}
   >
   > Priority needs a server that supports it, and an older one accepts the
-  > field and silently drops it rather than complaining. Measured: server
-  > **1.31.2** records all three fields; **1.27.4**
-  > (`temporalio/auto-setup:1.27`) reports `priority: null` in both `describe`
-  > and history, including for workflows started by the `temporal` CLI itself.
-  > Check yours before designing around this:
+  > field and silently drops it rather than complaining. Measured: **1.29.7**
+  > and **1.31.2** record all three fields; **1.27.4** reports `priority: null`
+  > in both `describe` and history, including for workflows started by the
+  > `temporal` CLI itself. Check yours before designing around this:
   >
   >     temporal operator cluster describe -o json | grep serverVersion
   >
