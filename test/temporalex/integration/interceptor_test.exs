@@ -383,7 +383,7 @@ defmodule Temporalex.InterceptorIntegrationTest do
       name: Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}"),
       backend: Temporalex.Backend.TemporalCore,
       target: "http://127.0.0.1:7233",
-      namespace: "default",
+      namespace: Temporalex.TestSupport.Namespace.name(),
       task_queue: Keyword.get(client_opts, :task_queue, "default")
     )
   end

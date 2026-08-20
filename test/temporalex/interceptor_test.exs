@@ -176,7 +176,10 @@ defmodule Temporalex.InterceptorUnitTest do
     Process.flag(:trap_exit, true)
 
     Temporalex.Client.start_link(
-      Keyword.merge(client_opts, backend: Temporalex.Backend.Test, namespace: "default")
+      Keyword.merge(client_opts,
+        backend: Temporalex.Backend.Test,
+        namespace: Temporalex.TestSupport.Namespace.name()
+      )
     )
   end
 end

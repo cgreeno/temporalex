@@ -69,7 +69,7 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
         name: client,
         backend: Temporalex.Backend.TemporalCore,
         target: "http://127.0.0.1:7233",
-        namespace: "default",
+        namespace: Temporalex.TestSupport.Namespace.name(),
         task_queue: task_queue
       )
 
