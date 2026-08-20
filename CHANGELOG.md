@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The Rust NIF now builds against `temporalio/sdk-rust` v0.7.0** (from
+  v0.4.0, three releases back). No Elixir-facing behaviour changes: the whole
+  bump is absorbed inside the NIF, and the full suite — 462 tests including
+  the live external ones — passes unchanged.
+
+  What actually moved, for anyone tracing it: `WorkerDeploymentOptions`
+  became `#[non_exhaustive]` with a builder; `VersioningBehavior` and
+  `WorkflowExecutionStatus` now each exist in two crates as distinct types;
+  a failed workflow arrives as `IncomingError` (which still exposes the proto
+  `Failure` and its `cause`, so the failure tree is intact); cancelled and
+  terminated results carry a `WorkflowResultDetails` wrapper;
+  `WorkflowQueryError::Rejected` became a struct variant; and start options
+  take typed `SearchAttributes` and `RetryPolicy` rather than raw protos —
+  both converted inside the NIF so Temporal's typing does not reach the
+  Elixir surface.
+
+  The client's `WorkflowExecutionStatus` is also forward-compatible now, so
+  an unrecognised status maps to `:unspecified` instead of being reported as
+  something it is not.
+
 ## 0.5.3 — 2026-08-19
 
 ### Added

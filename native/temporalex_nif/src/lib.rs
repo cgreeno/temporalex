@@ -11,8 +11,8 @@ use temporalio_client::{
     Client, ClientOptions, Connection, ConnectionOptions, TlsOptions, UntypedQuery, UntypedSignal,
     UntypedUpdate, UntypedWorkflow, WorkflowCancelOptions, WorkflowDescribeOptions,
     WorkflowExecuteUpdateOptions, WorkflowExecutionDescription, WorkflowExecutionInfo,
-    WorkflowFetchHistoryOptions, WorkflowGetResultOptions, WorkflowHandle, WorkflowQueryOptions,
-    WorkflowSignalOptions, WorkflowStartOptions, WorkflowTerminateOptions,
+    WorkflowExecutionStatus, WorkflowFetchHistoryOptions, WorkflowGetResultOptions, WorkflowHandle,
+    WorkflowQueryOptions, WorkflowSignalOptions, WorkflowStartOptions, WorkflowTerminateOptions,
     errors::{
         WorkflowGetResultError, WorkflowInteractionError, WorkflowQueryError, WorkflowStartError,
         WorkflowUpdateError,
@@ -24,9 +24,10 @@ use temporalio_common::protos::temporal::api::history::v1::History;
 use temporalio_common::protos::coresdk::{ActivityHeartbeat, ActivityTaskCompletion};
 use temporalio_common::protos::temporal::api::common::v1::{
     Header, Memo, Payload, Payloads, RetryPolicy,
+    SearchAttributes as ProtoSearchAttributes,
 };
 use temporalio_common::protos::temporal::api::enums::v1::{
-    QueryRejectCondition, RetryState, TimeoutType, VersioningBehavior, WorkflowExecutionStatus,
+    QueryRejectCondition, RetryState, TimeoutType,
     WorkflowIdConflictPolicy, WorkflowIdReusePolicy,
 };
 use temporalio_common::protos::temporal::api::failure::v1::{Failure, failure};
@@ -36,8 +37,10 @@ use temporalio_common::telemetry::{
     TelemetryOptions, build_otlp_metric_exporter, start_prometheus_metric_exporter,
 };
 use temporalio_common::Priority;
+use temporalio_common::search_attributes::SearchAttributes;
 use temporalio_common::worker::{
-    WorkerDeploymentOptions, WorkerDeploymentVersion, WorkerTaskTypes,
+    VersioningBehavior as WorkerVersioningBehavior, WorkerDeploymentOptions,
+    WorkerDeploymentVersion, WorkerTaskTypes,
 };
 use temporalio_sdk_core::{
     CoreRuntime, PollError, PollerBehavior, RuntimeOptions, TokioRuntimeBuilder, Worker,
@@ -613,8 +616,8 @@ fn versioning_strategy_from_opts(opts: Term) -> anyhow::Result<WorkerVersioningS
 
     let default_versioning_behavior = match keyword_get_atom(opts, default_behavior())? {
         None => None,
-        Some(value) if value == pinned() => Some(VersioningBehavior::Pinned),
-        Some(value) if value == auto_upgrade() => Some(VersioningBehavior::AutoUpgrade),
+        Some(value) if value == pinned() => Some(WorkerVersioningBehavior::Pinned),
+        Some(value) if value == auto_upgrade() => Some(WorkerVersioningBehavior::AutoUpgrade),
         Some(_) => {
             return Err(anyhow!(
                 "versioning.default_behavior must be :pinned or :auto_upgrade"
@@ -639,19 +642,18 @@ fn versioning_strategy_from_opts(opts: Term) -> anyhow::Result<WorkerVersioningS
 
     // v0.7.0 made WorkerDeploymentOptions #[non_exhaustive] with a bon
     // builder, so it can no longer be built with a struct literal.
-    let mut options = WorkerDeploymentOptions::new(WorkerDeploymentVersion {
+    let builder = WorkerDeploymentOptions::new(WorkerDeploymentVersion {
         deployment_name,
         build_id,
     })
     .use_worker_versioning(use_worker_versioning);
 
-    if let Some(behavior) = default_versioning_behavior {
-        options = options.default_versioning_behavior(behavior);
-    }
+    let options = match default_versioning_behavior {
+        Some(behavior) => builder.default_versioning_behavior(behavior).build(),
+        None => builder.build(),
+    };
 
-    Ok(WorkerVersioningStrategy::WorkerDeploymentBased(
-        options.build(),
-    ))
+    Ok(WorkerVersioningStrategy::WorkerDeploymentBased(options))
 }
 
 #[rustler::nif]
@@ -1566,12 +1568,10 @@ fn workflow_start_error_to_term<'a>(env: Env<'a>, err: StartWorkflowResult) -> T
 fn get_workflow_result_error_to_term<'a>(env: Env<'a>, err: GetWorkflowResult) -> Term<'a> {
     match err {
         GetWorkflowResult::Get(WorkflowGetResultError::Failed(err)) => {
-            // IncomingError arrives boxed; into_parts consumes it and hands
-            // back the proto Failure plus its cause, so the failure tree
-            // survives the version change intact.
-            let (failure, _cause) = (*err).into_parts();
-
-            match failure_to_term(env, Some(&failure)) {
+            // v0.7.0 wraps the failure in IncomingError, which still exposes
+            // the proto Failure (and cause() for the chain) — so the failure
+            // tree reaches Elixir exactly as before.
+            match failure_to_term(env, Some(err.failure())) {
                 Ok(term) => (failed(), term).encode(env),
                 Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
@@ -1676,7 +1676,14 @@ fn workflow_description_to_term<'a>(
         start_time_ms() => option_i64_term(env, description.start_time().and_then(system_time_to_millis)),
         execution_time_ms() => option_i64_term(env, description.execution_time().and_then(system_time_to_millis)),
         close_time_ms() => option_i64_term(env, description.close_time().and_then(system_time_to_millis)),
-        memo() => memo_to_term(env, description.memo())?,
+        memo() => memo_to_term(
+            env,
+            description
+                .raw()
+                .workflow_execution_info
+                .as_ref()
+                .and_then(|info| info.memo.as_ref()),
+        )?,
     )
 }
 
@@ -1723,6 +1730,10 @@ fn workflow_status_atom(status: WorkflowExecutionStatus) -> Atom {
         WorkflowExecutionStatus::ContinuedAsNew => continued_as_new(),
         WorkflowExecutionStatus::TimedOut => timed_out(),
         WorkflowExecutionStatus::Paused => paused(),
+        WorkflowExecutionStatus::Unknown => unspecified(),
+        // Forward compatibility: the enum is open, so a status added upstream
+        // reports :unspecified rather than being reported as something wrong.
+        _ => unspecified(),
         WorkflowExecutionStatus::Unspecified => unspecified(),
     }
 }
@@ -2173,8 +2184,14 @@ fn workflow_start_options(
     options.task_timeout =
         duration_option_from_opts(opts, &[task_timeout(), workflow_task_timeout()])?;
     options.cron_schedule = keyword_get_string(opts, cron_schedule())?;
-    options.search_attributes = search_attributes_option_from_opts(opts)?;
-    options.retry_policy = retry_policy_from_opts(opts)?;
+    options.search_attributes = search_attributes_option_from_opts(opts)?.map(|fields| {
+        SearchAttributes::from_proto(&ProtoSearchAttributes {
+            indexed_fields: fields,
+        })
+    });
+    // The client wraps the proto retry policy in its own type now; From is
+    // the whole conversion, so our option decoding is unchanged.
+    options.retry_policy = retry_policy_from_opts(opts)?.map(Into::into);
     options.priority = priority_from_opts(opts)?;
     options.header = header_from_opts(opts)?;
     options.static_summary = keyword_get_string(opts, static_summary())?;
