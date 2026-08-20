@@ -37,7 +37,6 @@ use temporalio_common::telemetry::{
     TelemetryOptions, build_otlp_metric_exporter, start_prometheus_metric_exporter,
 };
 use temporalio_common::Priority;
-use temporalio_common::search_attributes::SearchAttributes;
 use temporalio_common::worker::{
     VersioningBehavior as WorkerVersioningBehavior, WorkerDeploymentOptions,
     WorkerDeploymentVersion, WorkerTaskTypes,
@@ -1569,8 +1568,14 @@ fn get_workflow_result_error_to_term<'a>(env: Env<'a>, err: GetWorkflowResult) -
     match err {
         GetWorkflowResult::Get(WorkflowGetResultError::Failed(err)) => {
             // v0.7.0 wraps the failure in IncomingError, which still exposes
-            // the proto Failure (and cause() for the chain) — so the failure
-            // tree reaches Elixir exactly as before.
+            // the RETAINED original proto Failure (and cause() for the chain),
+            // so the failure tree reaches Elixir exactly as before.
+            //
+            // failure() expects the original proto to be present, which is a
+            // panic path v0.4.0 did not have. Unreachable here: we only ever
+            // hold errors the client decoded from a server response, and those
+            // always retain it. Worth knowing, because a panic inside a NIF
+            // takes the whole VM down.
             match failure_to_term(env, Some(err.failure())) {
                 Ok(term) => (failed(), term).encode(env),
                 Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
@@ -1676,6 +1681,12 @@ fn workflow_description_to_term<'a>(
         start_time_ms() => option_i64_term(env, description.start_time().and_then(system_time_to_millis)),
         execution_time_ms() => option_i64_term(env, description.execution_time().and_then(system_time_to_millis)),
         close_time_ms() => option_i64_term(env, description.close_time().and_then(system_time_to_millis)),
+        // Deliberately the UNDECODED proto rather than description.memo():
+        // that typed accessor applies a Rust-side payload converter, and
+        // Elixir owns payload decoding here (the :etf / :json codec option),
+        // so decoding in Rust would break it. It also reaches memo through
+        // workflow_info(), which panics when the field is absent, whereas
+        // and_then yields an empty memo.
         memo() => memo_to_term(
             env,
             description
@@ -1731,10 +1742,11 @@ fn workflow_status_atom(status: WorkflowExecutionStatus) -> Atom {
         WorkflowExecutionStatus::TimedOut => timed_out(),
         WorkflowExecutionStatus::Paused => paused(),
         WorkflowExecutionStatus::Unknown => unspecified(),
-        // Forward compatibility: the enum is open, so a status added upstream
-        // reports :unspecified rather than being reported as something wrong.
-        _ => unspecified(),
         WorkflowExecutionStatus::Unspecified => unspecified(),
+        // Last, so it cannot shadow an explicit arm: the enum is open, so a
+        // status added upstream reports :unspecified rather than being
+        // reported as something it is not.
+        _ => unspecified(),
     }
 }
 
@@ -2185,9 +2197,11 @@ fn workflow_start_options(
         duration_option_from_opts(opts, &[task_timeout(), workflow_task_timeout()])?;
     options.cron_schedule = keyword_get_string(opts, cron_schedule())?;
     options.search_attributes = search_attributes_option_from_opts(opts)?.map(|fields| {
-        SearchAttributes::from_proto(&ProtoSearchAttributes {
+        // From moves the inner map; from_proto(&...) would clone it.
+        ProtoSearchAttributes {
             indexed_fields: fields,
-        })
+        }
+        .into()
     });
     // The client wraps the proto retry policy in its own type now; From is
     // the whole conversion, so our option decoding is unchanged.

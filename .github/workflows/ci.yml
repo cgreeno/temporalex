@@ -59,6 +59,16 @@ jobs:
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
       - run: mix credo --strict
+
+      # mix compile --warnings-as-errors governs ELIXIR warnings only; cargo
+      # warnings flow through Rustler without failing the build, so without
+      # this the Rust half of the SDK has no warning gate at all. Found the
+      # hard way: an unreachable match arm shipped in the v0.7.0 bump, a PR
+      # that was entirely Rust.
+      - name: Rust warnings are errors
+        run: cargo check --manifest-path native/temporalex_nif/Cargo.toml
+        env:
+          RUSTFLAGS: "-D warnings"
       # MIX_ENV is test globally, so dialyxir must be available in :test
       # (see mix.exs) and the PLTs land under the cached _build/plts.
       - run: mix dialyzer
