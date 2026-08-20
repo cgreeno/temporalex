@@ -637,15 +637,20 @@ fn versioning_strategy_from_opts(opts: Term) -> anyhow::Result<WorkerVersioningS
         ));
     }
 
+    // v0.7.0 made WorkerDeploymentOptions #[non_exhaustive] with a bon
+    // builder, so it can no longer be built with a struct literal.
+    let mut options = WorkerDeploymentOptions::new(WorkerDeploymentVersion {
+        deployment_name,
+        build_id,
+    })
+    .use_worker_versioning(use_worker_versioning);
+
+    if let Some(behavior) = default_versioning_behavior {
+        options = options.default_versioning_behavior(behavior);
+    }
+
     Ok(WorkerVersioningStrategy::WorkerDeploymentBased(
-        WorkerDeploymentOptions {
-            version: WorkerDeploymentVersion {
-                deployment_name,
-                build_id,
-            },
-            use_worker_versioning,
-            default_versioning_behavior,
-        },
+        options.build(),
     ))
 }
 
@@ -1560,20 +1565,25 @@ fn workflow_start_error_to_term<'a>(env: Env<'a>, err: StartWorkflowResult) -> T
 
 fn get_workflow_result_error_to_term<'a>(env: Env<'a>, err: GetWorkflowResult) -> Term<'a> {
     match err {
-        GetWorkflowResult::Get(WorkflowGetResultError::Failed(failure)) => {
-            match failure_to_term(env, Some(failure.as_ref())) {
+        GetWorkflowResult::Get(WorkflowGetResultError::Failed(err)) => {
+            // IncomingError arrives boxed; into_parts consumes it and hands
+            // back the proto Failure plus its cause, so the failure tree
+            // survives the version change intact.
+            let (failure, _cause) = (*err).into_parts();
+
+            match failure_to_term(env, Some(&failure)) {
                 Ok(term) => (failed(), term).encode(env),
                 Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
         }
         GetWorkflowResult::Get(WorkflowGetResultError::Cancelled { details }) => {
-            match payloads_to_terms(env, &details) {
+            match payloads_to_terms(env, details.raw()) {
                 Ok(terms) => (cancelled(), terms).encode(env),
                 Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
         }
         GetWorkflowResult::Get(WorkflowGetResultError::Terminated { details }) => {
-            match payloads_to_terms(env, &details) {
+            match payloads_to_terms(env, details.raw()) {
                 Ok(terms) => (terminated(), terms).encode(env),
                 Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
@@ -1596,9 +1606,8 @@ fn get_workflow_result_error_to_term<'a>(env: Env<'a>, err: GetWorkflowResult) -
 
 fn query_workflow_error_to_term<'a>(env: Env<'a>, err: QueryWorkflowResult) -> Term<'a> {
     match err {
-        QueryWorkflowResult::Query(WorkflowQueryError::Rejected(query_rejected)) => {
-            let status = WorkflowExecutionStatus::try_from(query_rejected.status)
-                .unwrap_or(WorkflowExecutionStatus::Unspecified);
+        QueryWorkflowResult::Query(WorkflowQueryError::Rejected { status }) => {
+            let status = status.unwrap_or(WorkflowExecutionStatus::Unspecified);
             (rejected(), workflow_status_atom(status)).encode(env)
         }
         QueryWorkflowResult::Query(WorkflowQueryError::NotFound(_)) => not_found().encode(env),
