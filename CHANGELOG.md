@@ -4,16 +4,18 @@
 
 ### Changed
 
-- **`:priority` is now known to be inert on supported servers, and tested as
-  such.** `temporalio/auto-setup:1.27` accepts priority and fairness and then
-  neither records nor enforces them: the WorkflowExecutionStarted event carries
-  no priority at all, and a high-priority workflow queued last behind a backlog
-  of low-priority ones is still dispatched last (measured by the server's own
-  close times, with both five pollers and one). The option is unchanged and
-  still validated; what changed is that the limitation is now pinned by a
-  canary that fails when a server starts recording priority, so it cannot go
-  unnoticed. The enforcement demonstration ships excluded, as
-  `--include priority_effect`.
+- **`:priority` needs a current server, and the suite now says so.** Server
+  1.31.2 records all three fields exactly as sent; server 1.27.4 — the
+  `temporalio/auto-setup:1.27` container in use locally when this was written —
+  accepts them and silently drops them. The external suite now asserts the round-trip,
+  so the difference fails loudly with the version to check instead of being
+  rediscovered. Whether priority changes dispatch *order* is unresolved:
+  measurements on trivial workflows were too noisy to call, and settling it
+  needs the execution-concurrency limits we do not expose yet (issue #47). The
+  option itself is unchanged.
+
+  `TEMPORAL_ADDRESS` now points the version-sensitive tests at another server,
+  so you can check against a current one without touching your local server.
 
 ## 0.5.3 — 2026-08-19
 

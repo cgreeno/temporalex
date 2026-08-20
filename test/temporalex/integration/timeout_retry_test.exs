@@ -17,6 +17,8 @@ defmodule Temporalex.TimeoutRetryIntegrationTest do
   @moduletag :external
   @moduletag timeout: 60_000
 
+  alias Temporalex.TestSupport.Server
+
   defmodule Acts do
     use Temporalex.Activity
 
@@ -45,7 +47,10 @@ defmodule Temporalex.TimeoutRetryIntegrationTest do
   end
 
   setup_all do
-    unless match?({:ok, _}, :gen_tcp.connect(~c"127.0.0.1", 7233, [:binary], 1_000)) do
+    unless match?(
+             {:ok, _},
+             :gen_tcp.connect(String.to_charlist(Server.host()), Server.port(), [:binary], 1_000)
+           ) do
       raise "Temporal dev server not reachable at 127.0.0.1:7233"
     end
 
@@ -55,7 +60,7 @@ defmodule Temporalex.TimeoutRetryIntegrationTest do
       Temporalex.Client.start_link(
         name: client,
         backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
+        target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name()
       )
 

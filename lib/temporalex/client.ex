@@ -123,12 +123,22 @@ defmodule Temporalex.Client do
         priority: [priority_key: 2, fairness_key: salon_id]
       )
 
-  > #### Server support {: .info}
+  > #### Server support {: .warning}
   >
-  > Priority requires a server that records it. Older servers accept the field
-  > and silently drop it — `temporalio/auto-setup:1.27` reports
-  > `priority: null` in both `describe` and history, including for workflows
-  > started by the `temporal` CLI.
+  > Priority needs a server that supports it, and an older one accepts the
+  > field and silently drops it rather than complaining. Measured: server
+  > **1.31.2** records all three fields; **1.27.4**
+  > (`temporalio/auto-setup:1.27`) reports `priority: null` in both `describe`
+  > and history, including for workflows started by the `temporal` CLI itself.
+  > Check yours before designing around this:
+  >
+  >     temporal operator cluster describe -o json | grep serverVersion
+  >
+  > And recording is not the same as honouring. We have confirmed 1.31.2
+  > *records* priority; we have **not** been able to demonstrate that it
+  > changes dispatch order. Treat priority as advisory until you have measured
+  > it on your own server with your own workload — do not build a tenant
+  > fairness guarantee on it untested.
   """
   def start_workflow(client, workflow, input, opts \\ []) when is_list(opts) do
     workflow_type = workflow_type(workflow)

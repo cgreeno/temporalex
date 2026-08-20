@@ -11,7 +11,9 @@ defmodule Temporalex.TelemetryIntegrationTest do
 
   @moduletag :external
 
-  @target "http://127.0.0.1:7233"
+  alias Temporalex.TestSupport.Server
+
+  @target Server.target()
 
   defmodule Workflow do
     use Temporalex.Workflow
@@ -204,7 +206,12 @@ defmodule Temporalex.TelemetryIntegrationTest do
   end
 
   defp temporal_available? do
-    case :gen_tcp.connect(~c"127.0.0.1", 7233, [:binary, active: false], 1_000) do
+    case :gen_tcp.connect(
+           String.to_charlist(Server.host()),
+           Server.port(),
+           [:binary, active: false],
+           1_000
+         ) do
       {:ok, socket} ->
         :gen_tcp.close(socket)
         true

@@ -14,6 +14,8 @@ defmodule Temporalex.SurfaceIntegrationTest do
 
   @moduletag :external
 
+  alias Temporalex.TestSupport.Server
+
   defmodule Greet do
     use Temporalex.Workflow, queue: "surface-greet"
 
@@ -100,7 +102,7 @@ defmodule Temporalex.SurfaceIntegrationTest do
       Temporalex.Client.start_link(
         name: client,
         backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
+        target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name()
       )
 
@@ -144,7 +146,7 @@ defmodule Temporalex.SurfaceIntegrationTest do
       {:ok, client_pid} =
         Temporalex.Client.start_link(
           backend: Temporalex.Backend.TemporalCore,
-          target: "http://127.0.0.1:7233",
+          target: Server.target(),
           namespace: Temporalex.TestSupport.Namespace.name()
         )
 
@@ -267,7 +269,12 @@ defmodule Temporalex.SurfaceIntegrationTest do
   end
 
   defp temporal_available? do
-    case :gen_tcp.connect(~c"127.0.0.1", 7233, [:binary, active: false], 1_000) do
+    case :gen_tcp.connect(
+           String.to_charlist(Server.host()),
+           Server.port(),
+           [:binary, active: false],
+           1_000
+         ) do
       {:ok, socket} ->
         :gen_tcp.close(socket)
         true
