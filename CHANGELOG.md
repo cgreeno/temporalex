@@ -6,7 +6,7 @@
 
 - **The Rust NIF now builds against `temporalio/sdk-rust` v0.7.0** (from
   v0.4.0, three releases back). No Elixir-facing behaviour changes: the whole
-  bump is absorbed inside the NIF, and the full suite — 462 tests including
+  bump is absorbed inside the NIF, and the full suite — 466 tests including
   the live external ones — passes unchanged.
 
   What actually moved, for anyone tracing it: `WorkerDeploymentOptions`
