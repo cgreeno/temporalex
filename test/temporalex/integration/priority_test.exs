@@ -7,43 +7,35 @@ defmodule Temporalex.PriorityIntegrationTest do
   That the option is accepted end to end, that omitting it is unchanged, and
   that the three documented limits are enforced with clear errors.
 
-  And that the server still ignores it — see the canary below.
+  And that the server records what we send, exactly.
 
-  ## What the server does with it, and why that is asserted here
+  ## Server version matters, and it bit us
 
-  Nothing, on the dev server this suite runs against
-  (`temporalio/auto-setup:1.27`). Two separate observations:
+  A previous version of this file asserted the opposite: that the server
+  records *no* priority. That was true of the server it was written against
+  and false in CI, which caught it within minutes of merging.
 
-    * It does not *record* it. The WorkflowExecutionStarted event carries no
-      priority at all, and `temporal workflow describe` reports
-      `priority: null` — including for workflows started by the `temporal`
-      CLI itself with `--priority-key`. So this is the server, not our send
-      path (which puts it on `StartWorkflowExecutionRequest.priority` the way
-      sdk-rust does).
+    * Server **1.27.4** (`temporalio/auto-setup:1.27`, the local docker
+      compose) accepts priority and silently drops it. The
+      WorkflowExecutionStarted event carries none, and `temporal workflow
+      describe` reports `priority: null` even for workflows the CLI started
+      itself with `--priority-key`.
 
-    * It does not *enforce* it either. Queue a backlog of `priority_key: 5`
-      workflows plus one `priority_key: 1` on an empty task queue, then start
-      the worker: the high-priority one runs LAST. Reproduced with the default
-      five pollers and with a single poller, so it is not a poller artefact.
+    * Server **1.31.2** (what `temporal server start-dev` bundles today, and
+      what CI runs) records all three fields exactly.
 
-  An earlier version of this file argued that asserting the first observation
-  would be "a test that can only fail for reasons unrelated to this code".
-  That was the wrong conclusion from a right premise. We do not want to assert
-  that priority *round-trips* — that would indeed fail on our own server. We
-  want to be told the day it starts working, because that is the day this
-  option stops being decorative. So the canary asserts the current answer and
-  fails loudly, with instructions, when it changes.
+  Recording is not the same as honouring. Whether priority changes dispatch
+  order is a separate question, and one we could not answer with a test — see
+  "What we assert about a server, and what we do not" in `docs/testing.md`.
 
-  The observer is pinned separately, in
-  `test/temporalex/backend/temporal_core/priority_decode_test.exs`: a started
-  event that *does* carry priority decodes with it intact. Without that, the
-  canary would pass just as well if we were simply blind to the field.
+  So this suite needs a server that supports priority, and the round-trip
+  below is what says so out loud rather than leaving it to be rediscovered.
+  If it fails, check your server version first: `temporal operator cluster
+  describe -o json | grep serverVersion`.
 
-  The enforcement experiment lives in
-  `test/temporalex/integration/priority_effect_test.exs`, excluded by default
-  because it fails on every server we can currently run against. It is the
-  demonstration we owe the feature, kept executable so it is one flag away
-  rather than a paragraph someone has to rebuild from scratch.
+  The decoder is pinned separately, in
+  `test/temporalex/backend/temporal_core/priority_decode_test.exs`, so a
+  failure here points at the server rather than at our parsing.
 
   Skipped by default; run with `mix test --include external`.
   """
@@ -52,6 +44,8 @@ defmodule Temporalex.PriorityIntegrationTest do
 
   @moduletag :external
 
+  alias Temporalex.TestSupport.Server
+
   defmodule Workflow do
     use Temporalex.Workflow
 
@@ -59,8 +53,8 @@ defmodule Temporalex.PriorityIntegrationTest do
   end
 
   setup_all do
-    unless temporal_available?() do
-      raise "Temporal dev server not reachable at 127.0.0.1:7233"
+    unless Server.reachable?() do
+      raise "Temporal dev server not reachable at #{Server.address()}"
     end
 
     task_queue = "priority-#{System.unique_integer([:positive])}"
@@ -71,7 +65,7 @@ defmodule Temporalex.PriorityIntegrationTest do
       Temporalex.Client.start_link(
         name: client,
         backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
+        target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name(),
         task_queue: task_queue
       )
@@ -152,14 +146,13 @@ defmodule Temporalex.PriorityIntegrationTest do
     end
   end
 
-  describe "server support canary" do
-    test "the server still records no priority", %{client: client} do
+  describe "the server records what we send" do
+    test "all three fields round-trip through the started event", %{client: client} do
       priority = [priority_key: 1, fairness_key: "salon-4291", fairness_weight: 2.5]
-      workflow_id = "priority-canary-#{System.unique_integer([:positive])}"
 
       {:ok, handle} =
         Temporalex.Client.start_workflow(client, Workflow, 7,
-          workflow_id: workflow_id,
+          workflow_id: "priority-roundtrip-#{System.unique_integer([:positive])}",
           priority: priority
         )
 
@@ -169,23 +162,43 @@ defmodule Temporalex.PriorityIntegrationTest do
       started = Temporalex.History.last(history, :workflow_execution_started)
       assert started, "no WorkflowExecutionStarted event — the history shape changed"
 
-      assert Map.get(started.attributes, :priority) == nil, """
-      GOOD NEWS, ACTION NEEDED: the server now records priority. We sent
-      #{inspect(priority)} and it came back as
-      #{inspect(Map.get(started.attributes, :priority))}.
+      assert Map.get(started.attributes, :priority) ==
+               %{priority_key: 1, fairness_key: "salon-4291", fairness_weight: 2.5},
+             """
+             the server did not record the priority we sent (#{inspect(priority)}); \
+             it came back as #{inspect(Map.get(started.attributes, :priority))}.
 
-      This assertion exists to catch exactly this moment. Now:
+             CHECK THE SERVER VERSION FIRST:
 
-        1. Run the enforcement experiment — `mix test --include external \
-      --include priority_effect` — and see whether dispatch order actually
-           honours the key. Recording and enforcing are separate questions.
-        2. Surface priority on describe. WorkflowExecutionInfo carries it
-           (field 24) but describe_to_term in native/temporalex_nif/src/lib.rs
-           does not map it, so today users can set a field they cannot read.
-        3. Drop the "Server support" admonition in Temporalex.Client.start_workflow
-           and this module's moduledoc, and replace this canary with a
-           round-trip assertion.
-      """
+                 temporal operator cluster describe -o json | grep serverVersion
+
+             1.27.4 accepts priority and drops it; 1.31.2 records it. If you are on
+             an old `temporalio/auto-setup` image, that is the cause — CI runs
+             `temporal server start-dev`, which bundles a current server. Our send
+             path is not in question here: the decoder is pinned separately in
+             test/temporalex/backend/temporal_core/priority_decode_test.exs.
+             """
+    end
+
+    test "an unset field is recorded as its default, not as ours", %{client: client} do
+      # Sending only the key must not invent a fairness key. The server fills
+      # the rest with its own defaults, which is what "inherits or falls back"
+      # in the start_workflow docs means concretely.
+      {:ok, handle} =
+        Temporalex.Client.start_workflow(client, Workflow, 7,
+          workflow_id: "priority-partial-#{System.unique_integer([:positive])}",
+          priority: [priority_key: 2]
+        )
+
+      assert {:ok, 7} = Temporalex.Client.get_result(handle, timeout: 15_000)
+      assert {:ok, history} = Temporalex.Client.fetch_workflow_history(handle)
+
+      started = Temporalex.History.last(history, :workflow_execution_started)
+      recorded = Map.get(started.attributes, :priority)
+
+      assert Map.get(recorded, :priority_key) == 2
+      assert Map.get(recorded, :fairness_key) in [nil, ""]
+      assert Map.get(recorded, :fairness_weight) in [nil, 0.0]
     end
   end
 
@@ -199,17 +212,6 @@ defmodule Temporalex.PriorityIntegrationTest do
     case Temporalex.Client.start_workflow(client, Workflow, 7, opts) do
       {:ok, handle} -> Temporalex.Client.get_result(handle, timeout: 10_000)
       {:error, error} -> {:error, error}
-    end
-  end
-
-  defp temporal_available? do
-    case :gen_tcp.connect(~c"127.0.0.1", 7233, [:binary, active: false], 1_000) do
-      {:ok, socket} ->
-        :gen_tcp.close(socket)
-        true
-
-      _ ->
-        false
     end
   end
 end

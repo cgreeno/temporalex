@@ -70,35 +70,69 @@ the same workflow id can run concurrently in two namespaces, and that
 sdk-core refuses a second in-process worker on the same namespace + queue
 (scale a single worker with `max_concurrent_*` instead).
 
-### Tests that document a server limitation
+### Your local server must match CI
 
-Some behaviour we expose cannot be demonstrated on any server we can run
-against. `:priority_effect` is the case today: it queues a backlog of
-low-priority workflows plus one high-priority one and asserts the
-high-priority one is dispatched early. That fails on
-`temporalio/auto-setup:1.27`, which accepts priority and ignores it.
+CI runs `temporal server start-dev`, which bundles a current server (1.31.2 at
+the time of writing). A long-lived local container can be much older — the one
+this was written against was `temporalio/auto-setup:1.27`, i.e. server 1.27.4.
+This repo pins no server image, so nothing keeps the two in step, and the gap
+is not theoretical — it cost us a merged commit:
 
-Such a test is excluded on its own tag and run by name:
+`:priority` is accepted by every version, recorded by 1.29.7 and 1.31.2, and
+silently dropped by 1.27.4. A test asserting the 1.27.4 behaviour passed
+locally, went green through review, merged, and turned CI red on the next run.
+The `:priority` tests now assert that the server records what we send, so on
+1.27.4 they fail — deliberately, with the version check in the failure message.
+
+Measured, so nobody has to re-derive it:
+
+| server | source | records `:priority` |
+|---|---|---|
+| 1.27.4 | `temporalio/auto-setup:1.27` | no |
+| 1.29.7 | `temporalio/auto-setup:1.29.7` | yes — full suite 466/0 |
+| 1.31.2 | `temporal server start-dev` | yes — full suite 466/0 |
+
+Note there is **no `auto-setup:1.31` image**: that repository's newest tag is
+1.29.7 (`:latest` is 1.29.3), and the CLI bundles a newer server than the
+published images. So 1.29.7 is the current ceiling for a compose-based stack,
+and it is sufficient.
+
+So: run the external suite against `temporal server start-dev`, or keep the
+container current. When a test passes locally and fails in CI, check the
+server version before anything else:
 
 ```
-mix test --include priority_effect
+temporal operator cluster describe -o json | grep serverVersion
 ```
 
-Two things to copy if you write another:
+`test_support/temporal_server.ex` exists for this: `TEMPORAL_ADDRESS` points
+the version-sensitive tests at another server, so you can check against a
+current one without touching your long-running container.
 
-* **Tag it *instead of* `:external`, not as well.** ExUnit's `include` beats
-  `exclude`, so a test tagged both runs on `--include external` and breaks CI.
-  Add the tag to the `server_tags` list in `test/test_helper.exs` so it still
-  gets a per-run namespace, and to the `exclude:` list so it stays off by
-  default.
-* **Pair it with a canary in the normal suite.** A test nobody runs tells you
-  nothing. The paired canary asserts the limitation still holds — for priority,
-  that the WorkflowExecutionStarted event records no priority at all — so the
-  day the server gains support, a green suite goes red and names the follow-up
-  work. Pin the observer too
-  (`test/temporalex/backend/temporal_core/priority_decode_test.exs`): an
-  "the field is absent" assertion passes just as happily when the *decoder* is
-  blind, so prove separately that a present field would be seen.
+```
+temporal server start-dev --port 7333 --headless
+TEMPORAL_ADDRESS=127.0.0.1:7333 mix test --include external
+```
+
+Every shared-server test reads it, including the `temporal` CLI calls a few of
+them make. Half-sweeping is worse than not sweeping: the per-run namespace is
+created on the override address, so any test still pointing at the default gets
+a namespace that does not exist there (found the hard way — 20 failures and 79
+invalid). The four own-server tests are exempt by design; they start their own
+dev server on a free port and pass that target explicitly.
+
+### What we assert about a server, and what we do not
+
+We assert that the server RECORDS what we send: deterministic, cheap, and it
+fails loudly on an old server. We do not assert dispatch ORDER. An attempt to
+(queue a backlog, queue one high-priority workflow last, compare close times)
+produced 8, 19, 22 and 23 of 24 for the high-priority target against 6, 8, 15
+and 20 for an equal-priority control — a hint of an effect, nowhere near a
+signal. Trivial workflows finish in milliseconds and the worker runs many at
+once, so scheduling noise swamps whatever priority does. Measuring it properly
+needs long-running workflows AND a cap on execution concurrency, which we do
+not expose yet (issue #47). Until then that claim belongs in an issue, not in
+a test that would flake or, worse, pass for the wrong reason.
 
 Notes:
 

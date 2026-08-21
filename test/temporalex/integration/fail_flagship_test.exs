@@ -12,6 +12,8 @@ defmodule Temporalex.FailFlagshipIntegrationTest do
 
   @moduletag :external
 
+  alias Temporalex.TestSupport.Server
+
   defmodule Payments do
     use Temporalex.Activity, start_to_close_timeout: 5_000
 
@@ -65,7 +67,10 @@ defmodule Temporalex.FailFlagshipIntegrationTest do
   end
 
   setup_all do
-    unless match?({:ok, _}, :gen_tcp.connect(~c"127.0.0.1", 7233, [:binary], 1_000)) do
+    unless match?(
+             {:ok, _},
+             :gen_tcp.connect(String.to_charlist(Server.host()), Server.port(), [:binary], 1_000)
+           ) do
       raise "Temporal dev server not reachable at 127.0.0.1:7233"
     end
 
@@ -75,7 +80,7 @@ defmodule Temporalex.FailFlagshipIntegrationTest do
       Temporalex.Client.start_link(
         name: client,
         backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
+        target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name()
       )
 

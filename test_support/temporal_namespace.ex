@@ -69,7 +69,10 @@ defmodule Temporalex.TestSupport.Namespace do
 
   defp create(cli, namespace) do
     with {_out, 0} <-
-           System.cmd(cli, ["operator", "namespace", "create", "--namespace", namespace],
+           System.cmd(
+             cli,
+             ["operator", "namespace", "create", "--namespace", namespace] ++
+               Temporalex.TestSupport.Server.cli_address_args(),
              stderr_to_stdout: true
            ),
          :ok <- await_usable(cli, namespace) do
@@ -91,7 +94,10 @@ defmodule Temporalex.TestSupport.Namespace do
     do: {:error, "namespace #{namespace} never became usable"}
 
   defp await_usable(cli, namespace, attempts) do
-    case System.cmd(cli, ["operator", "namespace", "describe", "--namespace", namespace],
+    case System.cmd(
+           cli,
+           ["operator", "namespace", "describe", "--namespace", namespace] ++
+             Temporalex.TestSupport.Server.cli_address_args(),
            stderr_to_stdout: true
          ) do
       {_out, 0} ->

@@ -27,6 +27,8 @@ defmodule Temporalex.QueueIsolationIntegrationTest do
   @moduletag :external
   @moduletag timeout: 120_000
 
+  alias Temporalex.TestSupport.Server
+
   # Same wire type on purpose — `name:` pins it, so both namespaces answer to
   # the identical workflow type. Only the namespace can keep them apart.
   defmodule AlphaWorkflow do
@@ -60,7 +62,10 @@ defmodule Temporalex.QueueIsolationIntegrationTest do
   end
 
   setup_all do
-    unless match?({:ok, _}, :gen_tcp.connect(~c"127.0.0.1", 7233, [:binary], 1_000)) do
+    unless match?(
+             {:ok, _},
+             :gen_tcp.connect(String.to_charlist(Server.host()), Server.port(), [:binary], 1_000)
+           ) do
       raise "Temporal dev server not reachable at 127.0.0.1:7233"
     end
 
@@ -106,7 +111,7 @@ defmodule Temporalex.QueueIsolationIntegrationTest do
     Temporalex.Client.start_link(
       name: name,
       backend: Temporalex.Backend.TemporalCore,
-      target: "http://127.0.0.1:7233",
+      target: Server.target(),
       namespace: namespace
     )
   end
