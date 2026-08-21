@@ -4,16 +4,37 @@
 
 ### Changed
 
-- **`:priority` is now known to be inert on supported servers, and tested as
-  such.** `temporalio/auto-setup:1.27` accepts priority and fairness and then
-  neither records nor enforces them: the WorkflowExecutionStarted event carries
-  no priority at all, and a high-priority workflow queued last behind a backlog
-  of low-priority ones is still dispatched last (measured by the server's own
-  close times, with both five pollers and one). The option is unchanged and
-  still validated; what changed is that the limitation is now pinned by a
-  canary that fails when a server starts recording priority, so it cannot go
-  unnoticed. The enforcement demonstration ships excluded, as
-  `--include priority_effect`.
+- **The Rust NIF now builds against `temporalio/sdk-rust` v0.7.0** (from
+  v0.4.0, three releases back). No Elixir-facing behaviour changes: the whole
+  bump is absorbed inside the NIF, and the full suite — 466 tests including
+  the live external ones — passes unchanged.
+
+  What actually moved, for anyone tracing it: `WorkerDeploymentOptions`
+  became `#[non_exhaustive]` with a builder; `VersioningBehavior` and
+  `WorkflowExecutionStatus` now each exist in two crates as distinct types;
+  a failed workflow arrives as `IncomingError` (which still exposes the proto
+  `Failure` and its `cause`, so the failure tree is intact); cancelled and
+  terminated results carry a `WorkflowResultDetails` wrapper;
+  `WorkflowQueryError::Rejected` became a struct variant; and start options
+  take typed `SearchAttributes` and `RetryPolicy` rather than raw protos —
+  both converted inside the NIF so Temporal's typing does not reach the
+  Elixir surface.
+
+  The client's `WorkflowExecutionStatus` is also forward-compatible now, so
+  an unrecognised status maps to `:unspecified` instead of being reported as
+  something it is not.
+- **`:priority` needs a current server, and the suite now says so.** Servers
+  1.29.7 and 1.31.2 record all three fields exactly as sent; server 1.27.4 — the
+  `temporalio/auto-setup:1.27` container in use locally when this was written —
+  accepts them and silently drops them. The external suite now asserts the round-trip,
+  so the difference fails loudly with the version to check instead of being
+  rediscovered. Whether priority changes dispatch *order* is unresolved:
+  measurements on trivial workflows were too noisy to call, and settling it
+  needs the execution-concurrency limits we do not expose yet (issue #47). The
+  option itself is unchanged.
+
+  `TEMPORAL_ADDRESS` now points the version-sensitive tests at another server,
+  so you can check against a current one without touching your local server.
 
 ### Fixed
 

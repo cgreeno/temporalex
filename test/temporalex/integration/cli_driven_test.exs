@@ -23,6 +23,8 @@ defmodule Temporalex.CliDrivenIntegrationTest do
 
   @moduletag :external
 
+  alias Temporalex.TestSupport.Server
+
   defmodule SleepingWorkflow do
     @moduledoc """
     Long-sleeping workflow so CLI commands have time to find it
@@ -100,7 +102,7 @@ defmodule Temporalex.CliDrivenIntegrationTest do
       Temporalex.Client.start_link(
         name: client_name,
         backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
+        target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name(),
         task_queue: task_queue,
         payload_codec: :json
@@ -346,7 +348,7 @@ defmodule Temporalex.CliDrivenIntegrationTest do
     System.cmd(
       "temporal",
       args ++
-        ["--address", "127.0.0.1:7233", "--namespace", Temporalex.TestSupport.Namespace.name()],
+        ["--address", Server.address(), "--namespace", Temporalex.TestSupport.Namespace.name()],
       stderr_to_stdout: true
     )
   end
@@ -374,7 +376,12 @@ defmodule Temporalex.CliDrivenIntegrationTest do
   end
 
   defp temporal_available? do
-    case :gen_tcp.connect(~c"127.0.0.1", 7233, [:binary, active: false], 1_000) do
+    case :gen_tcp.connect(
+           String.to_charlist(Server.host()),
+           Server.port(),
+           [:binary, active: false],
+           1_000
+         ) do
       {:ok, socket} ->
         :gen_tcp.close(socket)
         true

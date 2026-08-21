@@ -11,6 +11,8 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
 
   @moduletag :external
 
+  alias Temporalex.TestSupport.Server
+
   defmodule Activities do
     use Temporalex.Activity
 
@@ -174,7 +176,7 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
       Temporalex.Client.start_link(
         name: client_name,
         backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
+        target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name(),
         task_queue: task_queue
       )
@@ -352,7 +354,12 @@ defmodule Temporalex.E2eScenariosIntegrationTest do
   end
 
   defp temporal_available? do
-    case :gen_tcp.connect(~c"127.0.0.1", 7233, [:binary, active: false], 1_000) do
+    case :gen_tcp.connect(
+           String.to_charlist(Server.host()),
+           Server.port(),
+           [:binary, active: false],
+           1_000
+         ) do
       {:ok, socket} ->
         :gen_tcp.close(socket)
         true
