@@ -14,6 +14,8 @@ defmodule Temporalex.JsonCodecIntegrationTest do
 
   @moduletag :external
 
+  alias Temporalex.TestSupport.Server
+
   defmodule SimpleWorkflow do
     @moduledoc """
     Returns a JSON-friendly Elixir term so the json/plain encoding is
@@ -27,7 +29,12 @@ defmodule Temporalex.JsonCodecIntegrationTest do
   end
 
   defp temporal_available? do
-    case :gen_tcp.connect(~c"127.0.0.1", 7233, [:binary, active: false], 1_000) do
+    case :gen_tcp.connect(
+           String.to_charlist(Server.host()),
+           Server.port(),
+           [:binary, active: false],
+           1_000
+         ) do
       {:ok, socket} ->
         :gen_tcp.close(socket)
         true
@@ -51,7 +58,7 @@ defmodule Temporalex.JsonCodecIntegrationTest do
       Temporalex.Client.start_link(
         name: client_name,
         backend: Temporalex.Backend.TemporalCore,
-        target: "http://127.0.0.1:7233",
+        target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name(),
         task_queue: task_queue,
         payload_codec: :json
@@ -118,7 +125,7 @@ defmodule Temporalex.JsonCodecIntegrationTest do
         "--workflow-id",
         workflow_id,
         "--address",
-        "127.0.0.1:7233",
+        Server.address(),
         "--namespace",
         Temporalex.TestSupport.Namespace.name()
       ])
@@ -145,7 +152,7 @@ defmodule Temporalex.JsonCodecIntegrationTest do
              "--workflow-id",
              workflow_id,
              "--address",
-             "127.0.0.1:7233",
+             Server.address(),
              "--namespace",
              Temporalex.TestSupport.Namespace.name(),
              "--output",

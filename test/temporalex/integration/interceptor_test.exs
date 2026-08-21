@@ -18,6 +18,8 @@ defmodule Temporalex.InterceptorIntegrationTest do
 
   @moduletag :external
 
+  alias Temporalex.TestSupport.Server
+
   # Publishes its inbound headers so a test can assert what arrived.
   defmodule HeaderEcho do
     use Temporalex.Workflow
@@ -382,7 +384,7 @@ defmodule Temporalex.InterceptorIntegrationTest do
     Keyword.merge(client_opts,
       name: Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}"),
       backend: Temporalex.Backend.TemporalCore,
-      target: "http://127.0.0.1:7233",
+      target: Server.target(),
       namespace: Temporalex.TestSupport.Namespace.name(),
       task_queue: Keyword.get(client_opts, :task_queue, "default")
     )
@@ -399,7 +401,12 @@ defmodule Temporalex.InterceptorIntegrationTest do
   end
 
   defp temporal_available? do
-    case :gen_tcp.connect(~c"127.0.0.1", 7233, [:binary, active: false], 1_000) do
+    case :gen_tcp.connect(
+           String.to_charlist(Server.host()),
+           Server.port(),
+           [:binary, active: false],
+           1_000
+         ) do
       {:ok, socket} ->
         :gen_tcp.close(socket)
         true
