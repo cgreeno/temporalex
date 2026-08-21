@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.4 — 2026-08-21
 
 ### Changed
 
@@ -48,6 +48,20 @@
   sent `%{amount: amount}` to the activity, silently dropping every other key
   the caller passed. Wrappers now forward opaque values and never
   destructure; the implementation keeps the author's patterns.
+
+  **Upgrading with runs in flight.** The input a scheduled activity carries is
+  part of that command's replay identity, so a run that already scheduled a
+  pattern-argument activity replays against the old input and fails the
+  comparison. A nondeterminism failure is an activation failure, so such a run
+  sticks with a retrying workflow task rather than failing cleanly, and needs
+  a reset. Drain or complete those runs before upgrading. Runs that schedule
+  activities with plain (non-pattern) arguments are unaffected, as are runs
+  started after the upgrade.
+
+  A child workflow start is compared by its whole command struct rather than a
+  field list, so its input counts toward replay identity in the same way, and
+  a child replays in its own history: a stuck child leaves its parent waiting
+  on a result that never arrives.
 - **Guarded heads work.** `defactivity positive(n) when is_integer(n)` used to
   fail with an error naming a `__when__/2` the author never wrote: a guarded
   head is `{:when, _, [call, guard]}` and `:when` is itself an atom, so the
