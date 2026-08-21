@@ -139,6 +139,145 @@ defmodule Temporalex.ActivitySurfaceTest do
     end
   end
 
+  describe "argument shapes" do
+    defmodule Shapes do
+      use Temporalex.Activity, start_to_close_timeout: 5_000
+
+      # A bare underscore: nothing to forward by name, which used to be a
+      # CompileError ("invalid use of _") blaming Elixir rather than the macro.
+      defactivity ignores(_) do
+        {:ok, :ignored}
+      end
+
+      # Two args where stripping the underscore would collide on `x` and turn
+      # the wrapper head into a match of x against x.
+      defactivity collides(_x, x) do
+        {:ok, x}
+      end
+
+      # A pattern argument: the wrapper used to REBUILD this as an expression
+      # in the input list, silently dropping every key not named here.
+      defactivity destructures(%{amount: amount}) do
+        {:ok, amount}
+      end
+    end
+
+    test "a bare underscore argument compiles and dispatches" do
+      assert Temporalex.Testing.run_activity(Shapes, :ignores, [:anything]) == {:ok, :ignored}
+      assert function_exported?(Shapes, :ignores, 1)
+      assert function_exported?(Shapes, :ignores, 2)
+    end
+
+    test "an ignored arg does not collide with a real one of the same name" do
+      assert Temporalex.Testing.run_activity(Shapes, :collides, [:ignored, :kept]) == {:ok, :kept}
+    end
+
+    defmodule ShapesWorkflow do
+      use Temporalex.Workflow
+
+      def run(map) do
+        {:ok, amount} = Shapes.destructures(map)
+        {:ok, amount}
+      end
+    end
+
+    test "a pattern argument forwards the WHOLE value, not the destructured part" do
+      # The wrapper must not reconstruct the map: :currency has to survive the
+      # trip to the activity even though the pattern names only :amount.
+      {:ok, run} =
+        Temporalex.Testing.start_workflow(ShapesWorkflow, %{amount: 100, currency: "GBP"})
+
+      activity = Temporalex.Testing.assert_next_activity(run)
+
+      assert activity.input == [%{amount: 100, currency: "GBP"}],
+             "the pattern rebuilt the input and dropped keys: #{inspect(activity.input)}"
+
+      Temporalex.Testing.complete_activity(run, activity, {:ok, 100})
+      Temporalex.Testing.assert_completed(run, 100)
+    end
+
+    test "a default-valued argument refuses to compile, with the reason" do
+      error =
+        assert_raise ArgumentError, fn ->
+          defmodule Defaulted do
+            use Temporalex.Activity
+
+            defactivity charge(amount, currency \\ "GBP") do
+              {:ok, {amount, currency}}
+            end
+          end
+        end
+
+      message = Exception.message(error)
+      assert message =~ "has a default value"
+      assert message =~ "`currency`", "the message must name the offending argument: #{message}"
+      assert message =~ "swallow the call options"
+    end
+
+    test "a default inside a GUARDED head is refused too" do
+      # A guarded head is {:when, _, [call, guard]}, and :when is an atom, so
+      # this used to bind the activity name to :when and never look inside the
+      # real call — the default slipped past the check and failed later as
+      # `undefined function \\/2`.
+      error =
+        assert_raise ArgumentError, fn ->
+          defmodule GuardedDefault do
+            use Temporalex.Activity
+
+            defactivity charge(amount, currency \\ "GBP") when is_integer(amount) do
+              {:ok, {amount, currency}}
+            end
+          end
+        end
+
+      assert Exception.message(error) =~ "`currency`"
+    end
+  end
+
+  describe "guarded heads" do
+    defmodule Guarded do
+      use Temporalex.Activity, start_to_close_timeout: 5_000
+
+      defactivity positive(n) when is_integer(n) and n > 0 do
+        {:ok, n * 2}
+      end
+    end
+
+    defmodule GuardedWorkflow do
+      use Temporalex.Workflow
+
+      def run(n) do
+        {:ok, doubled} = Guarded.positive(n)
+        {:ok, doubled}
+      end
+    end
+
+    test "the guard stays on the implementation and the wrappers still dispatch" do
+      assert function_exported?(Guarded, :positive, 1)
+      assert function_exported?(Guarded, :positive, 2)
+      assert function_exported?(Guarded, :positive!, 1)
+
+      {:ok, run} = Temporalex.Testing.start_workflow(GuardedWorkflow, 21)
+      activity = Temporalex.Testing.assert_next_activity(run)
+
+      assert activity.input == [21]
+
+      Temporalex.Testing.complete_activity(run, activity, {:ok, 42})
+      Temporalex.Testing.assert_completed(run, 42)
+    end
+
+    test "the implementation honours the guard" do
+      assert Temporalex.Testing.run_activity(Guarded, :positive, [21]) == {:ok, 42}
+
+      # Wrappers forward values and never guard, so a value the guard rejects
+      # reaches the implementation and fails there — on the worker, the same
+      # place a pattern mismatch surfaces.
+      assert_raise FunctionClauseError, fn ->
+        Temporalex.Testing.run_activity(Guarded, :positive, [-1])
+      end
+    end
+  end
+
   describe "call-site options" do
     test "unknown call-site options raise before anything is dispatched" do
       error =
