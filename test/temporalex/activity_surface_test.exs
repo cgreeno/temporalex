@@ -185,13 +185,13 @@ defmodule Temporalex.ActivitySurfaceTest do
       activity = Temporalex.Testing.assert_next_activity(run)
 
       assert activity.input == [:ignored, :kept],
-             "the wrapper did not forward both arguments: #{inspect(activity.input)}"
+             "the wrapper forwarded the wrong input: #{inspect(activity.input)}"
 
       Temporalex.Testing.complete_activity(run, activity, {:ok, :kept})
       Temporalex.Testing.assert_completed(run, :kept)
     end
 
-    test "the implementation keeps the author's own argument names" do
+    test "run_activity/4 applies the implementation with the arguments in order" do
       assert Temporalex.Testing.run_activity(Shapes, :collides, [:ignored, :kept]) == {:ok, :kept}
     end
 
