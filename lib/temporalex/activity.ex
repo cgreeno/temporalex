@@ -190,7 +190,18 @@ defmodule Temporalex.Activity do
     to: Temporalex.Workflow.API,
     as: :cancellation_error
 
-  defp build_activity(caller, {name, meta, args_ast}, opts, body) when is_atom(name) do
+  # A guarded head arrives as {:when, _, [call, guard]}, and :when is itself an
+  # atom, so the clause below would happily bind `name` to :when and treat the
+  # real call and the guard as its two arguments — producing a phantom
+  # __when__/2 and an error naming a function the author never wrote. The guard
+  # belongs on the implementation only: wrappers forward values, so there is
+  # nothing for them to guard.
+  defp build_activity(caller, {:when, _meta, [call, guard]}, opts, body),
+    do: build_activity(caller, call, guard, opts, body)
+
+  defp build_activity(caller, head, opts, body), do: build_activity(caller, head, nil, opts, body)
+
+  defp build_activity(caller, {name, meta, args_ast}, guard, opts, body) when is_atom(name) do
     args_ast = args_ast || []
     {name_override, opts} = Keyword.pop(opts, :name)
     {local?, opts} = Keyword.pop(opts, :local, false)
@@ -211,11 +222,6 @@ defmodule Temporalex.Activity do
     impl_name = :"__#{name}__"
     bang_name = :"#{name}!"
     {dispatch_args, context?} = dispatch_args(args_ast)
-    # The dispatch/bang wrappers always read every arg (to build the activity
-    # input list), so strip any leading underscore the author used to mark the
-    # arg unused in the implementation body. This lets `defactivity foo(_x)`
-    # compile warning-free: the wrapper reads `x`, the impl leaves `_x` unused.
-    # (A bare `_` has no name to read and is unsupported — args must be named.)
     validate_arg_shapes!(caller.module, name, args_ast)
 
     # The dispatch/bang wrappers forward values; they never destructure. So
@@ -229,6 +235,9 @@ defmodule Temporalex.Activity do
       dispatch_args
       |> Enum.with_index()
       |> Enum.map(fn {_arg, index} -> Macro.var(:"arg#{index}", __MODULE__) end)
+
+    impl_call = {impl_name, meta, args_ast}
+    impl_head = if guard, do: {:when, meta, [impl_call, guard]}, else: impl_call
 
     call_opts_var = Macro.var(:call_opts, __MODULE__)
     dispatch_head = {name, meta, public_args ++ [{:\\, [], [call_opts_var, []]}]}
@@ -291,7 +300,7 @@ defmodule Temporalex.Activity do
         unquote(bang_dispatch_call)
       end
 
-      def unquote(impl_name)(unquote_splicing(args_ast)) do
+      def unquote(impl_head) do
         unquote(body)
       end
     end
@@ -388,21 +397,18 @@ defmodule Temporalex.Activity do
 
   defp dispatch_args(args), do: {args, false}
 
-  # Default-valued arguments cannot work: dispatch appends its own optional
-  # options argument, so `charge(amount, currency \\ "GBP")` would produce
-  # arities 1..3 and `charge(100, [timeout: 5_000])` would be ambiguous — is
-  # the list a currency or the call options? Refused with that explanation
-  # rather than resolved cleverly.
   defp validate_arg_shapes!(module, name, args_ast) do
     Enum.each(args_ast, fn
-      {:\\, _meta, [_arg, _default]} ->
+      {:\\, _meta, [arg, _default]} ->
         raise ArgumentError,
-              "defactivity #{name} in #{inspect(module)} has a default-valued " <>
-                "argument, which is not supported: the generated dispatch " <>
-                "appends its own optional options argument, so the arities " <>
-                "would overlap and a trailing keyword list would be ambiguous " <>
-                "(currency or call options?). Define a second activity, or " <>
-                "take a map and default inside the body."
+              "defactivity #{name} in #{inspect(module)}: the argument " <>
+                "`#{Macro.to_string(arg)}` has a default value, which dispatch " <>
+                "cannot support. The generated wrapper appends its own optional " <>
+                "options argument, so the two collapse into the same arity and " <>
+                "a trailing keyword list is taken as the default's value — " <>
+                "`#{name}(x, timeout: 5_000)` would silently swallow the call " <>
+                "options rather than apply them. Take a map and default inside " <>
+                "the body, or define a second activity."
 
       _arg ->
         :ok
