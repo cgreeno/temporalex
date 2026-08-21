@@ -168,7 +168,34 @@ defmodule Temporalex.ActivitySurfaceTest do
       assert function_exported?(Shapes, :ignores, 2)
     end
 
+    defmodule CollidesWorkflow do
+      use Temporalex.Workflow
+
+      def run({first, second}) do
+        {:ok, kept} = Shapes.collides(first, second)
+        {:ok, kept}
+      end
+    end
+
     test "an ignored arg does not collide with a real one of the same name" do
+      # Scheduled from a workflow rather than asserted through
+      # Temporalex.Testing.run_activity/4: that applies the implementation
+      # directly and never touches the generated wrapper, which is where the
+      # collision was. Two DIFFERENT values are the point — stripping the
+      # underscore made the head collides(x, x), which cannot match them, so
+      # nothing was scheduled at all.
+      {:ok, run} = Temporalex.Testing.start_workflow(CollidesWorkflow, {:ignored, :kept})
+
+      activity = Temporalex.Testing.assert_next_activity(run)
+
+      assert activity.input == [:ignored, :kept],
+             "the wrapper did not forward both arguments: #{inspect(activity.input)}"
+
+      Temporalex.Testing.complete_activity(run, activity, {:ok, :kept})
+      Temporalex.Testing.assert_completed(run, :kept)
+    end
+
+    test "the implementation keeps the author's own argument names" do
       assert Temporalex.Testing.run_activity(Shapes, :collides, [:ignored, :kept]) == {:ok, :kept}
     end
 
