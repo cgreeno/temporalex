@@ -27,11 +27,23 @@
   sent `%{amount: amount}` to the activity, silently dropping every other key
   the caller passed. Wrappers now forward opaque values and never
   destructure; the implementation keeps the author's patterns.
+- **Guarded heads work.** `defactivity positive(n) when is_integer(n)` used to
+  fail with an error naming a `__when__/2` the author never wrote: a guarded
+  head is `{:when, _, [call, guard]}` and `:when` is itself an atom, so the
+  macro bound the activity name to `:when` and treated the real call and the
+  guard as its two arguments. The guard now rides with the implementation,
+  where it belongs — wrappers forward values, so there is nothing for them to
+  guard. A value the guard rejects fails in the implementation on the worker,
+  the same place a pattern mismatch surfaces.
+- **A default inside a guarded head is refused too**, by the same check. It
+  previously slipped past, for the reason above, and failed later as
+  `undefined function \\/2`.
 - **Default-valued arguments now refuse to compile, with the reason.**
   `defactivity charge(amount, currency \\ "GBP")` cannot work: dispatch
   appends its own optional options argument, so the arities overlap and
-  `charge(100, [timeout: 5_000])` is ambiguous — currency or call options?
-  Previously this failed with "undefined function `\\/2`".
+  `charge(100, [timeout: 5_000])` would silently swallow the call options as
+  the default's value. Previously this failed with "undefined function
+  `\\/2`". The refusal names the offending argument.
 
 ## 0.5.3 — 2026-08-19
 

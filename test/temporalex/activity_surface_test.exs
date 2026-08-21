@@ -209,9 +209,72 @@ defmodule Temporalex.ActivitySurfaceTest do
         end
 
       message = Exception.message(error)
-      assert message =~ "default-valued argument"
-      assert message =~ "options argument"
-      assert message =~ "ambiguous"
+      assert message =~ "has a default value"
+      assert message =~ "`currency`", "the message must name the offending argument: #{message}"
+      assert message =~ "swallow the call options"
+    end
+
+    test "a default inside a GUARDED head is refused too" do
+      # A guarded head is {:when, _, [call, guard]}, and :when is an atom, so
+      # this used to bind the activity name to :when and never look inside the
+      # real call — the default slipped past the check and failed later as
+      # `undefined function \\/2`.
+      error =
+        assert_raise ArgumentError, fn ->
+          defmodule GuardedDefault do
+            use Temporalex.Activity
+
+            defactivity charge(amount, currency \\ "GBP") when is_integer(amount) do
+              {:ok, {amount, currency}}
+            end
+          end
+        end
+
+      assert Exception.message(error) =~ "`currency`"
+    end
+  end
+
+  describe "guarded heads" do
+    defmodule Guarded do
+      use Temporalex.Activity, start_to_close_timeout: 5_000
+
+      defactivity positive(n) when is_integer(n) and n > 0 do
+        {:ok, n * 2}
+      end
+    end
+
+    defmodule GuardedWorkflow do
+      use Temporalex.Workflow
+
+      def run(n) do
+        {:ok, doubled} = Guarded.positive(n)
+        {:ok, doubled}
+      end
+    end
+
+    test "the guard stays on the implementation and the wrappers still dispatch" do
+      assert function_exported?(Guarded, :positive, 1)
+      assert function_exported?(Guarded, :positive, 2)
+      assert function_exported?(Guarded, :positive!, 1)
+
+      {:ok, run} = Temporalex.Testing.start_workflow(GuardedWorkflow, 21)
+      activity = Temporalex.Testing.assert_next_activity(run)
+
+      assert activity.input == [21]
+
+      Temporalex.Testing.complete_activity(run, activity, {:ok, 42})
+      Temporalex.Testing.assert_completed(run, 42)
+    end
+
+    test "the implementation honours the guard" do
+      assert Temporalex.Testing.run_activity(Guarded, :positive, [21]) == {:ok, 42}
+
+      # Wrappers forward values and never guard, so a value the guard rejects
+      # reaches the implementation and fails there — on the worker, the same
+      # place a pattern mismatch surfaces.
+      assert_raise FunctionClauseError, fn ->
+        Temporalex.Testing.run_activity(Guarded, :positive, [-1])
+      end
     end
   end
 
