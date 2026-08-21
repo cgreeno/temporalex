@@ -178,12 +178,8 @@ defmodule Temporalex.ActivitySurfaceTest do
     end
 
     test "an ignored arg does not collide with a real one of the same name" do
-      # Scheduled from a workflow rather than asserted through
-      # Temporalex.Testing.run_activity/4: that applies the implementation
-      # directly and never touches the generated wrapper, which is where the
-      # collision was. Two DIFFERENT values are the point — stripping the
-      # underscore made the head collides(x, x), which cannot match them, so
-      # nothing was scheduled at all.
+      # Through a workflow, not run_activity/4: that applies the implementation
+      # directly and never reaches the wrapper, where the collision was.
       {:ok, run} = Temporalex.Testing.start_workflow(CollidesWorkflow, {:ignored, :kept})
 
       activity = Temporalex.Testing.assert_next_activity(run)
