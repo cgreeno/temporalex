@@ -12,7 +12,8 @@ use temporalio_client::{
     UntypedUpdate, UntypedWorkflow, WorkflowCancelOptions, WorkflowDescribeOptions,
     WorkflowExecuteUpdateOptions, WorkflowExecutionDescription, WorkflowExecutionInfo,
     WorkflowExecutionStatus, WorkflowFetchHistoryOptions, WorkflowGetResultOptions, WorkflowHandle,
-    WorkflowQueryOptions, WorkflowSignalOptions, WorkflowStartOptions, WorkflowTerminateOptions,
+    WorkflowQueryOptions, WorkflowSignalOptions, WorkflowStartOptions, WorkflowStartSignal,
+    WorkflowTerminateOptions,
     errors::{
         WorkflowGetResultError, WorkflowInteractionError, WorkflowQueryError, WorkflowStartError,
         WorkflowUpdateError,
@@ -201,6 +202,9 @@ rustler::atoms! {
     // Task priority and fairness (see `priority_from_opts`).
     priority,
     priority_key,
+    start_signal,
+    name,
+    args,
     fairness_key,
     fairness_weight,
     // Worker versioning (see `versioning_strategy_from_opts`).
@@ -2206,11 +2210,32 @@ fn workflow_start_options(
     // The client wraps the proto retry policy in its own type now; From is
     // the whole conversion, so our option decoding is unchanged.
     options.retry_policy = retry_policy_from_opts(opts)?.map(Into::into);
+    options.start_signal = start_signal_from_opts(opts)?;
     options.priority = priority_from_opts(opts)?;
     options.header = header_from_opts(opts)?;
     options.static_summary = keyword_get_string(opts, static_summary())?;
     options.static_details = keyword_get_string(opts, static_details())?;
     Ok(options)
+}
+
+fn start_signal_from_opts(opts: Term) -> anyhow::Result<Option<WorkflowStartSignal>> {
+    let Some(term) = keyword_get_present(opts, start_signal())? else {
+        return Ok(None);
+    };
+
+    let Some(signal_name) = keyword_get_string(term, name())? else {
+        return Err(anyhow!("start_signal requires a name"));
+    };
+
+    let mut signal = WorkflowStartSignal::new(signal_name).build();
+    signal.input = match keyword_get_present(term, args())? {
+        None => None,
+        Some(args) => Some(Payloads {
+            payloads: terms_list_to_payloads(args)?,
+        }),
+    };
+
+    Ok(Some(signal))
 }
 
 fn signal_options(opts: Term) -> anyhow::Result<WorkflowSignalOptions> {

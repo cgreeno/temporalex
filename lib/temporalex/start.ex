@@ -55,7 +55,8 @@ defmodule Temporalex.Start do
     :run_timeout,
     :execution_timeout,
     :id_conflict_policy,
-    :id_reuse_policy
+    :id_reuse_policy,
+    :start_signal
   ]
 
   @resolution_opts [:id, :queue, :client, :timeout]
