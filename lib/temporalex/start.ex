@@ -80,6 +80,26 @@ defmodule Temporalex.Start do
     }
   end
 
+  # temporalio-client v0.7.0 builds SignalWithStartWorkflowExecutionRequest
+  # without :priority, so it would reach neither the server nor an error — the
+  # silent-drop hazard of RFC 0002 §10, one layer below the allowlist test.
+  # :retry_policy is carried, and must not be listed here.
+  @dropped_by_signal_with_start %{priority: "priority/2 and fairness/3"}
+
+  @doc false
+  def refuse_dropped_with_signal_opts!(opts) when is_list(opts) do
+    if Keyword.has_key?(opts, :start_signal) do
+      for {key, step} <- @dropped_by_signal_with_start, Keyword.has_key?(opts, key) do
+        raise ArgumentError,
+              "#{step} cannot be combined with with_signal/3 — Temporal's " <>
+                "signal-with-start request carries no #{key}, so it would be " <>
+                "silently dropped. Drop the step, or start and signal separately."
+      end
+    end
+
+    :ok
+  end
+
   @doc false
   def generate_id do
     "temporalex-#{System.system_time(:millisecond)}-#{System.unique_integer([:positive])}"

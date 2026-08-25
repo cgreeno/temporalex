@@ -364,13 +364,13 @@ defmodule Temporalex.SurfaceTest do
       {:ok, start: Booking.new(42) |> Temporalex.with_signal("go", [])}
     end
 
-    test "retry is refused rather than silently dropped", %{start: start} do
+    test "priority is refused rather than silently dropped", %{start: start} do
       error =
         assert_raise ArgumentError, fn ->
-          start |> Temporalex.retry(max_attempts: 3) |> Temporalex.start()
+          start |> Temporalex.priority(2) |> Temporalex.start()
         end
 
-      assert Exception.message(error) =~ "retry/2 cannot be combined with with_signal/3"
+      assert Exception.message(error) =~ "cannot be combined with with_signal/3"
       assert Exception.message(error) =~ "silently dropped"
     end
 
@@ -389,7 +389,7 @@ defmodule Temporalex.SurfaceTest do
     test "the refusal does not depend on chain order" do
       assert_raise ArgumentError, ~r/cannot be combined with with_signal\/3/, fn ->
         Booking.new(42)
-        |> Temporalex.retry(max_attempts: 3)
+        |> Temporalex.priority(2)
         |> Temporalex.with_signal("go", [])
         |> Temporalex.start()
       end
@@ -397,18 +397,31 @@ defmodule Temporalex.SurfaceTest do
 
     test "execute/1 is guarded too, not just start/1", %{start: start} do
       assert_raise ArgumentError, ~r/cannot be combined with with_signal\/3/, fn ->
-        start |> Temporalex.retry(max_attempts: 3) |> Temporalex.execute()
+        start |> Temporalex.priority(2) |> Temporalex.execute()
       end
     end
 
-    test "retry and priority are untouched without with_signal" do
-      start =
-        Booking.new(42)
-        |> Temporalex.retry(max_attempts: 3)
-        |> Temporalex.priority(2)
+    test "the shared guard refuses the raw option spelling too" do
+      assert_raise ArgumentError, ~r/cannot be combined with with_signal\/3/, fn ->
+        Temporalex.Start.refuse_dropped_with_signal_opts!(
+          start_signal: [name: "go", args: []],
+          priority: [priority_key: 2]
+        )
+      end
+    end
 
-      assert start.opts[:retry_policy] == [max_attempts: 3]
+    test "priority is untouched without with_signal" do
+      start = Booking.new(42) |> Temporalex.priority(2)
+
+      assert :ok = Temporalex.Start.refuse_dropped_with_signal_opts!(start.opts)
       assert start.opts[:priority][:priority_key] == 2
+    end
+
+    test "retry survives with_signal — the request carries it", %{start: start} do
+      start = Temporalex.retry(start, max_attempts: 3)
+
+      assert :ok = Temporalex.Start.refuse_dropped_with_signal_opts!(start.opts)
+      assert start.opts[:retry_policy] == [max_attempts: 3]
     end
 
     test "the options signal-with-start does carry are not refused", %{start: start} do
@@ -419,11 +432,17 @@ defmodule Temporalex.SurfaceTest do
         |> Temporalex.headers(traceparent: "00-abc-1-01")
         |> Temporalex.run_timeout(60_000)
         |> Temporalex.execution_timeout(120_000)
+        |> Temporalex.retry(max_attempts: 3)
         |> Map.fetch!(:opts)
 
+      assert :ok = Temporalex.Start.refuse_dropped_with_signal_opts!(opts)
       assert opts[:start_signal][:name] == "go"
       assert opts[:cron_schedule] == "0 9 * * *"
       assert opts[:search_attributes] == %{"salon_id" => "salon-9"}
+    end
+
+    test "an empty signal name is refused at the chain step", %{start: start} do
+      assert_raise FunctionClauseError, fn -> Temporalex.with_signal(start, "") end
     end
   end
 

@@ -1560,6 +1560,15 @@ fn workflow_start_error_to_term<'a>(env: Env<'a>, err: StartWorkflowResult) -> T
         StartWorkflowResult::Start(WorkflowStartError::PayloadConversion(err)) => {
             error_reason(env, payload_conversion(), format!("{err:#}"))
         }
+        // Only the plain-start branch maps AlreadyExists to AlreadyStarted;
+        // signal-with-start lets the status through as Rpc, which would hand
+        // callers a generic error for the duplicate they asked to be told
+        // about. The run id is not on the status, hence nil.
+        StartWorkflowResult::Start(WorkflowStartError::Rpc(err))
+            if err.code() == temporalio_client::tonic::Code::AlreadyExists =>
+        {
+            (already_started(), nil().encode(env)).encode(env)
+        }
         StartWorkflowResult::Start(WorkflowStartError::Rpc(err)) => {
             error_reason(env, rpc(), format!("{err:#}"))
         }

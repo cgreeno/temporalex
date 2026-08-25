@@ -37,14 +37,15 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
             "settled" => fn [%{"payment_id" => id} = payment], acc ->
               acc = Map.put(acc, id, payment)
               if map_size(acc) == expected, do: {:stop, acc}, else: {:noreply, acc}
-            end
+            end,
+            "abandoned" => fn [], acc -> {:stop, Map.put(acc, "abandoned", %{})} end
           },
           timeout: Map.get(input, :phase_timeout, 20_000)
         )
 
       case settled do
-        {:timeout, partial} -> {:ok, {:timed_out, Map.keys(partial) |> Enum.sort()}}
-        acc -> {:ok, {:settled, Map.keys(acc) |> Enum.sort()}}
+        {:timeout, partial} -> {:ok, {:timed_out, Enum.sort(Map.keys(partial))}}
+        acc -> {:ok, {:settled, Enum.sort(Map.keys(acc)), acc}}
       end
     end
   end
@@ -92,11 +93,16 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
   defp register_search_attribute! do
     name = "CustomKeywordField"
 
-    with cli when is_binary(cli) <- System.find_executable("temporal"),
-         {_out, 0} <- search_attribute_cmd(cli, ["create", "--type", "Keyword"], name) do
-      name
-    else
-      _ -> nil
+    # `create` fails when the attribute already exists — which it does in the
+    # `default` namespace Namespace.setup! falls back to without the CLI — so
+    # its exit code is deliberately ignored.
+    case System.find_executable("temporal") do
+      nil ->
+        nil
+
+      cli ->
+        search_attribute_cmd(cli, ["create", "--type", "Keyword"], name)
+        name
     end
   end
 
@@ -156,7 +162,7 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
 
     :ok = Settlement.signal!(%{order_id: id}, "settled", settlement("pay-2"), client: ctx.client)
 
-    assert {:ok, {:settled, ["pay-1", "pay-2"]}} = Temporalex.await(handle)
+    assert {:ok, {:settled, ["pay-1", "pay-2"], _}} = Temporalex.await(handle)
   end
 
   test "the settlement lands even though it precedes the phase that handles it", ctx do
@@ -168,7 +174,7 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
       |> Temporalex.with_signal("settled", [settlement("pay-only")])
       |> Temporalex.start!()
 
-    assert {:ok, {:settled, ["pay-only"]}} = Temporalex.await(handle)
+    assert {:ok, {:settled, ["pay-only"], _}} = Temporalex.await(handle)
   end
 
   test "a second settlement attaches to the running checkout rather than starting one", ctx do
@@ -187,7 +193,7 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
       |> Temporalex.start!()
 
     assert second.run_id == first.run_id
-    assert {:ok, {:settled, ["pay-1", "pay-2"]}} = Temporalex.await(first)
+    assert {:ok, {:settled, ["pay-1", "pay-2"], _}} = Temporalex.await(first)
   end
 
   test "a start without with_signal is unchanged", ctx do
@@ -197,7 +203,7 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
 
     :ok = Settlement.signal!(%{order_id: id}, "settled", settlement("pay-1"), client: ctx.client)
 
-    assert {:ok, {:settled, ["pay-1"]}} = Temporalex.await(handle)
+    assert {:ok, {:settled, ["pay-1"], _}} = Temporalex.await(handle)
   end
 
   test "concurrent settlements racing the start all land exactly once", ctx do
@@ -219,7 +225,7 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
       |> Enum.map(fn {:ok, handle} -> handle end)
 
     assert [_] = handles |> Enum.map(& &1.run_id) |> Enum.uniq()
-    assert {:ok, {:settled, settled}} = Temporalex.await(hd(handles))
+    assert {:ok, {:settled, settled, _}} = Temporalex.await(hd(handles))
     assert settled == Enum.sort(payments)
   end
 
@@ -242,7 +248,7 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
 
     :ok = Settlement.signal!(%{order_id: id}, "settled", settlement("pay-2"), client: ctx.client)
 
-    assert {:ok, {:settled, ["pay-1", "pay-2"]}} = Temporalex.await(first)
+    assert {:ok, {:settled, ["pay-1", "pay-2"], _}} = Temporalex.await(first)
   end
 
   test "the phase timeout still fires when a settlement never arrives", ctx do
@@ -274,23 +280,86 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
       |> Temporalex.with_signal("settled", [payment])
       |> Temporalex.start!()
 
-    assert {:ok, {:settled, ["pay-1"]}} = Temporalex.await(handle)
+    assert {:ok, {:settled, ["pay-1"], received}} = Temporalex.await(handle)
+    assert received["pay-1"] == payment
   end
 
-  test "with_signal carrying no arguments still starts and delivers", ctx do
+  test "with_signal/2 sends a signal carrying no arguments at all", ctx do
     id = order_id()
 
     handle =
       id
       |> checkout(1, ctx)
+      |> Temporalex.with_signal("abandoned")
+      |> Temporalex.start!()
+
+    assert {:ok, {:settled, ["abandoned"], _}} = Temporalex.await(handle)
+  end
+
+  test "retry survives the signal-with-start request", ctx do
+    id = order_id()
+
+    handle =
+      id
+      |> checkout(1, ctx)
+      |> Temporalex.retry(max_attempts: 3)
       |> Temporalex.with_signal("settled", [settlement("pay-1")])
       |> Temporalex.start!()
 
-    assert {:ok, {:settled, ["pay-1"]}} = Temporalex.await(handle)
+    assert {:ok, {:settled, ["pay-1"], _}} = Temporalex.await(handle)
+  end
+
+  test "priority is refused on the raw client path, not silently dropped", ctx do
+    id = order_id()
+
+    assert_raise ArgumentError, ~r/cannot be combined with with_signal\/3/, fn ->
+      Temporalex.Client.start_workflow(ctx.client, Settlement, %{order_id: id, expected: 1},
+        workflow_id: "order-#{id}",
+        start_signal: [name: "settled", args: [settlement("pay-1")]],
+        priority: [priority_key: 2],
+        timeout: 10_000
+      )
+    end
+  end
+
+  test "id_conflict_policy: :fail is rejected by the server for signal-with-start", ctx do
+    id = order_id()
+
+    assert {:error, %Temporalex.TransportError{} = error} =
+             %{order_id: id, expected: 1}
+             |> Settlement.new(id_conflict_policy: :fail)
+             |> Temporalex.client(ctx.client)
+             |> Temporalex.with_signal("settled", [settlement("pay-1")])
+             |> Temporalex.start()
+
+    assert Exception.message(error) =~ "not supported for this operation"
+  end
+
+  test "a reuse-rejected duplicate surfaces as already-started, not a raw rpc error", ctx do
+    id = order_id()
+
+    done =
+      id
+      |> checkout(1, ctx)
+      |> Temporalex.with_signal("settled", [settlement("pay-1")])
+      |> Temporalex.start!()
+
+    assert {:ok, {:settled, ["pay-1"], _}} = Temporalex.await(done)
+
+    assert {:error, error} =
+             %{order_id: id, expected: 1}
+             |> Settlement.new(id_reuse_policy: :reject_duplicate)
+             |> Temporalex.client(ctx.client)
+             |> Temporalex.with_signal("settled", [settlement("pay-2")])
+             |> Temporalex.start()
+
+    assert %Temporalex.WorkflowAlreadyStartedError{} = error
   end
 
   test "search attributes survive the signal-with-start request", ctx do
-    if ctx.search_attribute == nil, do: raise("could not register a search attribute")
+    if ctx.search_attribute == nil do
+      raise "no usable search attribute; register CustomKeywordField or install the temporal CLI"
+    end
 
     id = order_id()
     label = "sws-#{System.unique_integer([:positive])}"
@@ -311,7 +380,7 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
            end),
            "the workflow was not indexed under the search attribute sent with the signal"
 
-    assert {:ok, {:settled, ["pay-1"]}} = Temporalex.await(handle)
+    assert {:ok, {:settled, ["pay-1"], _}} = Temporalex.await(handle)
   end
 
   test "a start_signal with no name is refused by the NIF rather than crashing it", ctx do
