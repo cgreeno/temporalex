@@ -222,7 +222,10 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
         max_concurrency: 8,
         timeout: 30_000
       )
-      |> Enum.map(fn {:ok, handle} -> handle end)
+      |> Enum.map(fn
+        {:ok, handle} -> handle
+        {:exit, reason} -> flunk("a racing start failed: #{inspect(reason)}")
+      end)
 
     assert [_] = handles |> Enum.map(& &1.run_id) |> Enum.uniq()
     assert {:ok, {:settled, settled, _}} = Temporalex.await(hd(handles))
@@ -322,17 +325,20 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
     end
   end
 
-  test "id_conflict_policy: :fail is rejected by the server for signal-with-start", ctx do
+  # The server answers WORKFLOW_ID_CONFLICT_POLICY_FAIL with "not supported for
+  # this operation"; the guard turns that into a local error, so this asserts
+  # the guard rather than the server.
+  test "id_conflict_policy: :fail is refused on the raw client path too", ctx do
     id = order_id()
 
-    assert {:error, %Temporalex.TransportError{} = error} =
-             %{order_id: id, expected: 1}
-             |> Settlement.new(id_conflict_policy: :fail)
-             |> Temporalex.client(ctx.client)
-             |> Temporalex.with_signal("settled", [settlement("pay-1")])
-             |> Temporalex.start()
-
-    assert Exception.message(error) =~ "not supported for this operation"
+    assert_raise ArgumentError, ~r/id_conflict_policy: :fail cannot be combined/, fn ->
+      Temporalex.Client.start_workflow(ctx.client, Settlement, %{order_id: id, expected: 1},
+        workflow_id: "order-#{id}",
+        start_signal: [name: "settled", args: [settlement("pay-1")]],
+        workflow_id_conflict_policy: :fail,
+        timeout: 10_000
+      )
+    end
   end
 
   test "a reuse-rejected duplicate surfaces as already-started, not a raw rpc error", ctx do
@@ -353,7 +359,8 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
              |> Temporalex.with_signal("settled", [settlement("pay-2")])
              |> Temporalex.start()
 
-    assert %Temporalex.WorkflowAlreadyStartedError{} = error
+    assert %Temporalex.WorkflowAlreadyStartedError{run_id: run_id} = error
+    assert run_id == done.run_id
   end
 
   test "search attributes survive the signal-with-start request", ctx do

@@ -125,11 +125,12 @@ defmodule Temporalex do
   before any `phase/2` has declared a handler for it. It waits in the signal
   buffer and is consumed when a phase that handles it opens.
 
-  `priority/2` and `fairness/3` are refused in combination: Temporal's
-  signal-with-start request carries no priority. Two further differences it
-  does not refuse — an already-started duplicate arrives as a plain RPC error
-  rather than `Temporalex.WorkflowAlreadyStartedError` only when the NIF
-  cannot recover the run id, and eager start is unavailable.
+  Refused in combination, because Temporal's signal-with-start request cannot
+  carry them: `priority/2` and `fairness/3`, and `id_conflict_policy: :fail`.
+  `retry/2`, `cron/2`, `index/2`, `headers/2` and both timeouts are carried.
+
+  A duplicate reports `Temporalex.WorkflowAlreadyStartedError` with its run id,
+  the same as a plain start.
   """
   @spec with_signal(Start.t(), String.t(), list()) :: Start.t()
   def with_signal(%Start{} = start, name, args \\ [])

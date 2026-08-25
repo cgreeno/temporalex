@@ -88,17 +88,30 @@ defmodule Temporalex.Start do
 
   @doc false
   def refuse_dropped_with_signal_opts!(opts) when is_list(opts) do
-    if Keyword.has_key?(opts, :start_signal) do
-      for {key, step} <- @dropped_by_signal_with_start, Keyword.has_key?(opts, key) do
+    if present?(opts, :start_signal) do
+      for {key, step} <- @dropped_by_signal_with_start, present?(opts, key) do
         raise ArgumentError,
               "#{step} cannot be combined with with_signal/3 — Temporal's " <>
                 "signal-with-start request carries no #{key}, so it would be " <>
                 "silently dropped. Drop the step, or start and signal separately."
       end
+
+      if Keyword.get(opts, :id_conflict_policy) == :fail or
+           Keyword.get(opts, :workflow_id_conflict_policy) == :fail do
+        raise ArgumentError,
+              "id_conflict_policy: :fail cannot be combined with with_signal/3 — " <>
+                "Temporal rejects the policy for signal-with-start, which exists " <>
+                "to attach to a running execution. Use :use_existing, or start " <>
+                "and signal separately."
+      end
     end
 
     :ok
   end
+
+  # The NIF treats an explicit nil as absent (keyword_get_present), so a
+  # refusal keyed on has_key? would reject an option that drops nothing.
+  defp present?(opts, key), do: Keyword.get(opts, key) not in [nil, []]
 
   @doc false
   def generate_id do

@@ -20,6 +20,8 @@ use temporalio_client::{
     },
 };
 use temporalio_common::data_converters::RawValue;
+use temporalio_common::protos::temporal::api::errordetails::v1::WorkflowExecutionAlreadyStartedFailure;
+use temporalio_common::protos::utilities::decode_status_detail;
 use temporalio_common::protos::coresdk::workflow_completion::WorkflowActivationCompletion;
 use temporalio_common::protos::temporal::api::history::v1::History;
 use temporalio_common::protos::coresdk::{ActivityHeartbeat, ActivityTaskCompletion};
@@ -1563,11 +1565,19 @@ fn workflow_start_error_to_term<'a>(env: Env<'a>, err: StartWorkflowResult) -> T
         // Only the plain-start branch maps AlreadyExists to AlreadyStarted;
         // signal-with-start lets the status through as Rpc, which would hand
         // callers a generic error for the duplicate they asked to be told
-        // about. The run id is not on the status, hence nil.
+        // about. Decoding the run id out of the status detail is what that
+        // branch does, so both paths yield the same term.
         StartWorkflowResult::Start(WorkflowStartError::Rpc(err))
             if err.code() == temporalio_client::tonic::Code::AlreadyExists =>
         {
-            (already_started(), nil().encode(env)).encode(env)
+            let run_id = decode_status_detail::<WorkflowExecutionAlreadyStartedFailure>(
+                err.details(),
+            )
+            .map(|failure| failure.run_id);
+            let run_id_term = run_id
+                .map(|id| string_term(env, id))
+                .unwrap_or_else(|| nil().encode(env));
+            (already_started(), run_id_term).encode(env)
         }
         StartWorkflowResult::Start(WorkflowStartError::Rpc(err)) => {
             error_reason(env, rpc(), format!("{err:#}"))

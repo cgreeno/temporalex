@@ -374,12 +374,6 @@ defmodule Temporalex.SurfaceTest do
       assert Exception.message(error) =~ "silently dropped"
     end
 
-    test "priority is refused", %{start: start} do
-      assert_raise ArgumentError, ~r/priority\/2 and fairness\/3/, fn ->
-        start |> Temporalex.priority(2) |> Temporalex.start()
-      end
-    end
-
     test "fairness is refused", %{start: start} do
       assert_raise ArgumentError, ~r/priority\/2 and fairness\/3/, fn ->
         start |> Temporalex.fairness("salon-9") |> Temporalex.start()
@@ -439,6 +433,34 @@ defmodule Temporalex.SurfaceTest do
       assert opts[:start_signal][:name] == "go"
       assert opts[:cron_schedule] == "0 9 * * *"
       assert opts[:search_attributes] == %{"salon_id" => "salon-9"}
+    end
+
+    test "id_conflict_policy: :fail is refused — the server rejects it", %{start: start} do
+      error =
+        assert_raise ArgumentError, fn ->
+          %{start | opts: Keyword.put(start.opts, :id_conflict_policy, :fail)}
+          |> Temporalex.start()
+        end
+
+      assert Exception.message(error) =~ "id_conflict_policy: :fail cannot be combined"
+    end
+
+    test "id_conflict_policy: :use_existing is not refused", %{start: start} do
+      opts = Keyword.put(start.opts, :id_conflict_policy, :use_existing)
+
+      assert :ok = Temporalex.Start.refuse_dropped_with_signal_opts!(opts)
+    end
+
+    test "an explicitly nil option is absent, not a silent drop", %{start: start} do
+      assert :ok =
+               Temporalex.Start.refuse_dropped_with_signal_opts!(
+                 Keyword.put(start.opts, :priority, nil)
+               )
+
+      assert :ok =
+               Temporalex.Start.refuse_dropped_with_signal_opts!(
+                 Keyword.put(start.opts, :priority, [])
+               )
     end
 
     test "an empty signal name is refused at the chain step", %{start: start} do
