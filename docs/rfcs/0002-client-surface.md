@@ -359,11 +359,14 @@ that can create an execution contains `.new(` or a fused
 `Client.start_workflow` remains public, so the guarantee is per-surface, not
 global.)
 
-Upstream caveat: sdk-rust's signal-with-start request path currently omits
-`priority`, `retry_policy`, `links`, and `completion_callbacks`. Until that
-is fixed upstream, a request carrying `with_signal` *and* one of those
-options must **raise** — silently dropping options is exactly the defect
-class this RFC exists to remove. The check runs in the terminal verb, not
+Upstream caveat: sdk-rust's signal-with-start request path omits
+`priority`, `links`, `completion_callbacks` and `request_eager_execution`.
+It does set `retry_policy` (v0.7.0; an earlier revision of this list said
+otherwise). Of those, only `priority` is reachable from this surface. A
+request carrying `with_signal` *and* one of them must **raise** — silently
+dropping options is exactly the defect class this RFC exists to remove.
+Temporal also rejects `id_conflict_policy: :fail` for this operation, which
+the same check refuses locally rather than leaving to the server. The check runs in the terminal verb, not
 in the chain steps: steps are inert and order-independent
 (`with_signal |> retry(...)` must be caught the same as the reverse), so the
 terminal verb validates the completed struct before sending.

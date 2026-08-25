@@ -312,32 +312,44 @@ defmodule Temporalex.SignalWithStartIntegrationTest do
     assert {:ok, {:settled, ["pay-1"], _}} = Temporalex.await(handle)
   end
 
-  test "priority is refused on the raw client path, not silently dropped", ctx do
+  test "priority is refused at the terminal verb, not silently dropped", ctx do
     id = order_id()
 
     assert_raise ArgumentError, ~r/cannot be combined with with_signal\/3/, fn ->
-      Temporalex.Client.start_workflow(ctx.client, Settlement, %{order_id: id, expected: 1},
-        workflow_id: "order-#{id}",
-        start_signal: [name: "settled", args: [settlement("pay-1")]],
-        priority: [priority_key: 2],
-        timeout: 10_000
-      )
+      id
+      |> checkout(1, ctx)
+      |> Temporalex.priority(2)
+      |> Temporalex.with_signal("settled", [settlement("pay-1")])
+      |> Temporalex.start()
     end
   end
 
   # The server answers WORKFLOW_ID_CONFLICT_POLICY_FAIL with "not supported for
-  # this operation"; the guard turns that into a local error, so this asserts
-  # the guard rather than the server.
-  test "id_conflict_policy: :fail is refused on the raw client path too", ctx do
+  # this operation". RFC 0002 scopes the refusal to the terminal verb, so the
+  # low-level client still reaches the server — which is what makes the local
+  # refusal worth having.
+  test "the server rejects id_conflict_policy: :fail, which the surface refuses first", ctx do
     id = order_id()
 
+    assert {:error, %Temporalex.TransportError{} = error} =
+             Temporalex.Client.start_workflow(
+               ctx.client,
+               Settlement,
+               %{order_id: id, expected: 1},
+               workflow_id: "order-#{id}",
+               start_signal: [name: "settled", args: [settlement("pay-1")]],
+               workflow_id_conflict_policy: :fail,
+               timeout: 10_000
+             )
+
+    assert Exception.message(error) =~ "not supported for this operation"
+
     assert_raise ArgumentError, ~r/id_conflict_policy: :fail cannot be combined/, fn ->
-      Temporalex.Client.start_workflow(ctx.client, Settlement, %{order_id: id, expected: 1},
-        workflow_id: "order-#{id}",
-        start_signal: [name: "settled", args: [settlement("pay-1")]],
-        workflow_id_conflict_policy: :fail,
-        timeout: 10_000
-      )
+      %{order_id: id, expected: 1}
+      |> Settlement.new(id_conflict_policy: :fail)
+      |> Temporalex.client(ctx.client)
+      |> Temporalex.with_signal("settled", [settlement("pay-1")])
+      |> Temporalex.start()
     end
   end
 

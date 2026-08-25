@@ -495,8 +495,6 @@ defmodule Temporalex.Backend.TemporalCore do
   def __native_start_opt_keys__, do: @native_start_opt_keys
 
   defp native_start_opts(opts) do
-    :ok = Temporalex.Start.refuse_dropped_with_signal_opts!(opts)
-
     opts
     |> Keyword.take(@native_start_opt_keys)
     |> normalize_native_opts()
