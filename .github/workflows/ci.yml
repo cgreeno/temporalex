@@ -13,6 +13,73 @@ env:
   RUST_VERSION: "stable"
 
 jobs:
+  descriptor:
+    name: Proto descriptor
+    # Only a Cargo change can invalidate the descriptor, so this stays off the
+    # path of every other PR. The drift test in `mix test` is the backstop;
+    # this exists so a bump does not bounce back to the author for a step a
+    # machine can do.
+    # A fork PR's GITHUB_TOKEN is read-only, so the push would fail. The
+    # drift test still runs and tells the author what to do.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+
+      - name: Did this PR touch Cargo?
+        id: cargo
+        run: |
+          git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.ref }}
+          if git diff --quiet FETCH_HEAD HEAD -- native/temporalex_nif/Cargo.lock native/temporalex_nif/Cargo.toml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: erlef/setup-beam@v1
+        if: steps.cargo.outputs.changed == 'true'
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.cargo.outputs.changed == 'true'
+
+      - name: Install protoc
+        if: steps.cargo.outputs.changed == 'true'
+        run: sudo apt-get install -y protobuf-compiler
+
+      # The generator reads protos from Cargo's checkout of the pinned
+      # revision, so the crate has to be on disk before it runs.
+      - name: Fetch the pinned SDK
+        if: steps.cargo.outputs.changed == 'true'
+        run: cargo fetch --manifest-path native/temporalex_nif/Cargo.toml
+
+      - name: Regenerate
+        if: steps.cargo.outputs.changed == 'true'
+        run: mix temporalex.gen.proto
+
+      - name: Commit if it moved
+        if: steps.cargo.outputs.changed == 'true'
+        run: |
+          if git diff --quiet -- priv/proto; then
+            echo "descriptor already matches the pinned revision"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add priv/proto
+          git commit -m "Regenerate the proto descriptor for the pinned SDK revision"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
