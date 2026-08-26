@@ -16,28 +16,22 @@ jobs:
   descriptor:
     name: Proto descriptor
     # Only a Cargo change can invalidate the descriptor, so this stays off the
-    # path of every other PR. The drift test in `mix test` is the backstop;
-    # this exists so a bump does not bounce back to the author for a step a
-    # machine can do.
-    # A fork PR's GITHUB_TOKEN is read-only, so the push would fail. The
-    # drift test still runs and tells the author what to do.
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    # path of every other PR.
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
 
-      - name: Did this PR touch Cargo?
+      - name: Did this change touch Cargo?
         id: cargo
         run: |
-          git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.ref }}
-          if git diff --quiet FETCH_HEAD HEAD -- native/temporalex_nif/Cargo.lock native/temporalex_nif/Cargo.toml; then
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "no usable base commit, checking anyway"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$base" HEAD -- native/temporalex_nif/Cargo.lock native/temporalex_nif/Cargo.toml; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -62,23 +56,48 @@ jobs:
         if: steps.cargo.outputs.changed == 'true'
         run: cargo fetch --manifest-path native/temporalex_nif/Cargo.toml
 
-      - name: Regenerate
-        if: steps.cargo.outputs.changed == 'true'
-        run: mix temporalex.gen.proto
-
-      - name: Commit if it moved
+      # Regenerating and diffing checks more than the drift test does: that
+      # asserts the recorded revision, this asserts the bytes, so a descriptor
+      # committed with a matching revision but stale content is still caught.
+      - name: Descriptor matches the pinned revision
         if: steps.cargo.outputs.changed == 'true'
         run: |
+          mix temporalex.gen.proto
+
           if git diff --quiet -- priv/proto; then
-            echo "descriptor already matches the pinned revision"
+            echo "descriptor is up to date"
             exit 0
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add priv/proto
-          git commit -m "Regenerate the proto descriptor for the pinned SDK revision"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          echo "::error title=Proto descriptor is stale::Run 'mix temporalex.gen.proto' and commit priv/proto/"
+
+          cat <<'MSG'
+
+          This PR changes the pinned sdk-rust revision, but
+          priv/proto/temporal_core.binpb was not regenerated against it.
+
+          The descriptor is the dictionary the Elixir decoder uses to turn
+          history bytes into terms. A stale one does not error — it decodes,
+          minus whatever the newer proto tree added, so a field the server did
+          send reads as absent and assertions about it pass for the wrong
+          reason.
+
+          To fix, on your machine:
+
+              mix temporalex.gen.proto
+              git add priv/proto
+              git commit -m "Regenerate the proto descriptor"
+
+          protoc is required. The task takes the revision from Cargo.lock and
+          reads the protos from Cargo's checkout of it, so run `mix compile`
+          first if that checkout is absent, or pass --src pointing at an
+          sdk-rust clone at that revision.
+
+          Files that changed:
+          MSG
+
+          git diff --stat -- priv/proto
+          exit 1
 
   lint:
     name: Lint
