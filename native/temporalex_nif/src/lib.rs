@@ -12,13 +12,16 @@ use temporalio_client::{
     UntypedUpdate, UntypedWorkflow, WorkflowCancelOptions, WorkflowDescribeOptions,
     WorkflowExecuteUpdateOptions, WorkflowExecutionDescription, WorkflowExecutionInfo,
     WorkflowExecutionStatus, WorkflowFetchHistoryOptions, WorkflowGetResultOptions, WorkflowHandle,
-    WorkflowQueryOptions, WorkflowSignalOptions, WorkflowStartOptions, WorkflowTerminateOptions,
+    WorkflowQueryOptions, WorkflowSignalOptions, WorkflowStartOptions, WorkflowStartSignal,
+    WorkflowTerminateOptions,
     errors::{
         WorkflowGetResultError, WorkflowInteractionError, WorkflowQueryError, WorkflowStartError,
         WorkflowUpdateError,
     },
 };
 use temporalio_common::data_converters::RawValue;
+use temporalio_common::protos::temporal::api::errordetails::v1::WorkflowExecutionAlreadyStartedFailure;
+use temporalio_common::protos::utilities::decode_status_detail;
 use temporalio_common::protos::coresdk::workflow_completion::WorkflowActivationCompletion;
 use temporalio_common::protos::temporal::api::history::v1::History;
 use temporalio_common::protos::coresdk::{ActivityHeartbeat, ActivityTaskCompletion};
@@ -201,6 +204,9 @@ rustler::atoms! {
     // Task priority and fairness (see `priority_from_opts`).
     priority,
     priority_key,
+    start_signal,
+    name,
+    args,
     fairness_key,
     fairness_weight,
     // Worker versioning (see `versioning_strategy_from_opts`).
@@ -1556,6 +1562,23 @@ fn workflow_start_error_to_term<'a>(env: Env<'a>, err: StartWorkflowResult) -> T
         StartWorkflowResult::Start(WorkflowStartError::PayloadConversion(err)) => {
             error_reason(env, payload_conversion(), format!("{err:#}"))
         }
+        // Only the plain-start branch maps AlreadyExists to AlreadyStarted;
+        // signal-with-start lets the status through as Rpc, which would hand
+        // callers a generic error for the duplicate they asked to be told
+        // about. Decoding the run id out of the status detail is what that
+        // branch does, so both paths yield the same term.
+        StartWorkflowResult::Start(WorkflowStartError::Rpc(err))
+            if err.code() == temporalio_client::tonic::Code::AlreadyExists =>
+        {
+            let run_id = decode_status_detail::<WorkflowExecutionAlreadyStartedFailure>(
+                err.details(),
+            )
+            .map(|failure| failure.run_id);
+            let run_id_term = run_id
+                .map(|id| string_term(env, id))
+                .unwrap_or_else(|| nil().encode(env));
+            (already_started(), run_id_term).encode(env)
+        }
         StartWorkflowResult::Start(WorkflowStartError::Rpc(err)) => {
             error_reason(env, rpc(), format!("{err:#}"))
         }
@@ -2206,11 +2229,32 @@ fn workflow_start_options(
     // The client wraps the proto retry policy in its own type now; From is
     // the whole conversion, so our option decoding is unchanged.
     options.retry_policy = retry_policy_from_opts(opts)?.map(Into::into);
+    options.start_signal = start_signal_from_opts(opts)?;
     options.priority = priority_from_opts(opts)?;
     options.header = header_from_opts(opts)?;
     options.static_summary = keyword_get_string(opts, static_summary())?;
     options.static_details = keyword_get_string(opts, static_details())?;
     Ok(options)
+}
+
+fn start_signal_from_opts(opts: Term) -> anyhow::Result<Option<WorkflowStartSignal>> {
+    let Some(term) = keyword_get_present(opts, start_signal())? else {
+        return Ok(None);
+    };
+
+    let Some(signal_name) = keyword_get_string(term, name())? else {
+        return Err(anyhow!("start_signal requires a name"));
+    };
+
+    let mut signal = WorkflowStartSignal::new(signal_name).build();
+    signal.input = match keyword_get_present(term, args())? {
+        None => None,
+        Some(args) => Some(Payloads {
+            payloads: terms_list_to_payloads(args)?,
+        }),
+    };
+
+    Ok(Some(signal))
 }
 
 fn signal_options(opts: Term) -> anyhow::Result<WorkflowSignalOptions> {

@@ -108,6 +108,35 @@ defmodule Temporalex do
     merge_map_opt(start, :headers, headers)
   end
 
+  @doc """
+  A signal delivered atomically with the start — signal-with-start.
+
+  The workflow is signalled if it is already running and started if it is
+  not, in one request, so the signal cannot be lost between a check and a
+  send. Use it where an external event can arrive before the workflow it
+  belongs to exists.
+
+      order_id
+      |> Checkout.new()
+      |> Temporalex.with_signal("payment_settled", [settlement])
+      |> Temporalex.start!()
+
+  The signal is delivered before the workflow's first task, so it lands
+  before any `phase/2` has declared a handler for it. It waits in the signal
+  buffer and is consumed when a phase that handles it opens.
+
+  Refused in combination, because Temporal's signal-with-start request cannot
+  carry them: `priority/2` and `fairness/3`, and `id_conflict_policy: :fail`.
+  `retry/2`, `cron/2`, `index/2`, `headers/2` and both timeouts are carried.
+
+  A duplicate reports `Temporalex.WorkflowAlreadyStartedError` with its run id,
+  the same as a plain start.
+  """
+  @spec with_signal(Start.t(), String.t(), list()) :: Start.t()
+  def with_signal(%Start{} = start, name, args \\ [])
+      when is_binary(name) and name != "" and is_list(args),
+      do: put_opt(start, :start_signal, name: name, args: args)
+
   @doc "Cron schedule for a recurring workflow."
   @spec cron(Start.t(), String.t()) :: Start.t()
   def cron(%Start{} = start, expression) when is_binary(expression),
@@ -144,6 +173,7 @@ defmodule Temporalex do
     # refused — `new(...) |> Temporalex.start!()` inside workflow code is the
     # same replay nondeterminism as the short form.
     Temporalex.Workflow.refuse_inside_workflow!(start.workflow, :start)
+    Start.refuse_dropped_with_signal_opts!(start.opts)
 
     opts =
       start.opts

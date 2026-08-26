@@ -55,7 +55,8 @@ defmodule Temporalex.Start do
     :run_timeout,
     :execution_timeout,
     :id_conflict_policy,
-    :id_reuse_policy
+    :id_reuse_policy,
+    :start_signal
   ]
 
   @resolution_opts [:id, :queue, :client, :timeout]
@@ -78,6 +79,39 @@ defmodule Temporalex.Start do
       opts: Keyword.take(opts, @passthrough_opts)
     }
   end
+
+  # temporalio-client v0.7.0 builds SignalWithStartWorkflowExecutionRequest
+  # without :priority, so it would reach neither the server nor an error — the
+  # silent-drop hazard of RFC 0002 §10, one layer below the allowlist test.
+  # :retry_policy is carried, and must not be listed here.
+  @dropped_by_signal_with_start %{priority: "priority/2 and fairness/3"}
+
+  @doc false
+  def refuse_dropped_with_signal_opts!(opts) when is_list(opts) do
+    if present?(opts, :start_signal) do
+      for {key, step} <- @dropped_by_signal_with_start, present?(opts, key) do
+        raise ArgumentError,
+              "#{step} cannot be combined with with_signal/3 — Temporal's " <>
+                "signal-with-start request carries no #{key}, so it would be " <>
+                "silently dropped. Drop the step, or start and signal separately."
+      end
+
+      if Keyword.get(opts, :id_conflict_policy) == :fail or
+           Keyword.get(opts, :workflow_id_conflict_policy) == :fail do
+        raise ArgumentError,
+              "id_conflict_policy: :fail cannot be combined with with_signal/3 — " <>
+                "Temporal rejects the policy for signal-with-start, which exists " <>
+                "to attach to a running execution. Use :use_existing, or start " <>
+                "and signal separately."
+      end
+    end
+
+    :ok
+  end
+
+  # The NIF treats an explicit nil as absent (keyword_get_present), so a
+  # refusal keyed on has_key? would reject an option that drops nothing.
+  defp present?(opts, key), do: Keyword.get(opts, key) not in [nil, []]
 
   @doc false
   def generate_id do
