@@ -13,6 +13,92 @@ env:
   RUST_VERSION: "stable"
 
 jobs:
+  descriptor:
+    name: Proto descriptor
+    # Only a Cargo change can invalidate the descriptor, so this stays off the
+    # path of every other PR.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did this change touch Cargo?
+        id: cargo
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "no usable base commit, checking anyway"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$base" HEAD -- native/temporalex_nif/Cargo.lock native/temporalex_nif/Cargo.toml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: erlef/setup-beam@v1
+        if: steps.cargo.outputs.changed == 'true'
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.cargo.outputs.changed == 'true'
+
+      - name: Install protoc
+        if: steps.cargo.outputs.changed == 'true'
+        run: sudo apt-get install -y protobuf-compiler
+
+      # The generator reads protos from Cargo's checkout of the pinned
+      # revision, so the crate has to be on disk before it runs.
+      - name: Fetch the pinned SDK
+        if: steps.cargo.outputs.changed == 'true'
+        run: cargo fetch --manifest-path native/temporalex_nif/Cargo.toml
+
+      # Regenerating and diffing checks more than the drift test does: that
+      # asserts the recorded revision, this asserts the bytes, so a descriptor
+      # committed with a matching revision but stale content is still caught.
+      - name: Descriptor matches the pinned revision
+        if: steps.cargo.outputs.changed == 'true'
+        run: |
+          mix temporalex.gen.proto
+
+          if git diff --quiet -- priv/proto; then
+            echo "descriptor is up to date"
+            exit 0
+          fi
+
+          echo "::error title=Proto descriptor is stale::Run 'mix temporalex.gen.proto' and commit priv/proto/"
+
+          cat <<'MSG'
+
+          This PR changes the pinned sdk-rust revision, but
+          priv/proto/temporal_core.binpb was not regenerated against it.
+
+          The descriptor is the dictionary the Elixir decoder uses to turn
+          history bytes into terms. A stale one does not error — it decodes,
+          minus whatever the newer proto tree added, so a field the server did
+          send reads as absent and assertions about it pass for the wrong
+          reason.
+
+          To fix, on your machine:
+
+              mix temporalex.gen.proto
+              git add priv/proto
+              git commit -m "Regenerate the proto descriptor"
+
+          protoc is required. The task takes the revision from Cargo.lock and
+          reads the protos from Cargo's checkout of it, so run `mix compile`
+          first if that checkout is absent, or pass --src pointing at an
+          sdk-rust clone at that revision.
+
+          Files that changed:
+          MSG
+
+          git diff --stat -- priv/proto
+          exit 1
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
