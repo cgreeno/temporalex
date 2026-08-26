@@ -14,6 +14,11 @@ defmodule Mix.Tasks.Temporalex.Gen.Proto do
 
   `mix test test/temporalex/proto_descriptor_test.exs` fails when the committed
   descriptor and the pinned revision disagree.
+
+  A *stale* descriptor still decodes, so this task runs normally against one. A
+  *corrupt* one fails `Proto.Schema` at compile time, and this task cannot run
+  until the project compiles — restore the committed file with
+  `git checkout HEAD -- priv/proto` first.
   """
 
   use Mix.Task

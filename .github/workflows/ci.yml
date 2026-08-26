@@ -88,6 +88,11 @@ jobs:
               git add priv/proto
               git commit -m "Regenerate the proto descriptor"
 
+          If the project will not compile because the descriptor is corrupt
+          rather than stale, restore it first with
+          `git checkout HEAD -- priv/proto` — the task lives in the project, so
+          the project has to compile for the task to run.
+
           protoc is required. The task takes the revision from Cargo.lock and
           reads the protos from Cargo's checkout of it, so run `mix compile`
           first if that checkout is absent, or pass --src pointing at an
