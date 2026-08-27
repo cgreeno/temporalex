@@ -923,6 +923,10 @@ defmodule Temporalex.Core.Executor do
   defp op_error(reason), do: {@op_reply, :error, reason}
   defp op_cancelled(error), do: {@op_reply, :cancelled, error}
 
+  # Only phases and parallel scopes accumulate anything worth returning; the
+  # other six callers of op_cancelled/1 have nothing to hand back.
+  defp op_cancelled(error, partial), do: {@op_reply, :cancelled, error, partial}
+
   defp cancellable_blocked_by_workflow_cancellation?(%State{cancelled?: false}, _thread_id),
     do: false
 
@@ -1793,17 +1797,15 @@ defmodule Temporalex.Core.Executor do
     state = put_in(state.parallel_scopes[scope.id], scope)
 
     if remaining == 0 do
+      ordered = Enum.map(0..(scope.size - 1), &Map.fetch!(results, &1))
+
       result =
         case scope.cancellation do
           %Temporalex.Failure.CancelledError{} = cancellation ->
-            op_cancelled(cancellation)
+            op_cancelled(cancellation, ordered)
 
           nil ->
-            results =
-              0..(scope.size - 1)
-              |> Enum.map(&Map.fetch!(results, &1))
-
-            op_ok(results)
+            op_ok(ordered)
         end
 
       state
@@ -2006,8 +2008,8 @@ defmodule Temporalex.Core.Executor do
     end
   end
 
-  defp phase_completion_result(%Phase{result: {:cancelled, cancellation}}),
-    do: op_cancelled(cancellation)
+  defp phase_completion_result(%Phase{result: {:cancelled, cancellation}, state: state}),
+    do: op_cancelled(cancellation, state)
 
   defp phase_completion_result(%Phase{result: :timeout, state: state}),
     do: op_ok({:timeout, state})

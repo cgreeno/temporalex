@@ -306,6 +306,38 @@ defmodule Temporalex.CoreExecutorTest do
     end
   end
 
+  defmodule CancelledPhaseWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      case API.phase(%{},
+             signal: %{
+               "settled" => fn [id], acc -> {:noreply, Map.put(acc, id, :captured)} end
+             }
+           ) do
+        {:cancelled, _error, partial} -> {:ok, {:partial, partial}}
+        other -> {:ok, {:unexpected, other}}
+      end
+    end
+  end
+
+  defmodule CancelledParallelWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      result =
+        API.parallel([
+          fn -> Activities.echo(:first) end,
+          fn -> API.sleep!(60_000) end
+        ])
+
+      case result do
+        {:cancelled, _error, partial} -> {:ok, {:partial, partial}}
+        other -> {:ok, {:unexpected, other}}
+      end
+    end
+  end
+
   defmodule NonBangCancellableTimerWorkflow do
     use Temporalex.Workflow
 
@@ -1198,6 +1230,54 @@ defmodule Temporalex.CoreExecutorTest do
       assert state.pending == %{}
 
       assert {:yield, []} = TestHarness.resolve(exec, %Job.TimerFired{seq: timer_seq})
+    end
+
+    test "a cancelled phase hands back what it accumulated" do
+      assert {:ok, exec} = TestHarness.start_workflow(CancelledPhaseWorkflow, nil)
+      assert {:waiting, _} = TestHarness.next(exec)
+
+      assert {:waiting, _} =
+               TestHarness.resolve(exec, %Job.SignalReceived{name: "settled", args: ["pay-1"]})
+
+      assert {:waiting, _} =
+               TestHarness.resolve(exec, %Job.SignalReceived{name: "settled", args: ["pay-2"]})
+
+      completion = TestHarness.activate_raw(exec, [%Job.CancelWorkflow{reason: "requested"}])
+
+      assert {:ok, [%Command.CompleteWorkflow{result: {:partial, partial}}]} =
+               completion.status
+
+      assert partial == %{"pay-1" => :captured, "pay-2" => :captured}
+    end
+
+    test "a phase cancelled before any signal hands back its initial state" do
+      assert {:ok, exec} = TestHarness.start_workflow(CancelledPhaseWorkflow, nil)
+      assert {:waiting, _} = TestHarness.next(exec)
+
+      completion = TestHarness.activate_raw(exec, [%Job.CancelWorkflow{reason: "requested"}])
+
+      assert {:ok, [%Command.CompleteWorkflow{result: {:partial, %{}}}]} =
+               completion.status
+    end
+
+    test "a cancelled parallel hands back the branches that finished" do
+      assert {:ok, exec} = TestHarness.start_workflow(CancelledParallelWorkflow, nil)
+
+      assert {:yield, [%Command.ScheduleActivity{seq: activity_seq}, %Command.StartTimer{}]} =
+               TestHarness.next(exec)
+
+      assert {:yield, []} =
+               TestHarness.resolve(exec, %Job.ActivityResolved{
+                 seq: activity_seq,
+                 result: {:ok, :first}
+               })
+
+      completion = TestHarness.activate_raw(exec, [%Job.CancelWorkflow{reason: "requested"}])
+
+      assert {:ok, [_cancel_timer, %Command.CompleteWorkflow{result: {:partial, partial}}]} =
+               completion.status
+
+      assert [{:ok, :first}, {:error, %CancelledError{message: "requested"}}] = partial
     end
 
     test "non-bang timer cancellation returns cancellation as a value" do

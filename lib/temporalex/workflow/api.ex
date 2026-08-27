@@ -338,6 +338,7 @@ defmodule Temporalex.Workflow.API do
     case call(%Op.Phase{initial_state: initial_state, opts: opts}) do
       {:ok, {:timeout, state}} -> {:timeout, state}
       {:ok, state} -> state
+      {:cancelled, error, partial} -> {:cancelled, error, partial}
       {:cancelled, error} -> {:cancelled, error}
       {:error, reason} -> raise_error(reason)
     end
@@ -359,6 +360,9 @@ defmodule Temporalex.Workflow.API do
         raise "Temporalex.Workflow.API.update_state/1 failed: #{inspect(reason)}"
 
       {:cancelled, error} ->
+        raise cancellation_error(error)
+
+      {:cancelled, error, _partial} ->
         raise cancellation_error(error)
     end
   end
@@ -448,6 +452,7 @@ defmodule Temporalex.Workflow.API do
     case call(op) do
       {:ok, result} -> result
       {:cancelled, error} -> {:cancelled, error}
+      {:cancelled, error, partial} -> {:cancelled, error, partial}
       {:error, reason} -> raise_error(reason)
     end
   end
@@ -462,6 +467,9 @@ defmodule Temporalex.Workflow.API do
       {@op_reply, :cancelled, error} ->
         {:cancelled, cancellation_error(error)}
 
+      {@op_reply, :cancelled, error, partial} ->
+        {:cancelled, cancellation_error(error), partial}
+
       {@op_reply, :error, reason} ->
         {:error, reason}
 
@@ -474,6 +482,7 @@ defmodule Temporalex.Workflow.API do
     case call(op) do
       {:ok, value} -> value
       {:cancelled, error} -> raise cancellation_error(error)
+      {:cancelled, error, _partial} -> raise cancellation_error(error)
       {:error, reason} -> raise_error(reason)
     end
   end
