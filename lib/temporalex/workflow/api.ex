@@ -361,9 +361,6 @@ defmodule Temporalex.Workflow.API do
 
       {:cancelled, error} ->
         raise cancellation_error(error)
-
-      {:cancelled, error, _partial} ->
-        raise cancellation_error(error)
     end
   end
 

@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Breaking: `API.phase/2` and `API.parallel/1` return `{:cancelled, error, partial}`**
+  on cancellation, where they previously returned `{:cancelled, error}`. `partial`
+  is the state the phase had accumulated, or every parallel branch's outcome in
+  input order — cancelled branches as `{:error, %CancelledError{}}`.
+
+  Cancellation is when compensation matters most, and both primitives were
+  discarding the work they already held: a checkout cancelled after two of three
+  payments settled could only compensate from the state as it stood *before* the
+  wait, so those two were never refunded.
+
+  **Migration.** A `case` on a phase or parallel result needs its cancellation
+  branch widened:
+
+  ```elixir
+  # before
+  {:cancelled, _error} -> Checkout.abandon(checkout, "cancelled")
+
+  # after
+  {:cancelled, _error, partial} -> Checkout.abandon(partial, "cancelled")
+  ```
+
+  A branch left as the two-tuple raises `CaseClauseError`, which fails the
+  workflow — deliberately loud, because those are the branches losing data
+  today. The bang forms are unchanged: `phase!/2` and `parallel!/1` still raise
+  and discard the partial.
+
+  The other seven operations that share this reply path — activities, local
+  activities, and the five child-workflow calls — still return
+  `{:cancelled, error}`. A cancelled activity has nothing to hand back.
+
 ## 0.5.4 — 2026-08-21
 
 ### Changed

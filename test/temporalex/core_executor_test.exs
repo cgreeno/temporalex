@@ -306,6 +306,35 @@ defmodule Temporalex.CoreExecutorTest do
     end
   end
 
+  defmodule PhaseAfterCancelWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      try do
+        API.sleep!(60_000)
+      rescue
+        CancelledError ->
+          API.non_cancellable(fn -> :ok end)
+      end
+
+      {:ok, {:second, API.phase(%{}, signal: %{"x" => fn _a, s -> {:noreply, s} end})}}
+    end
+  end
+
+  defmodule ParallelAfterCancelWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      try do
+        API.sleep!(60_000)
+      rescue
+        CancelledError -> :ok
+      end
+
+      {:ok, {:second, API.parallel([fn -> :a end])}}
+    end
+  end
+
   defmodule CancelledPhaseWorkflow do
     use Temporalex.Workflow
 
@@ -1230,6 +1259,31 @@ defmodule Temporalex.CoreExecutorTest do
       assert state.pending == %{}
 
       assert {:yield, []} = TestHarness.resolve(exec, %Job.TimerFired{seq: timer_seq})
+    end
+
+    test "a phase started after cancellation returns the same shape as one cancelled mid-flight" do
+      assert {:ok, exec} = TestHarness.start_workflow(PhaseAfterCancelWorkflow, nil)
+      assert {:yield, [%Command.StartTimer{seq: seq}]} = TestHarness.next(exec)
+
+      completion = TestHarness.activate_raw(exec, [%Job.CancelWorkflow{reason: "requested"}])
+
+      assert {:ok, [_cancel_timer, %Command.CompleteWorkflow{result: {:second, result}}]} =
+               completion.status
+
+      assert {:cancelled, _error, %{}} = result
+      _ = seq
+    end
+
+    test "a parallel started after cancellation returns the same shape" do
+      assert {:ok, exec} = TestHarness.start_workflow(ParallelAfterCancelWorkflow, nil)
+      assert {:yield, [%Command.StartTimer{}]} = TestHarness.next(exec)
+
+      completion = TestHarness.activate_raw(exec, [%Job.CancelWorkflow{reason: "requested"}])
+
+      assert {:ok, [_cancel_timer, %Command.CompleteWorkflow{result: {:second, result}}]} =
+               completion.status
+
+      assert {:cancelled, _error, []} = result
     end
 
     test "a cancelled phase hands back what it accumulated" do

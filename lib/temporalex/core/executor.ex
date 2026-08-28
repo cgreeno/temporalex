@@ -804,7 +804,7 @@ defmodule Temporalex.Core.Executor do
 
   defp handle_workflow_op(state, from, thread_id, %Op.Parallel{funs: []}) do
     if cancellable_blocked_by_workflow_cancellation?(state, thread_id) do
-      reply_cancelled(from, state.cancellation)
+      reply_cancelled(from, state.cancellation, [])
       state
     else
       reply_ok(from, [])
@@ -814,7 +814,7 @@ defmodule Temporalex.Core.Executor do
 
   defp handle_workflow_op(state, from, thread_id, %Op.Parallel{funs: funs}) do
     if cancellable_blocked_by_workflow_cancellation?(state, thread_id) do
-      reply_cancelled(from, state.cancellation)
+      reply_cancelled(from, state.cancellation, [])
       state
     else
       scope_id = state.next_scope_id
@@ -856,7 +856,7 @@ defmodule Temporalex.Core.Executor do
        }) do
     cond do
       cancellable_blocked_by_workflow_cancellation?(state, thread_id) ->
-        reply_cancelled(from, state.cancellation)
+        reply_cancelled(from, state.cancellation, initial_state)
         state
 
       state.phase ->
@@ -919,12 +919,13 @@ defmodule Temporalex.Core.Executor do
   defp reply_error(from, reason), do: GenServer.reply(from, op_error(reason))
   defp reply_cancelled(from, error), do: GenServer.reply(from, op_cancelled(error))
 
+  defp reply_cancelled(from, error, partial),
+    do: GenServer.reply(from, op_cancelled(error, partial))
+
   defp op_ok(value), do: {@op_reply, :ok, value}
   defp op_error(reason), do: {@op_reply, :error, reason}
   defp op_cancelled(error), do: {@op_reply, :cancelled, error}
 
-  # Only phases and parallel scopes accumulate anything worth returning; the
-  # other six callers of op_cancelled/1 have nothing to hand back.
   defp op_cancelled(error, partial), do: {@op_reply, :cancelled, error, partial}
 
   defp cancellable_blocked_by_workflow_cancellation?(%State{cancelled?: false}, _thread_id),
