@@ -1,5 +1,90 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Signals arriving in the same activation as a cancel or a phase timeout are
+  no longer discarded.** A cancel or the phase's own timeout marked the phase
+  `stopping?` during pass one of activation processing, and
+  `phase_accepts_signal?/2` then rejected every signal in pass two — so a phase
+  cancelled or timed out alongside its own signals reported none of them.
+
+  sdk-core sorts `SignalWorkflow` and `DoUpdate` ahead of `FireTimer` and
+  `CancelWorkflow` before shipping an activation (`prepare_to_ship_activation`).
+  Temporalex applied the two in the opposite order, which is why neither the Go
+  SDK — where signals land on a buffered channel that cancellation never touches
+  — nor the TypeScript SDK, which takes core's order as given, has this problem.
+
+  A stop that lands on an open phase is now deferred until after the
+  activation's signals and updates have been dispatched. Cancellation is still
+  recorded immediately, so `API.cancelled?/0` and the refusal of new cancellable
+  work are unchanged.
+
+  This also affected the timeout path, which is not new to this release.
+
+  **Breaking for runs in flight — read this before upgrading.** Messages that
+  used to be refused now run, so a workflow task emits different commands than
+  it did before. A run that took a cancel-with-signal, cancel-with-update or
+  timeout-with-message workflow task under 0.5.4 or earlier, and then replays
+  after the upgrade — on a worker restart, a cache eviction, or a reset —
+  re-executes handlers whose responses have no counterpart in its history.
+  sdk-core reports that as nondeterminism and fails the workflow task, so the
+  run parks retrying rather than failing cleanly, and needs a reset to recover.
+
+  Who is affected: only runs that were *parked in an `API.phase/2`* when a
+  cancel or a phase timeout arrived alongside a signal or update. Runs that
+  never took such a task are unaffected, as is anything started after the
+  upgrade.
+
+  What to do, in order of preference:
+
+  1. **Drain.** Let phases complete before deploying. If your phases are short —
+     minutes, not days — this costs nothing and there is no window.
+  2. **Check before deploying.** `temporal workflow list --query
+     'ExecutionStatus="Running"'` narrows it; runs parked in a phase are the
+     ones to watch.
+  3. **Reset after the fact.** A parked run reports its failed task via
+     `Temporalex.History.stuck_reason/1`. Reset it to the workflow task before
+     the bad one and it replays cleanly against the new code.
+
+  Queries in an activation that also carries signals or updates are now answered
+  after those handlers run, so a query sees the post-handler published state.
+  Previously it saw the state as it stood before them. This changes an answer's
+  value, not its determinism.
+
+### Changed
+
+- **Breaking: `API.phase/2` and `API.parallel/1` return `{:cancelled, error, partial}`**
+  on cancellation, where they previously returned `{:cancelled, error}`. `partial`
+  is the state the phase had accumulated, or every parallel branch's outcome in
+  input order — cancelled branches as `{:error, %CancelledError{}}`.
+
+  Cancellation is when compensation matters most, and both primitives were
+  discarding the work they already held: a checkout cancelled after two of three
+  payments settled could only compensate from the state as it stood *before* the
+  wait, so those two were never refunded.
+
+  **Migration.** A `case` on a phase or parallel result needs its cancellation
+  branch widened:
+
+  ```elixir
+  # before
+  {:cancelled, _error} -> Checkout.abandon(checkout, "cancelled")
+
+  # after
+  {:cancelled, _error, partial} -> Checkout.abandon(partial, "cancelled")
+  ```
+
+  A branch left as the two-tuple raises `CaseClauseError`, which fails the
+  workflow — deliberately loud, because those are the branches losing data
+  today. The bang forms are unchanged: `phase!/2` and `parallel!/1` still raise
+  and discard the partial.
+
+  The other seven operations that share this reply path — activities, local
+  activities, and the five child-workflow calls — still return
+  `{:cancelled, error}`. A cancelled activity has nothing to hand back.
+
 ## 0.5.4 — 2026-08-21
 
 ### Changed

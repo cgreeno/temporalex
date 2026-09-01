@@ -370,6 +370,9 @@ defmodule Temporalex.Core.TraceGuard do
        when status in [:ok, :error, :cancelled],
        do: true
 
+  defp allowed_receive?(_pid, _thread_id, {_tag, {@op_reply, :cancelled, _value, _partial}}),
+    do: true
+
   defp allowed_receive?(_pid, _thread_id, {:code_server, _response}), do: true
 
   defp allowed_receive?(_pid, _thread_id, _message), do: false
