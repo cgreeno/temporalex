@@ -354,6 +354,18 @@ defmodule Temporalex.CoreExecutorTest do
     end
   end
 
+  defmodule StopThenCancelWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      {:ok,
+       {:phase_result,
+        API.phase(%{},
+          signal: %{"settled" => fn [id], acc -> {:stop, Map.put(acc, id, :captured)} end}
+        )}}
+    end
+  end
+
   defmodule SlowHandlerPhaseWorkflow do
     use Temporalex.Workflow
 
@@ -1398,6 +1410,27 @@ defmodule Temporalex.CoreExecutorTest do
 
       assert {:ok, [%Command.CompleteWorkflow{result: {:partial, partial}}]} = completion.status
       assert partial == %{"early" => :captured}
+    end
+
+    # The signal is ordered ahead of the cancel, so the handler's {:stop, _}
+    # completes the phase on its own terms and the cancel finds nothing to
+    # stop. The workflow stays cancelled — state.cancelled? is set, so the next
+    # cancellable operation refuses — but the phase reports its own result
+    # rather than a cancellation.
+    test "a handler that stops the phase beats a cancel in the same activation" do
+      assert {:ok, exec} = TestHarness.start_workflow(StopThenCancelWorkflow, nil)
+      assert {:waiting, _} = TestHarness.next(exec)
+
+      completion =
+        TestHarness.activate_raw(exec, [
+          %Job.SignalReceived{name: "settled", args: ["pay-1"]},
+          %Job.CancelWorkflow{reason: "requested"}
+        ])
+
+      assert {:ok, [%Command.CompleteWorkflow{result: {:phase_result, settled}}]} =
+               completion.status
+
+      assert settled == %{"pay-1" => :captured}
     end
 
     test "a signal queued behind an in-flight handler is warned about, not dropped silently" do

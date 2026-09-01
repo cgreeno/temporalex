@@ -52,7 +52,7 @@ end
 
 These are blocking calls that can host durable concurrent work within their scope:
 
-**`API.phase(state, handlers)` / `API.phase!(state, handlers)`** — Enters a message-driven workflow phase. Blocks the caller. Dispatches incoming updates and signals to the provided handlers. Returns when a handler signals completion via `{:stop, ...}` or the timeout expires. All async handlers spawned within this scope must complete before the phase returns. The non-bang form returns `{:ok, state}`, `{:timeout, state}`, or `{:cancelled, error, partial}` — `partial` being the accumulated state when the cancel arrived, so compensation can see what was accepted; the bang form returns `state`, `{:timeout, state}`, or raises on cancellation, discarding the partial.
+**`API.phase(state, handlers)` / `API.phase!(state, handlers)`** — Enters a message-driven workflow phase. Blocks the caller. Dispatches incoming updates and signals to the provided handlers. Returns when a handler signals completion via `{:stop, ...}` or the timeout expires. All async handlers spawned within this scope must complete before the phase returns. The non-bang form returns the accumulated `state`, `{:timeout, state}`, or `{:cancelled, error, partial}` — `partial` being the accumulated state when the cancel arrived, so compensation can see what was accepted; the bang form returns `state`, `{:timeout, state}`, or raises on cancellation, discarding the partial.
 
 **`API.parallel(fns)` / `API.parallel!(fns)`** — Executes a list of functions as cooperatively scheduled workflow branches. Each branch has its own workflow process and can call activities, sleep, or use other sequential primitives. Blocks until all branches complete. The non-bang form returns `{:ok, results}` or `{:cancelled, error, partial}` — `partial` holding every branch's outcome in input order, cancelled branches as `{:error, %CancelledError{}}`; the bang form returns `results` or raises on cancellation, discarding the partial.
 
@@ -699,7 +699,7 @@ Cancellation effects:
 | `API.wait_for_signal/1` / `API.wait_for_signal!/1` | Removes the waiter; non-bang returns `{:cancelled, error}`, bang raises |
 | Activity dispatch / bang dispatch | Emits `RequestCancelActivity` unless `cancellation_type: :abandon`; `:wait_cancellation_completed` waits for the activity cancellation resolution, `:try_cancel` resolves immediately |
 | `API.parallel/1` / `API.parallel!/1` | Cancels cancellable branches in deterministic branch order; non-bang returns `{:cancelled, error, partial}`, bang raises |
-| `API.phase/2` / `API.phase!/2` | Stops accepting messages, rejects queued/new updates as cancelled, cancels the phase timer, cancels cancellable handlers, then returns `{:cancelled, error, partial}` to the owner, or raises from the bang form |
+| `API.phase/2` / `API.phase!/2` | Dispatches signals delivered in the same activation as the cancel, then stops accepting them; rejects queued/new updates as cancelled; cancels the phase timer and cancellable handlers; returns `{:cancelled, error, partial}` to the owner, or raises from the bang form |
 
 ---
 

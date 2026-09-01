@@ -1250,6 +1250,11 @@ defmodule Temporalex.Core.Executor do
   defp resolve_deferred_stop({{:cancelled, _}, _} = existing, _new), do: existing
   defp resolve_deferred_stop(_existing, new), do: new
 
+  defp cancel_deferred_for?(%State{deferred_phase_stop: {{:cancelled, _}, id}}, %Phase{id: id}),
+    do: true
+
+  defp cancel_deferred_for?(_state, _phase), do: false
+
   defp apply_deferred_phase_stop(%State{deferred_phase_stop: nil} = state), do: state
 
   defp apply_deferred_phase_stop(%State{deferred_phase_stop: {stop, phase_id}} = state) do
@@ -1507,9 +1512,14 @@ defmodule Temporalex.Core.Executor do
   end
 
   defp receive_update(state, %Job.UpdateReceived{} = update) do
+    # A deferred cancel counts as stopping here, unlike for a signal. Accepting
+    # would enqueue the update, and a queued update is rejected when the phase
+    # is cancelled — an accepted update may only be completed, never rejected,
+    # and the server fails the workflow task for the pair. Rejecting up front
+    # is the response the caller got before the stop was deferred.
     with %Phase{} = phase <- state.phase,
          {:ok, handler, validator} <- update_handler(phase, update.name),
-         false <- phase.stopping? do
+         false <- phase.stopping? or cancel_deferred_for?(state, phase) do
       case validate_update(update, validator, phase.state) do
         :ok ->
           state
@@ -2071,6 +2081,8 @@ defmodule Temporalex.Core.Executor do
   # rejected back to their caller; a signal has no reply channel, so the only
   # honest thing left is to say so. Matches WARN_AND_ABANDON in the TypeScript
   # and Python SDKs, which warn by default when a handler does not finish.
+  defp warn_abandoned_phase_signals(%State{is_replaying: true}, _phase), do: :ok
+
   defp warn_abandoned_phase_signals(%State{} = state, %Phase{} = phase) do
     case abandoned_signal_names(phase.queue) do
       [] ->

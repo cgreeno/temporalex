@@ -441,7 +441,7 @@ that unwraps the result and raises on error.
 
 | Primitive | Purpose |
 | --- | --- |
-| `phase(state, opts)` | Message-processing scope with signal and update handlers and an optional `:timeout`. Returns `{:ok, state}`, `{:timeout, state}` or `{:cancelled, error, partial}`, where `partial` is the state as it stood when the cancel arrived. `phase!/2` returns the state itself and raises on cancellation. |
+| `phase(state, opts)` | Message-processing scope with signal and update handlers and an optional `:timeout`. Returns the accumulated `state`, `{:timeout, state}` or `{:cancelled, error, partial}`, where `partial` is the state as it stood when the cancel arrived. `phase!/2` returns the state itself and raises on cancellation. |
 | `parallel(funs)` | Cooperatively scheduled fan out. Results come back in input order. Returns `{:ok, results}` or `{:cancelled, error, partial}`, where `partial` holds every branch's outcome in input order. `parallel!/1` returns the results and raises on cancellation. |
 
 **Child workflows**
