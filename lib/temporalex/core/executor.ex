@@ -834,7 +834,10 @@ defmodule Temporalex.Core.Executor do
 
   defp handle_workflow_op(state, from, thread_id, %Op.Parallel{funs: funs}) do
     if cancellable_blocked_by_workflow_cancellation?(state, thread_id) do
-      reply_cancelled(from, state.cancellation, [])
+      # One entry per branch, as a scope that actually ran would produce, so
+      # positional access into the partial works on every path.
+      partial = List.duplicate({:error, state.cancellation}, length(funs))
+      reply_cancelled(from, state.cancellation, partial)
       state
     else
       scope_id = state.next_scope_id
@@ -1232,28 +1235,39 @@ defmodule Temporalex.Core.Executor do
     |> maybe_complete_phase()
   end
 
-  # Recorded now, applied after this activation's signals and updates. With no
-  # phase open there is nothing to defer, so the stop is a no-op either way.
+  # Recorded now, applied after this activation's signals and updates. Tagged
+  # with the phase it belongs to: a handler can stop that phase during the
+  # drain and the body can open another, which a bare stop would then close.
   defp defer_phase_stop(%State{phase: nil} = state, _stop), do: state
 
-  defp defer_phase_stop(%State{} = state, stop),
-    do: %{state | deferred_phase_stop: state.deferred_phase_stop || stop}
+  defp defer_phase_stop(%State{phase: %Phase{id: id}} = state, stop) do
+    %{state | deferred_phase_stop: resolve_deferred_stop(state.deferred_phase_stop, {stop, id})}
+  end
+
+  # Cancellation outranks a timeout: sdk-core ships FireTimer before
+  # CancelWorkflow, so first-wins would let the timer suppress the cancel and
+  # send the caller down its timeout branch instead of its compensation one.
+  defp resolve_deferred_stop({{:cancelled, _}, _} = existing, _new), do: existing
+  defp resolve_deferred_stop(_existing, new), do: new
 
   defp apply_deferred_phase_stop(%State{deferred_phase_stop: nil} = state), do: state
 
-  defp apply_deferred_phase_stop(%State{deferred_phase_stop: {:cancelled, cancellation}} = state) do
-    %{state | deferred_phase_stop: nil}
+  defp apply_deferred_phase_stop(%State{deferred_phase_stop: {stop, phase_id}} = state) do
+    state = %{state | deferred_phase_stop: nil}
+
+    case state.phase do
+      %Phase{id: ^phase_id} -> apply_phase_stop(state, stop)
+      _ -> state
+    end
+  end
+
+  defp apply_phase_stop(state, {:cancelled, cancellation}) do
+    state
     |> mark_phase_cancelled(cancellation)
     |> maybe_complete_phase()
   end
 
-  defp apply_deferred_phase_stop(%State{deferred_phase_stop: :timeout, phase: nil} = state),
-    do: %{state | deferred_phase_stop: nil}
-
-  defp apply_deferred_phase_stop(%State{deferred_phase_stop: :timeout} = state) do
-    %{state | deferred_phase_stop: nil}
-    |> stop_phase(:timeout)
-  end
+  defp apply_phase_stop(state, :timeout), do: stop_phase(state, :timeout)
 
   defp cancellation_from_reason(%Temporalex.Failure.CancelledError{} = cancellation),
     do: cancellation

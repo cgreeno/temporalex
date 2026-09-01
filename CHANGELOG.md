@@ -23,6 +23,20 @@
 
   This also affected the timeout path, which is not new to this release.
 
+  **Upgrading with runs in flight.** Messages that used to be refused now run,
+  so the commands a workflow task emits differ. A run that took a
+  cancel-with-signal, cancel-with-update or timeout-with-message workflow task
+  under 0.5.4 and replays after the upgrade — on a worker restart or a cache
+  eviction — produces handler responses with no counterpart in its history,
+  which sdk-core reports as nondeterminism and fails the task. The run parks on
+  a retrying workflow task rather than failing cleanly, and needs a reset.
+  Drain or complete runs that are parked in a phase before upgrading; runs that
+  never took such a task, and runs started after the upgrade, are unaffected.
+
+  Queries in an activation that also carries signals or updates are now answered
+  after those handlers run, so a query sees the post-handler published state.
+  Previously it saw the state as it stood before them.
+
 ### Changed
 
 - **Breaking: `API.phase/2` and `API.parallel/1` return `{:cancelled, error, partial}`**

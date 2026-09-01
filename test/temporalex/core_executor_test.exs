@@ -352,6 +352,26 @@ defmodule Temporalex.CoreExecutorTest do
     end
   end
 
+  defmodule TwoPhaseTimeoutWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      first =
+        API.phase(%{},
+          signal: %{"settled" => fn [id], acc -> {:stop, Map.put(acc, id, :captured)} end},
+          timeout: 60_000
+        )
+
+      second =
+        API.phase(:second_initial,
+          signal: %{"later" => fn _a, s -> {:stop, s} end},
+          timeout: 60_000
+        )
+
+      {:ok, {first, second}}
+    end
+  end
+
   defmodule TimedOutPhaseWorkflow do
     use Temporalex.Workflow
 
@@ -1312,7 +1332,7 @@ defmodule Temporalex.CoreExecutorTest do
       assert {:ok, [_cancel_timer, %Command.CompleteWorkflow{result: {:second, result}}]} =
                completion.status
 
-      assert {:cancelled, _error, []} = result
+      assert {:cancelled, _error, [{:error, %CancelledError{}}]} = result
     end
 
     test "a handler that stops the phase wins over a timeout in the same activation" do
@@ -1360,6 +1380,34 @@ defmodule Temporalex.CoreExecutorTest do
 
       assert {:ok, [%Command.CompleteWorkflow{result: {:partial, partial}}]} = completion.status
       assert partial == %{"early" => :captured}
+    end
+
+    test "a deferred timeout does not stop the phase that opens after it" do
+      assert {:ok, exec} = TestHarness.start_workflow(TwoPhaseTimeoutWorkflow, nil)
+      assert {:yield, [%Command.StartTimer{seq: seq}]} = TestHarness.next(exec)
+
+      assert {:yield, [%Command.StartTimer{}]} =
+               TestHarness.resolve(exec, [
+                 %Job.SignalReceived{name: "settled", args: ["pay-1"]},
+                 %Job.TimerFired{seq: seq}
+               ])
+    end
+
+    test "a cancel outranks a timeout arriving in the same activation" do
+      assert {:ok, exec} = TestHarness.start_workflow(TimedOutPhaseWorkflow, nil)
+      assert {:yield, [%Command.StartTimer{seq: seq}]} = TestHarness.next(exec)
+
+      completion =
+        TestHarness.activate_raw(exec, [
+          %Job.SignalReceived{name: "settled", args: ["pay-1"]},
+          %Job.TimerFired{seq: seq},
+          %Job.CancelWorkflow{reason: "requested"}
+        ])
+
+      assert {:ok, [%Command.CompleteWorkflow{result: {:cancelled, _error, partial}}]} =
+               completion.status
+
+      assert partial == %{"pay-1" => :captured}
     end
 
     test "signals in the same activation as a cancel still reach the handler" do

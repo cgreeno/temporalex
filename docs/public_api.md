@@ -180,6 +180,11 @@ Workflow cancellation is cooperative. Non-bang cancellable primitives return can
 `{:cancelled, %Temporalex.Failure.CancelledError{}}`; bang variants raise the same error. Cleanup
 that must perform durable work after cancellation should be wrapped in `API.non_cancellable/1`.
 
+`API.phase/2` and `API.parallel/1` are the exception: they return
+`{:cancelled, %Temporalex.Failure.CancelledError{}, partial}`, where `partial` is the state the
+phase had accumulated, or one entry per branch in input order. Everything they had already accepted
+is reachable, so compensation can act on it.
+
 The detailed semantics are in [programming_model.md](programming_model.md).
 
 ## Client API
