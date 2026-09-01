@@ -23,19 +23,35 @@
 
   This also affected the timeout path, which is not new to this release.
 
-  **Upgrading with runs in flight.** Messages that used to be refused now run,
-  so the commands a workflow task emits differ. A run that took a
-  cancel-with-signal, cancel-with-update or timeout-with-message workflow task
-  under 0.5.4 and replays after the upgrade — on a worker restart or a cache
-  eviction — produces handler responses with no counterpart in its history,
-  which sdk-core reports as nondeterminism and fails the task. The run parks on
-  a retrying workflow task rather than failing cleanly, and needs a reset.
-  Drain or complete runs that are parked in a phase before upgrading; runs that
-  never took such a task, and runs started after the upgrade, are unaffected.
+  **Breaking for runs in flight — read this before upgrading.** Messages that
+  used to be refused now run, so a workflow task emits different commands than
+  it did before. A run that took a cancel-with-signal, cancel-with-update or
+  timeout-with-message workflow task under 0.5.4 or earlier, and then replays
+  after the upgrade — on a worker restart, a cache eviction, or a reset —
+  re-executes handlers whose responses have no counterpart in its history.
+  sdk-core reports that as nondeterminism and fails the workflow task, so the
+  run parks retrying rather than failing cleanly, and needs a reset to recover.
+
+  Who is affected: only runs that were *parked in an `API.phase/2`* when a
+  cancel or a phase timeout arrived alongside a signal or update. Runs that
+  never took such a task are unaffected, as is anything started after the
+  upgrade.
+
+  What to do, in order of preference:
+
+  1. **Drain.** Let phases complete before deploying. If your phases are short —
+     minutes, not days — this costs nothing and there is no window.
+  2. **Check before deploying.** `temporal workflow list --query
+     'ExecutionStatus="Running"'` narrows it; runs parked in a phase are the
+     ones to watch.
+  3. **Reset after the fact.** A parked run reports its failed task via
+     `Temporalex.History.stuck_reason/1`. Reset it to the workflow task before
+     the bad one and it replays cleanly against the new code.
 
   Queries in an activation that also carries signals or updates are now answered
   after those handlers run, so a query sees the post-handler published state.
-  Previously it saw the state as it stood before them.
+  Previously it saw the state as it stood before them. This changes an answer's
+  value, not its determinism.
 
 ### Changed
 
