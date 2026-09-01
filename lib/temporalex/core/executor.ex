@@ -62,6 +62,7 @@ defmodule Temporalex.Core.Executor do
               evicted?: false,
               published_state: nil,
               signal_buffer: [],
+              deferred_phase_stop: nil,
               signal_waiters: %{},
               next_seq: 0,
               commands: [],
@@ -148,6 +149,14 @@ defmodule Temporalex.Core.Executor do
           # same activation as a replay-InitializeWorkflow, because the
           # workflow runner hadn't yet entered API.phase to populate
           # state.phase.
+          #
+          # A stop that lands on an open phase — a cancel, or the phase's own
+          # timeout — is deferred to after pass 2. sdk-core sorts SignalWorkflow
+          # and DoUpdate ahead of FireTimer and CancelWorkflow
+          # (`prepare_to_ship_activation`), and applying the stop first marks
+          # the phase stopping?, which makes phase_accepts_signal?/2 reject
+          # every signal in the same activation. A phase cancelled or timed out
+          # alongside its own signals would report none of them.
           {input_jobs, message_jobs} = Enum.split_with(activation.jobs, &input_job?/1)
 
           {_, state} = apply_jobs(input_jobs, [], state)
@@ -160,6 +169,17 @@ defmodule Temporalex.Core.Executor do
             end
 
           {query_jobs, state} = apply_jobs(message_jobs, [], state)
+
+          state =
+            if query_only?(activation.jobs) do
+              state
+            else
+              state
+              |> maybe_dispatch_phase()
+              |> drain_scheduler()
+              |> apply_deferred_phase_stop()
+              |> drain_scheduler()
+            end
 
           state =
             query_jobs
@@ -1206,10 +1226,33 @@ defmodule Temporalex.Core.Executor do
     |> Map.put(:cancelled?, true)
     |> Map.put(:cancellation, cancellation)
     |> mark_parallel_scopes_cancelled(cancellation)
-    |> mark_phase_cancelled(cancellation)
+    |> defer_phase_stop({:cancelled, cancellation})
     |> cancel_signal_waiters(cancellation)
     |> cancel_pending_operations(cancellation)
     |> maybe_complete_phase()
+  end
+
+  # Recorded now, applied after this activation's signals and updates. With no
+  # phase open there is nothing to defer, so the stop is a no-op either way.
+  defp defer_phase_stop(%State{phase: nil} = state, _stop), do: state
+
+  defp defer_phase_stop(%State{} = state, stop),
+    do: %{state | deferred_phase_stop: state.deferred_phase_stop || stop}
+
+  defp apply_deferred_phase_stop(%State{deferred_phase_stop: nil} = state), do: state
+
+  defp apply_deferred_phase_stop(%State{deferred_phase_stop: {:cancelled, cancellation}} = state) do
+    %{state | deferred_phase_stop: nil}
+    |> mark_phase_cancelled(cancellation)
+    |> maybe_complete_phase()
+  end
+
+  defp apply_deferred_phase_stop(%State{deferred_phase_stop: :timeout, phase: nil} = state),
+    do: %{state | deferred_phase_stop: nil}
+
+  defp apply_deferred_phase_stop(%State{deferred_phase_stop: :timeout} = state) do
+    %{state | deferred_phase_stop: nil}
+    |> stop_phase(:timeout)
   end
 
   defp cancellation_from_reason(%Temporalex.Failure.CancelledError{} = cancellation),
@@ -1657,10 +1700,8 @@ defmodule Temporalex.Core.Executor do
   end
 
   defp fire_phase_timeout(%State{phase: %Phase{id: phase_id} = phase} = state, phase_id) do
-    phase = %{phase | stopping?: true, result: :timeout, timeout_fired?: true}
-
-    %{state | phase: phase}
-    |> maybe_complete_phase()
+    %{state | phase: %{phase | timeout_fired?: true}}
+    |> defer_phase_stop(:timeout)
   end
 
   defp fire_phase_timeout(state, _phase_id), do: state

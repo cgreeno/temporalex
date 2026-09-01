@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Signals arriving in the same activation as a cancel or a phase timeout are
+  no longer discarded.** A cancel or the phase's own timeout marked the phase
+  `stopping?` during pass one of activation processing, and
+  `phase_accepts_signal?/2` then rejected every signal in pass two — so a phase
+  cancelled or timed out alongside its own signals reported none of them.
+
+  sdk-core sorts `SignalWorkflow` and `DoUpdate` ahead of `FireTimer` and
+  `CancelWorkflow` before shipping an activation (`prepare_to_ship_activation`).
+  Temporalex applied the two in the opposite order, which is why neither the Go
+  SDK — where signals land on a buffered channel that cancellation never touches
+  — nor the TypeScript SDK, which takes core's order as given, has this problem.
+
+  A stop that lands on an open phase is now deferred until after the
+  activation's signals and updates have been dispatched. Cancellation is still
+  recorded immediately, so `API.cancelled?/0` and the refusal of new cancellable
+  work are unchanged.
+
+  This also affected the timeout path, which is not new to this release.
+
 ### Changed
 
 - **Breaking: `API.phase/2` and `API.parallel/1` return `{:cancelled, error, partial}`**
