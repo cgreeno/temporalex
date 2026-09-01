@@ -1,6 +1,45 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-09-01
+
+### Added
+
+- **`Temporalex.with_signal/3` — signal-with-start.** A step on the start chain
+  that delivers a signal atomically with the start: the workflow is signalled if
+  it is already running and started first if it is not, in one request, so the
+  signal cannot be lost between a check and a send.
+
+  ```elixir
+  order_id
+  |> Checkout.new()
+  |> Temporalex.with_signal("payment_settled", [settlement])
+  |> Temporalex.start!()
+  ```
+
+  Use it where an external event can arrive before the workflow it belongs to
+  exists — a payment settling before the checkout that owns it has started. The
+  signal is delivered before the workflow's first task, so it lands before any
+  `phase/2` has declared a handler for it; it waits in the signal buffer and is
+  consumed when a phase that handles it opens.
+
+  `priority/2`, `fairness/3` and `id_conflict_policy: :fail` are refused in
+  combination, because Temporal's signal-with-start request cannot carry them —
+  a dropped option that reaches neither the server nor an error is the defect
+  class RFC 0002 §10 exists to remove. `retry/2`, `cron/2`, `index/2`,
+  `headers/2` and both timeouts are carried.
+
+  A duplicate now reports `Temporalex.WorkflowAlreadyStartedError` with its run
+  id on this path, as a plain start already did.
+
+- **`mix temporalex.gen.proto`.** Regenerates `priv/proto/temporal_core.binpb`
+  from the sdk-rust revision pinned in `Cargo.lock`, and a test fails the build
+  when the committed descriptor and that revision disagree. The descriptor is
+  the dictionary the Elixir decoder uses to turn history bytes into terms, and a
+  stale one does not error — it decodes, minus whatever the newer proto tree
+  added, so a field the server did send reads as absent. It had been generated
+  by hand and was three sdk-rust releases behind; it is now current, and CI
+  fails a PR that bumps Cargo without regenerating it.
+
 
 ### Fixed
 

@@ -1,7 +1,7 @@
 defmodule Temporalex.MixProject do
   use Mix.Project
 
-  @version "0.5.4"
+  @version "0.6.0"
   @source_url "https://github.com/cgreeno/temporalex"
 
   def project do
