@@ -1,6 +1,8 @@
 defmodule Temporalex.CoreExecutorTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Temporalex.Core.Command
   alias Temporalex.Core.Job
   alias Temporalex.Core.Nondeterminism
@@ -348,6 +350,22 @@ defmodule Temporalex.CoreExecutorTest do
            end
          },
          timeout: 60_000
+       )}
+    end
+  end
+
+  defmodule SlowHandlerPhaseWorkflow do
+    use Temporalex.Workflow
+
+    def run(_) do
+      {:ok,
+       API.phase(%{},
+         signal: %{
+           "settled" => fn [id], acc ->
+             {:ok, _} = Activities.echo(id)
+             {:noreply, Map.put(acc, id, :captured)}
+           end
+         }
        )}
     end
   end
@@ -1380,6 +1398,25 @@ defmodule Temporalex.CoreExecutorTest do
 
       assert {:ok, [%Command.CompleteWorkflow{result: {:partial, partial}}]} = completion.status
       assert partial == %{"early" => :captured}
+    end
+
+    test "a signal queued behind an in-flight handler is warned about, not dropped silently" do
+      assert {:ok, exec} = TestHarness.start_workflow(SlowHandlerPhaseWorkflow, nil)
+      assert {:waiting, _} = TestHarness.next(exec)
+
+      assert {:yield, [%Command.ScheduleActivity{}]} =
+               TestHarness.resolve(exec, %Job.SignalReceived{name: "settled", args: ["pay-1"]})
+
+      log =
+        capture_log(fn ->
+          TestHarness.activate_raw(exec, [
+            %Job.SignalReceived{name: "settled", args: ["pay-2"]},
+            %Job.CancelWorkflow{reason: "requested"}
+          ])
+        end)
+
+      assert log =~ "abandoned 1 undispatched signal(s)"
+      assert log =~ "settled"
     end
 
     test "a deferred timeout does not stop the phase that opens after it" do

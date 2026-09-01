@@ -1303,6 +1303,7 @@ defmodule Temporalex.Core.Executor do
   defp mark_phase_cancelled(%State{phase: %Phase{} = phase} = state, cancellation) do
     if thread_cancellable?(state, phase.owner_thread_id) do
       state = reject_queued_phase_updates(state, cancellation)
+      warn_abandoned_phase_signals(state, %{state.phase | result: {:cancelled, cancellation}})
 
       phase = %{
         state.phase
@@ -2054,6 +2055,7 @@ defmodule Temporalex.Core.Executor do
 
   defp maybe_complete_phase(%State{phase: %Phase{} = phase} = state) do
     if MapSet.size(phase.async_threads) == 0 do
+      warn_abandoned_phase_signals(state, phase)
       result = phase_completion_result(phase)
 
       state
@@ -2063,6 +2065,38 @@ defmodule Temporalex.Core.Executor do
       state
     end
   end
+
+  # A phase stops with messages still queued when a handler was mid-flight, or
+  # when a stop and a message land in the same activation. Queued updates are
+  # rejected back to their caller; a signal has no reply channel, so the only
+  # honest thing left is to say so. Matches WARN_AND_ABANDON in the TypeScript
+  # and Python SDKs, which warn by default when a handler does not finish.
+  defp warn_abandoned_phase_signals(%State{} = state, %Phase{} = phase) do
+    case abandoned_signal_names(phase.queue) do
+      [] ->
+        :ok
+
+      names ->
+        Logger.warning(
+          "phase abandoned #{length(names)} undispatched signal(s): #{Enum.join(names, ", ")}",
+          workflow_id: state.workflow_id,
+          run_id: state.run_id,
+          phase_result: phase_result_kind(phase)
+        )
+    end
+  end
+
+  defp abandoned_signal_names(queue) do
+    queue
+    |> :queue.to_list()
+    |> Enum.flat_map(fn
+      {:signal, name, _args, _headers, _identity} -> [name]
+      _ -> []
+    end)
+  end
+
+  defp phase_result_kind(%Phase{result: {:cancelled, _}}), do: :cancelled
+  defp phase_result_kind(%Phase{result: result}), do: result
 
   defp phase_completion_result(%Phase{result: {:cancelled, cancellation}, state: state}),
     do: op_cancelled(cancellation, state)
