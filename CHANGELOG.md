@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **An eviction telemetry event.** Every time core drops a workflow from its
+  cache, the worker now emits `[:temporalex, :workflow, :evicted]`.
+
+  ```elixir
+  :telemetry.attach("evictions", [:temporalex, :workflow, :evicted], fn _e, _m, meta, _ ->
+    MyApp.Metrics.increment("temporal.eviction", tags: ["reason:#{meta.reason}"])
+  end, nil)
+  ```
+
+  Measurements are `%{count: 1}`. Metadata carries `:reason`, `:message`,
+  `:run_id`, `:workflow_type`, `:worker`, `:task_queue` and `:namespace`.
+
+  Evictions are not all the same thing, and that is the point of the event.
+  Some are free: a workflow that has finished leaves the cache and costs
+  nothing. Some are expensive: when the cache is full, core drops an instance
+  to make room, and the next workflow task for that run has to replay the
+  whole history from the start to rebuild its state. The reason field is what
+  tells the two apart, and until now the SDK decoded it off the wire and threw
+  it away. Core's own metrics exporter counts evictions, but it cannot say
+  which workflow type or which run left the cache.
+
+  So if `reason: :cache_full` is climbing, raise `:max_cached_workflows` or add
+  workers.
+
+  Two reasons are logged as warnings as well, `:nondeterminism` and `:fatal`.
+  They mean a bug rather than a tuning problem, and nothing else on the Elixir
+  side mentions them. Nothing else is logged. A line per eviction would fill
+  the logs of the one worker whose logs you actually need to read.
+
+  This adds `:telemetry` as a dependency. It is a rebar3 package with no
+  dependencies of its own.
+
+### Documentation
+
+- `Temporalex.Worker` now lists its options. It documented the three derived
+  ones (queue, client, name) and stopped there, so there was no way to find
+  out from the module that the poller counts, the slot counts or the workflow
+  cache exist, and no hint that `:max_cached_workflows` starts switched off.
+
 ## 0.7.0 — 2026-09-08
 
 ### Added

@@ -19,6 +19,67 @@ defmodule Temporalex.Worker do
       an explicit `task_queue:`.
     * `client:` — defaults to the app's default client.
     * `name:` — derived from the queue, overridable.
+
+  ## Capacity
+
+  Pollers fetch work. Slots hold it while it runs. They are different numbers,
+  and mixing them up is the usual reason a task queue backs up while the
+  pollers, the CPU and the database all look idle.
+
+    * `:max_workflow_pollers` / `:max_activity_pollers` — how many polls the
+      worker keeps open. Five each by default.
+    * `:max_workflow_task_slots` / `:max_activity_task_slots` — how much work
+      the worker holds at once. Leave them unset and core decides, which means
+      200 each. `:max_concurrent_workflow_task_executions` and
+      `:max_concurrent_activity_task_executions` work too, matching what the
+      other Temporal SDKs call them.
+    * `:max_cached_workflows` — **off unless you ask for it.** Set it and
+      workflows become sticky: the worker keeps each instance suspended in
+      memory and applies new history to it as history arrives. Leave it off
+      and every workflow task replays the whole history from the start to
+      rebuild the state it needs. Once the cache is full, the least recently
+      used instance is dropped to make room. You pay in memory, and you save
+      more the longer a workflow's history gets.
+
+  Setting a cache brings two rules from core with it. The workflow task slots
+  and the workflow task pollers must both be at least 2. Break either one and
+  the worker refuses to start, with a message naming the option you set.
+
+      {Temporalex.Worker,
+       workflows: [Booking],
+       max_workflow_task_slots: 500,
+       max_activity_task_slots: 500,
+       max_cached_workflows: 200}
+
+  ## Telemetry
+
+  Counters and latencies come from core's own metrics exporter, which you
+  configure on the client. See the Metrics section of the README.
+
+  The one thing that exporter cannot tell you is which workflow left the
+  cache, so the worker emits an Erlang telemetry event per eviction:
+
+      :telemetry.attach("evictions", [:temporalex, :workflow, :evicted], &handler/4, nil)
+
+  Measurements are `%{count: 1}`. Metadata carries `:reason`, `:message`,
+  `:run_id`, `:workflow_type`, `:worker`, `:task_queue` and `:namespace`.
+
+  Group on `:reason`, because evictions are not all the same thing:
+
+    * `:cache_full` — the cache was full, so this instance was dropped to make
+      room. The next workflow task for that run replays its whole history, so
+      a rising count is the signal to raise `:max_cached_workflows` or add
+      workers.
+    * `:cache_miss` — a workflow task arrived for a run this worker had no
+      instance for, so it replayed the history to rebuild the state.
+    * `:workflow_execution_ending`, `:lang_requested` — routine, and free.
+    * `:nondeterminism`, `:fatal` — a bug, not a tuning problem. These two are
+      logged as warnings as well, because nothing else here reports them.
+    * `:unhandled_command` — the server refused the workflow task. Not logged,
+      because it also happens when a worker is shut down with a task still in
+      flight.
+    * `:lang_fail`, `:task_not_found`, `:pagination_or_history_fetch` — the
+      rest of what core can send.
   """
 
   use Supervisor
