@@ -116,14 +116,19 @@ start_worker(
 ```
 
 Poller counts and slot counts are different things. A poller fetches work from the
-task queue; a slot holds a task while it runs, and a workflow task holds its slot
-across every activation it needs — including time the workflow spends waiting on a
-timer or an update. A workload of long-waiting workflows therefore exhausts slots
-while pollers, CPU and the database stay idle.
+task queue; a slot holds a task while that task is being executed. A workflow
+waiting on a timer or an update holds no slot: the workflow task completes when it
+schedules the wait, and a new one is scheduled when the wait ends. Measured on a
+production cluster, 8 workflow starts per second of a workload with durable waits
+and fifteen-minute timers held 1 to 2 slots of 500.
 
-Zero means unset, leaving core's defaults — which differ per field: 200 outstanding
-workflow tasks and activities, but a workflow cache of 0, so caching is off unless
-asked for.
+So slots bound *concurrent execution*, not concurrent workflows, and they are
+exhausted by rate rather than by duration. A worker with free slots and a growing
+task queue is poller-starved, not slot-starved.
+
+Zero means unset, leaving core's defaults — which differ per field: 100 outstanding
+workflow tasks and 100 activities, but a workflow cache of 0, so caching is off
+unless asked for.
 
 A nonzero `max_cached_wf` makes workflows sticky — history updates are applied
 incrementally to suspended instances rather than replayed from the start — and

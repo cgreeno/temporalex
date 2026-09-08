@@ -6,8 +6,8 @@
 
 - **Worker slot counts.** `:max_workflow_task_slots`,
   `:max_activity_task_slots` and `:max_cached_workflows` set how much work a
-  worker holds at once, instead of leaving core's defaults of 200 outstanding
-  workflow tasks and 200 activities unreachable.
+  worker holds at once, instead of leaving core's defaults of 100 outstanding
+  workflow tasks and 100 activities unreachable.
 
   ```elixir
   {Temporalex.Worker,
@@ -19,12 +19,13 @@
   ```
 
   Reach for these when a task queue builds while the pollers, the workers' CPU
-  and the database all look idle. A workflow task holds its slot across every
-  activation it needs, including the time a workflow spends waiting on a timer
-  or an update, so a workload of long-waiting workflows exhausts the slots at a
-  modest rate — and no amount of fetching capacity helps once there is nowhere
-  to put the work. `Temporalex` exports
-  `temporal_worker_task_slots_available` for exactly this.
+  and the database all look idle: no amount of fetching capacity helps once
+  there is nowhere to put the work. A slot is held while a task is *executed*,
+  so slots bound concurrent execution rather than concurrent workflows — a
+  workflow waiting on a timer or an update holds none, because its workflow task
+  completed when it scheduled the wait. They run out because of rate, not
+  duration. `Temporalex` exports `temporal_worker_task_slots_available` for
+  exactly this.
 
   `:max_concurrent_workflow_task_executions` and
   `:max_concurrent_activity_task_executions` are accepted as aliases, matching

@@ -662,8 +662,10 @@ fn versioning_strategy_from_opts(opts: Term) -> anyhow::Result<WorkerVersioningS
 }
 
 /// Zero means unset, so core keeps its own default rather than this deciding one.
-/// Note core's defaults differ per field: 200 outstanding workflow tasks and
-/// activities, but a workflow cache of 0, meaning caching is off unless asked for.
+/// Note core's defaults differ per field: 100 outstanding workflow tasks and
+/// 100 activities, but a workflow cache of 0, meaning caching is off unless asked
+/// for. The 100s come from `TunerBuilder::build`, which falls back to
+/// `FixedSizeSlotSupplier::new(100)` for every slot kind left unset.
 fn opt(value: usize) -> Option<usize> {
     (value > 0).then_some(value)
 }
@@ -688,8 +690,8 @@ fn validate_slots(max_wf_slots: usize, max_act_slots: usize, max_cached_wf: usiz
     if max_cached_wf > 0 {
         if max_wf_slots == 1 {
             return Err(anyhow!(
-                "max_workflow_task_slots must be at least 2 when max_cached_workflows is set: \
-                 a cached workflow holds its slot across every activation its workflow task needs"
+                "max_workflow_task_slots must be at least 2 when max_cached_workflows is set, \
+                 which is core's own requirement and is asserted without a stated reason"
             ));
         }
 
