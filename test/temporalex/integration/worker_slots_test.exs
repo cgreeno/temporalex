@@ -16,8 +16,9 @@ defmodule Temporalex.WorkerSlotsIntegrationTest do
   round trip — driven at a rate high enough to exhaust them, sustained long
   enough to measure. That is a load test against a real cluster, not a fixture
   this suite has, and the evidence for it lives in the issue this option came
-  from: 198 of 200 workflow slots in use with the database at 50% and the worker
-  at 43% of its CPU limit.
+  from: 198 of 200 workflow slots in use fleet-wide -- two workers at core's
+  default of 100 each -- with the database at 50% and the worker at 43% of its
+  CPU limit.
 
   So these are plumbing tests, deliberately named as such.
 
