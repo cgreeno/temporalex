@@ -30,10 +30,12 @@
   `:max_concurrent_activity_task_executions` are accepted as aliases, matching
   the naming the other Temporal SDKs use.
 
-  Core refuses a single workflow task slot while workflow caching is on, because
-  one workflow task may need several activations; that is rejected at the
-  boundary with a message naming the option rather than surfacing as a
-  worker-build failure. Caching cannot be switched off through these options.
+  Core's workflow cache is off unless asked for, and switching it on brings two
+  rules with it: both the workflow task slots and the workflow task pollers must
+  be at least 2, because a cached workflow holds its slot across every activation
+  its workflow task needs. Both are rejected at the boundary with a message
+  naming the option rather than surfacing as a worker-build failure. With no
+  cache, a single slot is legal.
 
   See [#79](https://github.com/cgreeno/temporalex/issues/79).
 

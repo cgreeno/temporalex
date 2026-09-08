@@ -121,10 +121,15 @@ across every activation it needs — including time the workflow spends waiting 
 timer or an update. A workload of long-waiting workflows therefore exhausts slots
 while pollers, CPU and the database stay idle.
 
-Zero means unset, leaving core's defaults (200 outstanding workflow tasks, 200
-activities). The NIF returns `{:error, reason}` rather than messaging it when
-`max_wf_slots` is 1, because core rejects a single slot while workflow caching is
-on and one workflow task may need several activations.
+Zero means unset, leaving core's defaults — which differ per field: 200 outstanding
+workflow tasks and activities, but a workflow cache of 0, so caching is off unless
+asked for.
+
+Setting `max_cached_wf` brings two of core's rules with it: `max_wf_slots` and the
+workflow poller count must both be at least 2, because a cached workflow holds its
+slot across every activation its workflow task needs. The NIF returns
+`{:error, reason}` for either, rather than messaging it, so the message can name
+the option the caller set. With no cache, a single slot is legal.
 ```
 
 Completions:

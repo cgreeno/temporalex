@@ -662,28 +662,42 @@ fn versioning_strategy_from_opts(opts: Term) -> anyhow::Result<WorkerVersioningS
 }
 
 /// Zero means unset, so core keeps its own default rather than this deciding one.
+/// Note core's defaults differ per field: 200 outstanding workflow tasks and
+/// activities, but a workflow cache of 0, meaning caching is off unless asked for.
 fn opt(value: usize) -> Option<usize> {
     (value > 0).then_some(value)
 }
 
-/// Core rejects fewer than two outstanding workflow tasks while caching is on,
-/// because one workflow task can need several activations and the cache holds a
-/// slot across them. Caught here so the message names the option the caller set
-/// rather than surfacing as an opaque worker-build failure.
+/// Mirrors core's own two rules, which both apply only when the workflow cache
+/// is enabled: `max_cached_workflows > 0` requires `max_outstanding_workflow_tasks`
+/// of at least 2 *and* a workflow task poller count of at least 2, because one
+/// workflow task can need several activations and a cached workflow holds its slot
+/// across them.
 ///
-/// Caching is always on for anything this encoding can express: zero means unset,
-/// so core applies its own non-zero default, and any value we do pass is positive.
-/// Disabling the cache entirely is therefore not reachable through these options,
-/// which is deliberate -- a worker with no cache replays every workflow from
-/// history on each activation.
-fn validate_slots(max_wf_slots: usize) -> anyhow::Result<()> {
-    if max_wf_slots == 1 {
-        return Err(anyhow!(
-            "max_workflow_task_slots must be at least 2: workflow caching is enabled and \
-             one workflow task may require several activations, which core rejects with a \
-             single slot"
-        ));
+/// Caching is off unless asked for -- core defaults `max_cached_workflows` to 0 --
+/// so with no cache a single slot is legal and is not rejected here.
+///
+/// Checked at the boundary so the message names the option the caller set, rather
+/// than surfacing as an opaque worker-build failure.
+fn validate_slots(max_wf_slots: usize, max_act_slots: usize, max_cached_wf: usize, max_wf_pollers: usize) -> anyhow::Result<()> {
+    let _ = max_act_slots;
+
+    if max_cached_wf > 0 {
+        if max_wf_slots == 1 {
+            return Err(anyhow!(
+                "max_workflow_task_slots must be at least 2 when max_cached_workflows is set: \
+                 a cached workflow holds its slot across every activation its workflow task needs"
+            ));
+        }
+
+        if max_wf_pollers < 2 {
+            return Err(anyhow!(
+                "max_workflow_pollers must be at least 2 when max_cached_workflows is set, \
+                 and it is {max_wf_pollers}"
+            ));
+        }
     }
+
     Ok(())
 }
 
@@ -716,7 +730,7 @@ fn start_worker<'a>(
     };
 
     let handle = runtime.core.tokio_handle();
-    if let Err(err) = validate_slots(max_wf_slots) {
+    if let Err(err) = validate_slots(max_wf_slots, max_act_slots, max_cached_wf, max_wf.max(1)) {
         return (error(), format!("{err:#}")).encode(env);
     }
 

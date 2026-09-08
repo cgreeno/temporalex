@@ -71,18 +71,38 @@ defmodule Temporalex.WorkerSlotsIntegrationTest do
     test "workflow slots alone, leaving activities on the default" do
       assert :ok == start_worker_result(max_workflow_task_slots: 2)
     end
+
+    # Legal because core defaults the workflow cache to 0, so caching is off and
+    # the at-least-2 rule does not apply. Asserted because an earlier version of
+    # this change rejected it, on the false assumption that caching was on by
+    # default.
+    test "a single workflow slot is fine with no cache" do
+      assert :ok == start_worker_result(max_workflow_task_slots: 1)
+    end
   end
 
-  describe "the configuration core refuses" do
-    # One workflow task can need several activations and the cache holds its
-    # slot across them, so a single slot cannot make progress. Refused at the
-    # boundary rather than surfacing as an opaque worker-build failure, which is
-    # what the message is asserted for.
-    test "a single workflow task slot is rejected, naming the option" do
-      assert {:error, reason} = start_worker_result(max_workflow_task_slots: 1)
-      message = inspect(reason)
+  # Both of core's rules apply only when the cache is enabled: a cached workflow
+  # holds its slot across every activation its workflow task needs, so one slot
+  # and one poller cannot make progress. Refused at the boundary so the message
+  # names the option the caller set, which is what these assert.
+  describe "the configurations core refuses, when caching is on" do
+    test "one workflow slot with a cache is rejected, naming the option" do
+      assert {:error, reason} =
+               start_worker_result(max_cached_workflows: 10, max_workflow_task_slots: 1)
 
+      message = inspect(reason)
       assert message =~ "max_workflow_task_slots"
+      assert message =~ "at least 2"
+    end
+
+    # Reachable only because this change lets a caller set the cache at all. The
+    # existing poller default is 5, so nothing hit it before.
+    test "one workflow poller with a cache is rejected, naming the option" do
+      assert {:error, reason} =
+               start_worker_result(max_cached_workflows: 10, max_workflow_pollers: 1)
+
+      message = inspect(reason)
+      assert message =~ "max_workflow_pollers"
       assert message =~ "at least 2"
     end
   end
