@@ -661,6 +661,32 @@ fn versioning_strategy_from_opts(opts: Term) -> anyhow::Result<WorkerVersioningS
     Ok(WorkerVersioningStrategy::WorkerDeploymentBased(options))
 }
 
+/// Zero means unset, so core keeps its own default rather than this deciding one.
+fn opt(value: usize) -> Option<usize> {
+    (value > 0).then_some(value)
+}
+
+/// Core rejects fewer than two outstanding workflow tasks while caching is on,
+/// because one workflow task can need several activations and the cache holds a
+/// slot across them. Caught here so the message names the option the caller set
+/// rather than surfacing as an opaque worker-build failure.
+///
+/// Caching is always on for anything this encoding can express: zero means unset,
+/// so core applies its own non-zero default, and any value we do pass is positive.
+/// Disabling the cache entirely is therefore not reachable through these options,
+/// which is deliberate -- a worker with no cache replays every workflow from
+/// history on each activation.
+fn validate_slots(max_wf_slots: usize) -> anyhow::Result<()> {
+    if max_wf_slots == 1 {
+        return Err(anyhow!(
+            "max_workflow_task_slots must be at least 2: workflow caching is enabled and \
+             one workflow task may require several activations, which core rejects with a \
+             single slot"
+        ));
+    }
+    Ok(())
+}
+
 #[rustler::nif]
 fn start_worker<'a>(
     env: Env<'a>,
@@ -671,6 +697,12 @@ fn start_worker<'a>(
     versioning: Term<'a>,
     max_wf: usize,
     max_act: usize,
+    // Slot counts, distinct from the poller counts above: a poller fetches work,
+    // a slot holds it while it runs. Zero means "leave core's default", which is
+    // how the Elixir side expresses an unset option without another Term to parse.
+    max_wf_slots: usize,
+    max_act_slots: usize,
+    max_cached_wf: usize,
     pid: LocalPid,
     poll_pid: LocalPid,
 ) -> Term<'a> {
@@ -684,6 +716,10 @@ fn start_worker<'a>(
     };
 
     let handle = runtime.core.tokio_handle();
+    if let Err(err) = validate_slots(max_wf_slots) {
+        return (error(), format!("{err:#}")).encode(env);
+    }
+
     let runtime_for_worker = runtime.clone();
     let client_connection = client.connection.clone();
 
@@ -698,6 +734,12 @@ fn start_worker<'a>(
                 .task_types(WorkerTaskTypes::all())
                 .workflow_task_poller_behavior(PollerBehavior::SimpleMaximum(max_wf.max(1)))
                 .activity_task_poller_behavior(PollerBehavior::SimpleMaximum(max_act.max(1)))
+                // maybe_ rather than a conditional chain: bon's builder is
+                // typed-state, so a branch cannot skip a setter, and these take
+                // the None that means "core decides".
+                .maybe_max_outstanding_workflow_tasks(opt(max_wf_slots))
+                .maybe_max_outstanding_activities(opt(max_act_slots))
+                .maybe_max_cached_workflows(opt(max_cached_wf))
                 .build()
                 .map_err(|err| anyhow!(err))?;
 

@@ -49,6 +49,9 @@ defmodule Temporalex.Native do
         _versioning,
         _max_wf,
         _max_act,
+        _max_wf_slots,
+        _max_act_slots,
+        _max_cached_wf,
         _pid,
         _poll_pid
       ),
