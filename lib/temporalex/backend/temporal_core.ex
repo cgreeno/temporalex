@@ -567,9 +567,8 @@ defmodule Temporalex.Backend.TemporalCore do
       0
   end
 
-  # Sized with the slots rather than independently: a cached workflow holds its
-  # slot, so a cache larger than the slot count cannot be used and one much
-  # smaller forces replays that hold slots for longer.
+  # Zero is off here, not "core's default": core defaults the cache to 0, unlike
+  # the slot counts above whose unset value lands on core's 200.
   defp cached_workflows(opts) do
     Keyword.get(opts, :max_cached_workflows) || 0
   end

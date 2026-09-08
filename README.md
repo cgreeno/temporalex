@@ -606,6 +606,26 @@ telemetry: [
 are `metric_prefix` (default `"temporal_"`), `attach_service_name` and
 `durations_as_seconds`.
 
+### Eviction events
+
+Core's exporter counts cache evictions but cannot say which workflow left the
+cache, so the worker also emits an Erlang telemetry event per eviction:
+
+```elixir
+:telemetry.attach("evictions", [:temporalex, :workflow, :evicted], fn _e, _m, meta, _ ->
+  MyApp.Metrics.increment("temporal.eviction", tags: ["reason:#{meta.reason}"])
+end, nil)
+```
+
+Measurements are `%{count: 1}`; metadata carries `:reason`, `:message`,
+`:run_id`, `:workflow_type`, `:worker`, `:task_queue` and `:namespace`.
+
+Group on `:reason`. `:workflow_execution_ending` is free, whereas every
+`:cache_full` buys a full history replay the next time that run gets a
+workflow task, and a rising count of those is the signal to raise
+`:max_cached_workflows` or add workers. `Temporalex.Worker` documents the full
+list.
+
 ## Build id
 
 Every worker reports a build id. It lands on every `WorkflowTaskCompleted`

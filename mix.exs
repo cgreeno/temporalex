@@ -46,6 +46,7 @@ defmodule Temporalex.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
+      {:telemetry, "~> 1.0"},
       {:pb, "~> 0.1.0"},
       {:rustler, "~> 0.37", runtime: false, optional: true},
       {:rustler_precompiled, "~> 0.8"},

@@ -217,6 +217,77 @@ defmodule Temporalex.ServerIntegrationTest do
     refute Map.has_key?(snapshot.executors, run_id)
   end
 
+  test "eviction emits telemetry naming the reason and the evicted workflow", %{worker: worker} do
+    attach_eviction_handler()
+    run_id = "run-evict-telemetry"
+
+    TestBackend.send_activation(worker, %Activation{
+      run_id: run_id,
+      jobs: [initialize(SignalWorkflow, nil)]
+    })
+
+    assert %Temporalex.Core.Completion{} =
+             TestBackend.fetch_workflow_completion(worker, run_id)
+
+    TestBackend.send_activation(worker, %Activation{
+      run_id: run_id,
+      jobs: [%Job.RemoveFromCache{reason: :cache_full, message: "cache full"}]
+    })
+
+    assert_receive {:evicted, %{count: 1}, metadata}
+
+    assert %{
+             reason: :cache_full,
+             message: "cache full",
+             run_id: ^run_id,
+             workflow_type: workflow_type,
+             worker: ^worker,
+             task_queue: "temporalex-test"
+           } = metadata
+
+    assert workflow_type == SignalWorkflow.__workflow_type__()
+  end
+
+  test "eviction of a run this worker never cached still emits", %{worker: worker} do
+    attach_eviction_handler()
+    run_id = "run-evict-uncached"
+
+    TestBackend.send_activation(worker, %Activation{
+      run_id: run_id,
+      jobs: [%Job.RemoveFromCache{reason: :cache_miss, message: "not cached"}]
+    })
+
+    assert_receive {:evicted, %{count: 1}, %{reason: :cache_miss, workflow_type: nil}}
+  end
+
+  test "a defect eviction warns, a full cache does not", %{worker: worker} do
+    tuning =
+      capture_log(fn ->
+        TestBackend.send_activation(worker, %Activation{
+          run_id: "run-evict-quiet",
+          jobs: [%Job.RemoveFromCache{reason: :cache_full, message: "cache full"}]
+        })
+
+        assert %Temporalex.Core.Completion{} =
+                 TestBackend.fetch_workflow_completion(worker, "run-evict-quiet")
+      end)
+
+    refute tuning =~ "evicted"
+
+    defect =
+      capture_log(fn ->
+        TestBackend.send_activation(worker, %Activation{
+          run_id: "run-evict-loud",
+          jobs: [%Job.RemoveFromCache{reason: :nondeterminism, message: "history mismatch"}]
+        })
+
+        assert %Temporalex.Core.Completion{} =
+                 TestBackend.fetch_workflow_completion(worker, "run-evict-loud")
+      end)
+
+    assert defect =~ "workflow evicted (nondeterminism): history mismatch"
+  end
+
   test "unknown workflow type becomes activation failure completion", %{worker: worker} do
     run_id = "run-unknown"
 
@@ -367,6 +438,24 @@ defmodule Temporalex.ServerIntegrationTest do
              snapshot = Temporalex.Server.snapshot(Temporalex.Worker.server_pid(worker))
              not Map.has_key?(snapshot.executors, run_id)
            end)
+  end
+
+  defp attach_eviction_handler do
+    handler_id = "evictions-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:temporalex, :workflow, :evicted],
+        &__MODULE__.handle_eviction/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  def handle_eviction(_event, measurements, metadata, test_pid) do
+    send(test_pid, {:evicted, measurements, metadata})
   end
 
   defp initialize(workflow, input) do

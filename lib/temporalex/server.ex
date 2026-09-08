@@ -9,6 +9,8 @@ defmodule Temporalex.Server do
 
   use GenServer
 
+  require Logger
+
   alias Temporalex.Activity.Context, as: ActivityContext
   alias Temporalex.Core.Activation
   alias Temporalex.Core.ActivityCompletion
@@ -186,6 +188,7 @@ defmodule Temporalex.Server do
         submit_workflow_completion(state, completion)
 
       eviction_only?(activation.jobs) and not Map.has_key?(state.executors, activation.run_id) ->
+        record_evictions(activation, state)
         completion = %Completion{run_id: activation.run_id, status: {:ok, []}}
         submit_workflow_completion(state, completion)
 
@@ -228,6 +231,7 @@ defmodule Temporalex.Server do
       |> submit_workflow_completion(completion)
 
     if eviction_only?(activation.jobs) do
+      record_evictions(activation, state)
       remove_executor(activation.run_id, state)
     else
       state
@@ -593,6 +597,41 @@ defmodule Temporalex.Server do
     do: Enum.all?(rest, &match?(%Job.RemoveFromCache{}, &1))
 
   defp eviction_only?(_jobs), do: false
+
+  defp record_evictions(%Activation{} = activation, state) do
+    for %Job.RemoveFromCache{reason: reason, message: message} <- activation.jobs do
+      :telemetry.execute(
+        [:temporalex, :workflow, :evicted],
+        %{count: 1},
+        %{
+          reason: reason,
+          message: message,
+          run_id: activation.run_id,
+          workflow_type: workflow_type(state, activation.run_id),
+          worker: state.name,
+          task_queue: state.task_queue,
+          namespace: state.namespace
+        }
+      )
+
+      warn_eviction(reason, message, activation.run_id)
+    end
+
+    :ok
+  end
+
+  defp workflow_type(state, run_id) do
+    state.executors |> Map.get(run_id, %{}) |> Map.get(:workflow_type)
+  end
+
+  # Only the two unambiguous defects. The tuning reasons would flood exactly the
+  # thrashing worker whose logs you need to read, and :unhandled_command covers
+  # a WFT the server refused, which includes a worker shut down mid-task.
+  defp warn_eviction(reason, message, run_id) when reason in [:nondeterminism, :fatal] do
+    Logger.warning("workflow evicted (#{reason}): #{message}", run_id: run_id)
+  end
+
+  defp warn_eviction(_reason, _message, _run_id), do: :ok
 
   defp failed_completion(run_id, reason) do
     %Completion{run_id: run_id, status: {:failed, reason, force_cause: :workflow_task_failed}}
