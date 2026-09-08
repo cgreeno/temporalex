@@ -125,9 +125,10 @@ Zero means unset, leaving core's defaults — which differ per field: 200 outsta
 workflow tasks and activities, but a workflow cache of 0, so caching is off unless
 asked for.
 
-Setting `max_cached_wf` brings two of core's rules with it: `max_wf_slots` and the
-workflow poller count must both be at least 2, because a cached workflow holds its
-slot across every activation its workflow task needs. The NIF returns
+A nonzero `max_cached_wf` makes workflows sticky — history updates are applied
+incrementally to suspended instances rather than replayed from the start — and
+brings two of core's rules with it: `max_wf_slots` and the workflow poller count
+must both be at least 2. Core asserts both without giving a reason. The NIF returns
 `{:error, reason}` for either, rather than messaging it, so the message can name
 the option the caller set. With no cache, a single slot is legal.
 ```

@@ -81,10 +81,10 @@ defmodule Temporalex.WorkerSlotsIntegrationTest do
     end
   end
 
-  # Both of core's rules apply only when the cache is enabled: a cached workflow
-  # holds its slot across every activation its workflow task needs, so one slot
-  # and one poller cannot make progress. Refused at the boundary so the message
-  # names the option the caller set, which is what these assert.
+  # Both of core's rules apply only when the cache is enabled. Core asserts them
+  # without giving a reason, so these tests assert the behaviour rather than a
+  # mechanism. Refused at the boundary so the message names the option the caller
+  # set, which is what is checked.
   describe "the configurations core refuses, when caching is on" do
     test "one workflow slot with a cache is rejected, naming the option" do
       assert {:error, reason} =

@@ -670,9 +670,12 @@ fn opt(value: usize) -> Option<usize> {
 
 /// Mirrors core's own two rules, which both apply only when the workflow cache
 /// is enabled: `max_cached_workflows > 0` requires `max_outstanding_workflow_tasks`
-/// of at least 2 *and* a workflow task poller count of at least 2, because one
-/// workflow task can need several activations and a cached workflow holds its slot
-/// across them.
+/// of at least 2 *and* a workflow task poller count of at least 2.
+///
+/// Core asserts both without giving a reason, and this does not invent one. What
+/// core does say about the cache is that a nonzero value makes workflows sticky,
+/// so history updates are applied incrementally to suspended instances instead of
+/// being replayed from the start.
 ///
 /// Caching is off unless asked for -- core defaults `max_cached_workflows` to 0 --
 /// so with no cache a single slot is legal and is not rejected here.

@@ -30,12 +30,18 @@
   `:max_concurrent_activity_task_executions` are accepted as aliases, matching
   the naming the other Temporal SDKs use.
 
-  Core's workflow cache is off unless asked for, and switching it on brings two
-  rules with it: both the workflow task slots and the workflow task pollers must
-  be at least 2, because a cached workflow holds its slot across every activation
-  its workflow task needs. Both are rejected at the boundary with a message
-  naming the option rather than surfacing as a worker-build failure. With no
-  cache, a single slot is legal.
+  `:max_cached_workflows` is off unless asked for. A nonzero value makes
+  workflows sticky: history updates are applied incrementally to instances kept
+  suspended in memory, rather than the whole history being replayed to rebuild
+  state on every workflow task. Cached workflows are evicted least-recently-used
+  once the maximum is reached. The cost is memory; the benefit grows with history
+  length.
+
+  Switching it on brings two of core's rules with it — both the workflow task
+  slots and the workflow task pollers must be at least 2. Core asserts these
+  without giving a reason and this does not invent one; both are rejected at the
+  boundary with a message naming the option rather than surfacing as a
+  worker-build failure. With no cache, a single slot is legal.
 
   See [#79](https://github.com/cgreeno/temporalex/issues/79).
 
