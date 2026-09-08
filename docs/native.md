@@ -106,8 +106,31 @@ connect(runtime, url, api_key, headers, pid) :: :ok
 Worker:
 
 ```elixir
-start_worker(runtime, client, task_queue, namespace, max_wf, max_act, pid, poll_pid) :: :ok
+start_worker(
+  runtime, client, task_queue, namespace, versioning,
+  max_wf, max_act,                                  # poller counts
+  max_wf_slots, max_act_slots, max_cached_wf,       # slot counts, 0 = core default
+  pid, poll_pid
+) :: :ok | {:error, reason}
 # sends {:worker_started, worker} | {:worker_error, reason}
+```
+
+Poller counts and slot counts are different things. A poller fetches work from the
+task queue; a slot holds a task while it runs, and a workflow task holds its slot
+across every activation it needs — including time the workflow spends waiting on a
+timer or an update. A workload of long-waiting workflows therefore exhausts slots
+while pollers, CPU and the database stay idle.
+
+Zero means unset, leaving core's defaults — which differ per field: 200 outstanding
+workflow tasks and activities, but a workflow cache of 0, so caching is off unless
+asked for.
+
+A nonzero `max_cached_wf` makes workflows sticky — history updates are applied
+incrementally to suspended instances rather than replayed from the start — and
+brings two of core's rules with it: `max_wf_slots` and the workflow poller count
+must both be at least 2. Core asserts both without giving a reason. The NIF returns
+`{:error, reason}` for either, rather than messaging it, so the message can name
+the option the caller set. With no cache, a single slot is legal.
 ```
 
 Completions:

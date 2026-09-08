@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Worker slot counts.** `:max_workflow_task_slots`,
+  `:max_activity_task_slots` and `:max_cached_workflows` set how much work a
+  worker holds at once, instead of leaving core's defaults of 200 outstanding
+  workflow tasks and 200 activities unreachable.
+
+  ```elixir
+  {Temporalex.Worker,
+   client: MyClient,
+   workflows: [Checkout],
+   activities: [Checkout.Activities],
+   max_workflow_task_slots: 500,
+   max_activity_task_slots: 500}
+  ```
+
+  Reach for these when a task queue builds while the pollers, the workers' CPU
+  and the database all look idle. A workflow task holds its slot across every
+  activation it needs, including the time a workflow spends waiting on a timer
+  or an update, so a workload of long-waiting workflows exhausts the slots at a
+  modest rate — and no amount of fetching capacity helps once there is nowhere
+  to put the work. `Temporalex` exports
+  `temporal_worker_task_slots_available` for exactly this.
+
+  `:max_concurrent_workflow_task_executions` and
+  `:max_concurrent_activity_task_executions` are accepted as aliases, matching
+  the naming the other Temporal SDKs use.
+
+  `:max_cached_workflows` is off unless asked for. A nonzero value makes
+  workflows sticky: history updates are applied incrementally to instances kept
+  suspended in memory, rather than the whole history being replayed to rebuild
+  state on every workflow task. Cached workflows are evicted least-recently-used
+  once the maximum is reached. The cost is memory; the benefit grows with history
+  length.
+
+  Switching it on brings two of core's rules with it — both the workflow task
+  slots and the workflow task pollers must be at least 2. Core asserts these
+  without giving a reason and this does not invent one; both are rejected at the
+  boundary with a message naming the option rather than surfacing as a
+  worker-build failure. With no cache, a single slot is legal.
+
+  See [#79](https://github.com/cgreeno/temporalex/issues/79).
+
 ## 0.6.0 — 2026-09-01
 
 ### Added

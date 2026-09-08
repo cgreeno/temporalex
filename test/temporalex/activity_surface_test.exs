@@ -14,7 +14,9 @@ defmodule Temporalex.ActivitySurfaceTest do
       {:ok, {:charged, amount}}
     end
 
-    defactivity refund(amount), start_to_close_timeout: 5_000, retry_policy: [maximum_attempts: 2] do
+    defactivity refund(amount),
+      start_to_close_timeout: 5_000,
+      retry_policy: [maximum_attempts: 2] do
       {:ok, {:refunded, amount}}
     end
 

@@ -133,6 +133,9 @@ defmodule Temporalex.Backend.TemporalCore do
                versioning_opts(opts),
                workflow_poller_count(opts),
                activity_poller_count(opts),
+               workflow_task_slots(opts),
+               activity_task_slots(opts),
+               cached_workflows(opts),
                owner_pid,
                poller_bridge
              ),
@@ -540,6 +543,35 @@ defmodule Temporalex.Backend.TemporalCore do
       Keyword.get(opts, :max_activity_pollers) ||
       Keyword.get(opts, :max_concurrent_activity_polls) ||
       5
+  end
+
+  # Slots are not poller counts. A poller fetches work; a slot holds it while it
+  # runs, and a workflow task holds its slot across every activation it needs --
+  # including the time a workflow spends waiting on a timer or an update. So a
+  # workload of long-waiting workflows exhausts slots while the pollers, the CPU
+  # and the database all sit idle, and the symptom is a task queue that builds
+  # with nothing saturated.
+  #
+  # Zero means unset, which leaves core's own defaults (200 outstanding workflow
+  # tasks, 200 activities). Passing a number here is how a deployment says its
+  # workflows hold slots longer than that assumes.
+  defp workflow_task_slots(opts) do
+    Keyword.get(opts, :max_workflow_task_slots) ||
+      Keyword.get(opts, :max_concurrent_workflow_task_executions) ||
+      0
+  end
+
+  defp activity_task_slots(opts) do
+    Keyword.get(opts, :max_activity_task_slots) ||
+      Keyword.get(opts, :max_concurrent_activity_task_executions) ||
+      0
+  end
+
+  # Sized with the slots rather than independently: a cached workflow holds its
+  # slot, so a cache larger than the slot count cannot be used and one much
+  # smaller forces replays that hold slots for longer.
+  defp cached_workflows(opts) do
+    Keyword.get(opts, :max_cached_workflows) || 0
   end
 
   defp await_connection(timeout) do
