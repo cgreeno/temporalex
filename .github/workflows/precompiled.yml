@@ -43,16 +43,16 @@ jobs:
         # Merged per-target (keyed on the base dimension). Musl cannot link a
         # cdylib against a static CRT, hence the RUSTFLAGS.
         include:
-          - { target: aarch64-apple-darwin, os: macos-14 }
-          - { target: x86_64-apple-darwin, os: macos-14 }
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, use-cross: true }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04, use-cross: true }
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-apple-darwin, os: macos-15 }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, use-cross: true }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04, use-cross: true }
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             use-cross: true
             rustflags: "-C target-feature=-crt-static"
           - target: aarch64-unknown-linux-musl
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             use-cross: true
             rustflags: "-C target-feature=-crt-static"
     steps:
