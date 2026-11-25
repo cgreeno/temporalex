@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.2 — 2026-11-25
+
+### Changed
+
+- **Releases are published with hex.pm Workload Identity.** No API key can
+  publish temporalex any more. The release workflow exchanges its GitHub OIDC
+  token for a hex.pm token that can only publish this package and expires
+  after 15 minutes, and each release on hex.pm shows a Provenance card that
+  links to the commit and the workflow run that published it. The library is
+  unchanged from 0.7.1.
+
 ## 0.7.1 — 2026-09-09
 
 ### Added
