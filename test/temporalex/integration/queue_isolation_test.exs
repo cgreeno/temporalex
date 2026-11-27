@@ -111,6 +111,7 @@ defmodule Temporalex.QueueIsolationIntegrationTest do
     Temporalex.Client.start_link(
       name: name,
       backend: Temporalex.Backend.TemporalCore,
+      payload_codec: :etf,
       target: Server.target(),
       namespace: namespace
     )

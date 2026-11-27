@@ -54,6 +54,9 @@ rustler::atoms! {
     ok,
     error,
     nil,
+    etf,
+    metadata,
+    data,
     connected,
     connect_error,
     worker_started,
@@ -221,6 +224,12 @@ rustler::atoms! {
 const ETF_ENCODING: &[u8] = b"binary/erlang-eterm";
 const JSON_ENCODING: &[u8] = b"json/plain";
 
+#[derive(Clone, Copy)]
+enum PayloadCodec {
+    Etf,
+    Json,
+}
+
 pub struct RuntimeResource {
     core: CoreRuntime,
 }
@@ -229,6 +238,7 @@ impl Resource for RuntimeResource {}
 
 pub struct ClientResource {
     connection: Connection,
+    payload_codec: PayloadCodec,
     _runtime_handle: tokio::runtime::Handle,
     _runtime: ResourceArc<RuntimeResource>,
 }
@@ -546,8 +556,14 @@ fn connect(
     target: String,
     api_key: Option<String>,
     headers: HashMap<String, String>,
+    payload_codec: Atom,
     pid: LocalPid,
 ) -> Atom {
+    let payload_codec = if payload_codec == etf() {
+        PayloadCodec::Etf
+    } else {
+        PayloadCodec::Json
+    };
     let handle = runtime.core.tokio_handle();
     let runtime_for_resource = runtime.clone();
     let headers = if headers.is_empty() {
@@ -584,6 +600,7 @@ fn connect(
             Ok(connection) => {
                 let client = ResourceArc::new(ClientResource {
                     connection,
+                    payload_codec,
                     _runtime_handle: handle.clone(),
                     _runtime: runtime_for_resource,
                 });
@@ -905,9 +922,11 @@ fn start_workflow<'a>(
     pid: LocalPid,
     reference: Term<'a>,
 ) -> Atom {
-    let input_payload = payload_from_term(input);
-    let start_options = match workflow_start_options(task_queue, workflow_id.clone(), opts) {
-        Ok(options) => options,
+    let prepared = payload_from_encoded(input).and_then(|input| {
+        Ok((input, workflow_start_options(task_queue, workflow_id.clone(), opts)?))
+    });
+    let (input_payload, start_options) = match prepared {
+        Ok(prepared) => prepared,
         Err(err) => {
             send_immediate_ref_error(
                 env,
@@ -971,6 +990,7 @@ fn get_workflow_result(
     pid: LocalPid,
     reference: Term,
 ) -> Atom {
+    let codec = client.payload_codec;
     let connection = client.connection.clone();
     let handle = client._runtime_handle.clone();
     let saved_env = OwnedEnv::new();
@@ -995,7 +1015,7 @@ fn get_workflow_result(
             workflow_result(),
             |env| match result {
                 Ok(payloads) => match payloads.into_iter().next() {
-                    Some(payload) => match payload_to_term(env, &payload) {
+                    Some(payload) => match payload_to_term(env, &payload, codec) {
                         Ok(term) => (ok(), term).encode(env),
                         Err(err) => (
                             error(),
@@ -1005,7 +1025,9 @@ fn get_workflow_result(
                     },
                     None => (ok(), nil()).encode(env),
                 },
-                Err(err) => (error(), get_workflow_result_error_to_term(env, err)).encode(env),
+                Err(err) => {
+                    (error(), get_workflow_result_error_to_term(env, err, codec)).encode(env)
+                }
             },
         );
     });
@@ -1126,6 +1148,7 @@ fn query_workflow<'a>(
             return ok();
         }
     };
+    let codec = client.payload_codec;
     let connection = client.connection.clone();
     let handle = client._runtime_handle.clone();
     let saved_env = OwnedEnv::new();
@@ -1153,7 +1176,7 @@ fn query_workflow<'a>(
             &pid,
             workflow_queried(),
             |env| match result {
-                Ok(payloads) => payload_result_to_term(env, payloads),
+                Ok(payloads) => payload_result_to_term(env, payloads, codec),
                 Err(err) => (error(), query_workflow_error_to_term(env, err)).encode(env),
             },
         );
@@ -1201,6 +1224,7 @@ fn update_workflow<'a>(
             return ok();
         }
     };
+    let codec = client.payload_codec;
     let connection = client.connection.clone();
     let handle = client._runtime_handle.clone();
     let saved_env = OwnedEnv::new();
@@ -1228,8 +1252,8 @@ fn update_workflow<'a>(
             &pid,
             workflow_updated(),
             |env| match result {
-                Ok(payloads) => payload_result_to_term(env, payloads),
-                Err(err) => (error(), update_workflow_error_to_term(env, err)).encode(env),
+                Ok(payloads) => payload_result_to_term(env, payloads, codec),
+                Err(err) => (error(), update_workflow_error_to_term(env, err, codec)).encode(env),
             },
         );
     });
@@ -1283,22 +1307,35 @@ fn cancel_workflow(
 }
 
 #[rustler::nif]
-fn terminate_workflow(
+fn terminate_workflow<'a>(
+    env: Env<'a>,
     client: ResourceArc<ClientResource>,
     namespace: String,
     workflow_id: String,
     run_id: Option<String>,
     reason_text: String,
-    details_term: Term,
+    details_term: Term<'a>,
     pid: LocalPid,
-    reference: Term,
+    reference: Term<'a>,
 ) -> Atom {
     let details = if details_term.decode::<Atom>().ok() == Some(nil()) {
         None
     } else {
-        Some(Payloads {
-            payloads: vec![payload_from_term(details_term)],
-        })
+        match payload_from_encoded(details_term) {
+            Ok(payload) => Some(Payloads {
+                payloads: vec![payload],
+            }),
+            Err(err) => {
+                send_immediate_ref_error(
+                    env,
+                    reference,
+                    &pid,
+                    workflow_terminated(),
+                    error_reason(env, invalid_options(), format!("{err:#}")),
+                );
+                return ok();
+            }
+        }
     };
     let connection = client.connection.clone();
     let handle = client._runtime_handle.clone();
@@ -1394,6 +1431,7 @@ fn describe_workflow(
     pid: LocalPid,
     reference: Term,
 ) -> Atom {
+    let codec = client.payload_codec;
     let connection = client.connection.clone();
     let handle = client._runtime_handle.clone();
     let saved_env = OwnedEnv::new();
@@ -1417,7 +1455,7 @@ fn describe_workflow(
             &pid,
             workflow_described(),
             |env| match result {
-                Ok(description) => match workflow_description_to_term(env, &description) {
+                Ok(description) => match workflow_description_to_term(env, &description, codec) {
                     Ok(term) => (ok(), term).encode(env),
                     Err(err) => (
                         error(),
@@ -1594,9 +1632,13 @@ fn untyped_handle(
     ))
 }
 
-fn payload_result_to_term<'a>(env: Env<'a>, payloads: Vec<Payload>) -> Term<'a> {
+fn payload_result_to_term<'a>(
+    env: Env<'a>,
+    payloads: Vec<Payload>,
+    codec: PayloadCodec,
+) -> Term<'a> {
     match payloads.into_iter().next() {
-        Some(payload) => match payload_to_term(env, &payload) {
+        Some(payload) => match payload_to_term(env, &payload, codec) {
             Ok(term) => (ok(), term).encode(env),
             Err(err) => (
                 error(),
@@ -1648,7 +1690,11 @@ fn workflow_start_error_to_term<'a>(env: Env<'a>, err: StartWorkflowResult) -> T
     }
 }
 
-fn get_workflow_result_error_to_term<'a>(env: Env<'a>, err: GetWorkflowResult) -> Term<'a> {
+fn get_workflow_result_error_to_term<'a>(
+    env: Env<'a>,
+    err: GetWorkflowResult,
+    codec: PayloadCodec,
+) -> Term<'a> {
     match err {
         GetWorkflowResult::Get(WorkflowGetResultError::Failed(err)) => {
             // v0.7.0 wraps the failure in IncomingError, which still exposes
@@ -1660,19 +1706,19 @@ fn get_workflow_result_error_to_term<'a>(env: Env<'a>, err: GetWorkflowResult) -
             // hold errors the client decoded from a server response, and those
             // always retain it. Worth knowing, because a panic inside a NIF
             // takes the whole VM down.
-            match failure_to_term(env, Some(err.failure())) {
+            match failure_to_term(env, Some(err.failure()), codec) {
                 Ok(term) => (failed(), term).encode(env),
                 Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
         }
         GetWorkflowResult::Get(WorkflowGetResultError::Cancelled { details }) => {
-            match payloads_to_terms(env, details.raw()) {
+            match payloads_to_terms(env, details.raw(), codec) {
                 Ok(terms) => (cancelled(), terms).encode(env),
                 Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
         }
         GetWorkflowResult::Get(WorkflowGetResultError::Terminated { details }) => {
-            match payloads_to_terms(env, details.raw()) {
+            match payloads_to_terms(env, details.raw(), codec) {
                 Ok(terms) => (terminated(), terms).encode(env),
                 Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
@@ -1711,10 +1757,14 @@ fn query_workflow_error_to_term<'a>(env: Env<'a>, err: QueryWorkflowResult) -> T
     }
 }
 
-fn update_workflow_error_to_term<'a>(env: Env<'a>, err: UpdateWorkflowResult) -> Term<'a> {
+fn update_workflow_error_to_term<'a>(
+    env: Env<'a>,
+    err: UpdateWorkflowResult,
+    codec: PayloadCodec,
+) -> Term<'a> {
     match err {
         UpdateWorkflowResult::Update(WorkflowUpdateError::Failed(failure)) => {
-            match failure_to_term(env, Some(failure.as_ref())) {
+            match failure_to_term(env, Some(failure.as_ref()), codec) {
                 Ok(term) => (failed(), term).encode(env),
                 Err(err) => error_reason(env, payload_conversion(), format!("{err:#}")),
             }
@@ -1753,6 +1803,7 @@ fn workflow_interaction_error_to_term<'a>(
 fn workflow_description_to_term<'a>(
     env: Env<'a>,
     description: &WorkflowExecutionDescription,
+    codec: PayloadCodec,
 ) -> anyhow::Result<Term<'a>> {
     put_fields!(
         Term::map_new(env),
@@ -1778,6 +1829,7 @@ fn workflow_description_to_term<'a>(
                 .workflow_execution_info
                 .as_ref()
                 .and_then(|info| info.memo.as_ref()),
+            codec,
         )?,
     )
 }
@@ -1787,7 +1839,11 @@ fn workflow_description_to_term<'a>(
 /// Memo is unindexed operator annotation, so it is only ever read back — there
 /// is no point returning it opaque. An absent memo becomes an empty map rather
 /// than nil, so callers can pattern match on a map unconditionally.
-fn memo_to_term<'a>(env: Env<'a>, memo: Option<&Memo>) -> anyhow::Result<Term<'a>> {
+fn memo_to_term<'a>(
+    env: Env<'a>,
+    memo: Option<&Memo>,
+    codec: PayloadCodec,
+) -> anyhow::Result<Term<'a>> {
     let mut map = Term::map_new(env);
 
     let Some(memo) = memo else {
@@ -1795,7 +1851,7 @@ fn memo_to_term<'a>(env: Env<'a>, memo: Option<&Memo>) -> anyhow::Result<Term<'a
     };
 
     for (key, payload) in &memo.fields {
-        let value = payload_to_term(env, payload)?;
+        let value = payload_to_term(env, payload, codec)?;
         map = map_put(map, string_term(env, key.clone()), value)?;
     }
 
@@ -1834,16 +1890,18 @@ fn workflow_status_atom(status: WorkflowExecutionStatus) -> Atom {
     }
 }
 
-fn payload_from_bytes(data: Vec<u8>) -> Payload {
-    Payload {
-        metadata: HashMap::from([("encoding".to_string(), ETF_ENCODING.to_vec())]),
-        data,
-        external_payloads: vec![],
-    }
-}
+fn payload_from_encoded(term: Term) -> anyhow::Result<Payload> {
+    let metadata: HashMap<String, Binary> = decode_term(map_get(term, metadata())?)?;
+    let bytes: Binary = decode_term(map_get(term, data())?)?;
 
-fn payload_from_term(term: Term) -> Payload {
-    payload_from_bytes(term.to_binary().as_slice().to_vec())
+    Ok(Payload {
+        metadata: metadata
+            .into_iter()
+            .map(|(key, value)| (key, value.as_slice().to_vec()))
+            .collect(),
+        data: bytes.as_slice().to_vec(),
+        external_payloads: vec![],
+    })
 }
 
 fn json_payload_from_value(value: JsonValue) -> anyhow::Result<Payload> {
@@ -1885,43 +1943,59 @@ fn json_value_to_term<'a>(env: Env<'a>, value: &JsonValue) -> Term<'a> {
     }
 }
 
-fn payload_to_term<'a>(env: Env<'a>, payload: &Payload) -> anyhow::Result<Term<'a>> {
-    let data = payload.data.as_slice();
-    if data.is_empty() {
+fn payload_to_term<'a>(
+    env: Env<'a>,
+    payload: &Payload,
+    codec: PayloadCodec,
+) -> anyhow::Result<Term<'a>> {
+    let bytes = payload.data.as_slice();
+    if bytes.is_empty() {
         return Ok(nil().encode(env));
     }
 
-    let encoding = payload
-        .metadata
-        .get("encoding")
-        .map(|v| v.as_slice())
-        .unwrap_or(ETF_ENCODING);
-
-    if encoding == JSON_ENCODING {
-        let value: JsonValue =
-            serde_json::from_slice(data).map_err(|e| anyhow!("json/plain decode: {e}"))?;
-        return Ok(json_value_to_term(env, &value));
+    match (payload.metadata.get("encoding").map(Vec::as_slice), codec) {
+        (Some(JSON_ENCODING), _) => {
+            let value: JsonValue =
+                serde_json::from_slice(bytes).map_err(|e| anyhow!("json/plain decode: {e}"))?;
+            Ok(json_value_to_term(env, &value))
+        }
+        (None | Some(ETF_ENCODING), PayloadCodec::Etf) => env
+            .binary_to_term(bytes)
+            .map(|(term, _read)| term)
+            .ok_or_else(|| {
+                anyhow!("payload is not ETF encoded, or names an atom this node does not know")
+            }),
+        (None | Some(ETF_ENCODING), PayloadCodec::Json) => Err(anyhow!(
+            "refusing an ETF payload: payload_codec is :json, which never decodes ETF"
+        )),
+        (Some(other), _) => Err(anyhow!(
+            "unsupported payload encoding {:?}",
+            String::from_utf8_lossy(other)
+        )),
     }
-
-    let (term, _read) = env
-        .binary_to_term(data)
-        .ok_or_else(|| anyhow!("payload is not ETF encoded"))?;
-    Ok(term)
 }
 
-fn payloads_to_terms<'a>(env: Env<'a>, payloads: &[Payload]) -> anyhow::Result<Vec<Term<'a>>> {
+fn payloads_to_terms<'a>(
+    env: Env<'a>,
+    payloads: &[Payload],
+    codec: PayloadCodec,
+) -> anyhow::Result<Vec<Term<'a>>> {
     payloads
         .iter()
-        .map(|payload| payload_to_term(env, payload))
+        .map(|payload| payload_to_term(env, payload, codec))
         .collect()
 }
 
-fn failure_to_term<'a>(env: Env<'a>, failure: Option<&Failure>) -> anyhow::Result<Term<'a>> {
+fn failure_to_term<'a>(
+    env: Env<'a>,
+    failure: Option<&Failure>,
+    codec: PayloadCodec,
+) -> anyhow::Result<Term<'a>> {
     let Some(failure) = failure else {
         return Ok(nil().encode(env));
     };
 
-    let cause_term = failure_to_term(env, failure.cause.as_deref())?;
+    let cause_term = failure_to_term(env, failure.cause.as_deref(), codec)?;
 
     match &failure.failure_info {
         Some(failure::FailureInfo::ApplicationFailureInfo(info)) => put_fields!(
@@ -1930,7 +2004,7 @@ fn failure_to_term<'a>(env: Env<'a>, failure: Option<&Failure>) -> anyhow::Resul
             source() => failure.source.clone(),
             stack_trace() => failure.stack_trace.clone(),
             type_atom() => info.r#type.clone(),
-            details() => payloads_to_terms_option(env, info.details.as_ref())?,
+            details() => payloads_to_terms_option(env, info.details.as_ref(), codec)?,
             retryable_question() => !info.non_retryable,
             cause() => cause_term,
         ),
@@ -1940,7 +2014,7 @@ fn failure_to_term<'a>(env: Env<'a>, failure: Option<&Failure>) -> anyhow::Resul
             source() => failure.source.clone(),
             stack_trace() => failure.stack_trace.clone(),
             identity() => info.identity.clone(),
-            details() => payloads_to_terms_option(env, info.details.as_ref())?,
+            details() => payloads_to_terms_option(env, info.details.as_ref(), codec)?,
             cause() => cause_term,
         ),
         Some(failure::FailureInfo::TimeoutFailureInfo(info)) => put_fields!(
@@ -1949,7 +2023,7 @@ fn failure_to_term<'a>(env: Env<'a>, failure: Option<&Failure>) -> anyhow::Resul
             source() => failure.source.clone(),
             stack_trace() => failure.stack_trace.clone(),
             timeout_type() => timeout_type_atom(info.timeout_type()),
-            last_heartbeat_details() => payloads_to_terms_option(env, info.last_heartbeat_details.as_ref())?,
+            last_heartbeat_details() => payloads_to_terms_option(env, info.last_heartbeat_details.as_ref(), codec)?,
             cause() => cause_term,
         ),
         Some(failure::FailureInfo::ActivityFailureInfo(info)) => put_fields!(
@@ -1992,9 +2066,10 @@ fn failure_to_term<'a>(env: Env<'a>, failure: Option<&Failure>) -> anyhow::Resul
 fn payloads_to_terms_option<'a>(
     env: Env<'a>,
     payloads: Option<&Payloads>,
+    codec: PayloadCodec,
 ) -> anyhow::Result<Vec<Term<'a>>> {
     payloads
-        .map(|payloads| payloads_to_terms(env, &payloads.payloads))
+        .map(|payloads| payloads_to_terms(env, &payloads.payloads, codec))
         .transpose()
         .map(|terms| terms.unwrap_or_default())
 }
@@ -2044,7 +2119,7 @@ fn failure_info_type_atom(info: &Option<failure::FailureInfo>) -> Atom {
 
 fn terms_list_to_payloads(list: Term) -> anyhow::Result<Vec<Payload>> {
     let iter: ListIterator = decode_term(list)?;
-    Ok(iter.map(payload_from_term).collect())
+    iter.map(payload_from_encoded).collect()
 }
 
 fn keyword_get_i64(opts: Term, key: Atom) -> anyhow::Result<Option<i64>> {
@@ -2163,7 +2238,7 @@ fn term_to_payload_map(term: Term) -> anyhow::Result<HashMap<String, Payload>> {
     let mut headers = HashMap::new();
 
     for (key, value) in iterator {
-        headers.insert(decode_term::<String>(key)?, payload_from_term(value));
+        headers.insert(decode_term::<String>(key)?, payload_from_encoded(value)?);
     }
 
     Ok(headers)

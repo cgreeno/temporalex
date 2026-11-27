@@ -150,6 +150,7 @@ defmodule Temporalex.ProtocolEdgesIntegrationTest do
       Temporalex.Client.start_link(
         name: client_name,
         backend: Temporalex.Backend.TemporalCore,
+        payload_codec: :etf,
         target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name(),
         task_queue: task_queue

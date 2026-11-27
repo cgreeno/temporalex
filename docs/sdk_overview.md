@@ -97,7 +97,7 @@ The real backend, `Temporalex.Backend.TemporalCore`, handles:
 - Rustler calls
 - Temporal Core worker lifecycle
 - Temporal Core worker protobuf encoding/decoding with MiniPB
-- ETF payload conversion with `:erlang.term_to_binary/1` and `:erlang.binary_to_term/1`
+- payload conversion under the `payload_codec:` option, `:json` by default or `:etf` (see [native.md](native.md#payload-conversion))
 - poll loop messages
 - completion submission
 

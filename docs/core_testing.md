@@ -275,6 +275,6 @@ The real Temporal backend should then have separate contract tests:
 
 - Temporal activation bytes decode to expected `%Temporalex.Core.Activation{}`
 - `%Temporalex.Core.Completion{}` encodes to expected Temporal completion bytes
-- ETF payload conversion uses `term_to_binary/1` and `binary_to_term/1`
+- payload conversion follows the `payload_codec:` rules in [native.md](native.md#payload-conversion)
 
 Core tests should not change when the real backend is added.

@@ -70,6 +70,7 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
       Temporalex.Client.start_link(
         name: client,
         backend: Temporalex.Backend.TemporalCore,
+        payload_codec: :etf,
         target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name(),
         task_queue: task_queue
@@ -223,12 +224,12 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
     handle = run_workflow(client)
 
     {:ok, history} = Temporalex.Client.fetch_workflow_history(handle, timeout: 15_000)
-    assert :ok = Temporalex.Replay.replay(history, workflows: [Workflow])
+    assert :ok = Temporalex.Replay.replay(history, workflows: [Workflow], payload_codec: :etf)
 
     # And the fixture path: raw bytes -> decode -> replay.
     {:ok, bytes} = Temporalex.Client.fetch_workflow_history(handle, raw: true, timeout: 15_000)
     {:ok, decoded} = Temporalex.Replay.decode(bytes)
-    assert :ok = Temporalex.Replay.replay(decoded, workflows: [Workflow])
+    assert :ok = Temporalex.Replay.replay(decoded, workflows: [Workflow], payload_codec: :etf)
   end
 
   test "a timer+signal history replays clean — real durations and signal payloads",
@@ -244,7 +245,12 @@ defmodule Temporalex.FetchHistoryIntegrationTest do
     assert {:ok, {7, [:go]}} = Temporalex.Client.get_result(handle, timeout: 15_000)
 
     {:ok, history} = Temporalex.Client.fetch_workflow_history(handle, timeout: 15_000)
-    assert :ok = Temporalex.Replay.replay(history, workflows: [TimerSignalWorkflow])
+
+    assert :ok =
+             Temporalex.Replay.replay(history,
+               workflows: [TimerSignalWorkflow],
+               payload_codec: :etf
+             )
   end
 
   test "unknown workflow id errors rather than returning empty bytes", %{client: client} do

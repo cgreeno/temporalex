@@ -247,6 +247,54 @@ defmodule Temporalex.ReplayTest do
     assert detail =~ "999"
   end
 
+  defmodule AtomInputFlow do
+    use Temporalex.Workflow
+
+    def run(_input) do
+      {:ok, _} = API.execute_activity("replay.approve", [:approve], timeout: 5_000)
+      {:ok, :done}
+    end
+  end
+
+  defp atom_input_events(payloads) do
+    [
+      %Event{
+        id: 1,
+        type: :workflow_execution_started,
+        attributes: %{workflow_type: inspect(AtomInputFlow), input: payloads.(["order-1"])}
+      },
+      %Event{
+        id: 2,
+        type: :activity_task_scheduled,
+        attributes: %{activity_type: "replay.approve", input: payloads.([:approve])}
+      },
+      %Event{
+        id: 3,
+        type: :activity_task_completed,
+        attributes: %{scheduled_event_id: 2, result: payloads.(["approved"])}
+      },
+      %Event{id: 4, type: :workflow_execution_completed, attributes: %{}}
+    ]
+  end
+
+  test "under :json an atom in the code's activity input matches the string JSON recorded" do
+    events = atom_input_events(&payloads/1)
+
+    assert :ok = Replay.replay(history(events), workflows: [AtomInputFlow])
+  end
+
+  test "an ETF history is refused under the default codec and replays under :etf" do
+    events =
+      atom_input_events(fn terms ->
+        PayloadConverter.with_codec(:etf, fn -> payloads(terms) end)
+      end)
+
+    assert {:error, "refusing an ETF payload" <> _} =
+             Replay.replay(history(events), workflows: [AtomInputFlow])
+
+    assert :ok = Replay.replay(history(events), workflows: [AtomInputFlow], payload_codec: :etf)
+  end
+
   defmodule CancellableFlow do
     use Temporalex.Workflow
 

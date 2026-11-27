@@ -134,23 +134,26 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
     |> String.to_atom()
   end
 
-  def workflow_activation_from_bytes(bytes) when is_binary(bytes) do
-    with {:ok, proto} <- decode(@workflow_activation, bytes, defaults: true) do
-      workflow_activation_from_proto(proto)
-    end
+  def workflow_activation_from_bytes(bytes, opts \\ []) when is_binary(bytes) do
+    PayloadConverter.with_codec(payload_codec(opts), fn ->
+      with {:ok, proto} <- decode(@workflow_activation, bytes, defaults: true) do
+        workflow_activation_from_proto(proto)
+      end
+    end)
   end
 
-  def activity_task_from_bytes(bytes) when is_binary(bytes) do
-    with {:ok, proto} <- decode(@activity_task, bytes, defaults: true) do
-      activity_task_from_proto(proto)
-    end
+  def activity_task_from_bytes(bytes, opts \\ []) when is_binary(bytes) do
+    PayloadConverter.with_codec(payload_codec(opts), fn ->
+      with {:ok, proto} <- decode(@activity_task, bytes, defaults: true) do
+        activity_task_from_proto(proto)
+      end
+    end)
   end
 
   def workflow_completion_to_bytes(%Completion{} = completion, opts) do
     task_queue = Keyword.fetch!(opts, :task_queue)
-    codec = Keyword.get(opts, :payload_codec, :etf)
 
-    PayloadConverter.with_codec(codec, fn ->
+    PayloadConverter.with_codec(payload_codec(opts), fn ->
       with {:ok, proto} <- workflow_completion_to_proto(completion, task_queue) do
         encode(@workflow_activation_completion, proto)
       end
@@ -158,23 +161,23 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
   end
 
   def activity_completion_to_bytes(%ActivityCompletion{} = completion, opts \\ []) do
-    codec = Keyword.get(opts, :payload_codec, :etf)
-
-    PayloadConverter.with_codec(codec, fn ->
+    PayloadConverter.with_codec(payload_codec(opts), fn ->
       with {:ok, proto} <- activity_completion_to_proto(completion) do
         encode(@activity_task_completion, proto)
       end
     end)
   end
 
-  def activity_heartbeat_to_bytes(task_token, details) when is_binary(task_token) do
-    proto = %{
-      task_token: task_token,
-      details: if(is_nil(details), do: [], else: [PayloadConverter.term_to_payload(details)])
-    }
-
-    encode(@activity_heartbeat, proto)
+  def activity_heartbeat_to_bytes(task_token, details, opts \\ []) when is_binary(task_token) do
+    PayloadConverter.with_codec(payload_codec(opts), fn ->
+      encode(@activity_heartbeat, %{
+        task_token: task_token,
+        details: if(is_nil(details), do: [], else: [PayloadConverter.term_to_payload(details)])
+      })
+    end)
   end
+
+  defp payload_codec(opts), do: Keyword.get(opts, :payload_codec, :json)
 
   defp encode(message, proto) do
     case Schema.encode(proto, message) do
@@ -1162,7 +1165,7 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
          %{
            type: "Temporalex.ApplicationError",
            non_retryable: false,
-           details: %{payloads: [PayloadConverter.term_to_payload(term)]}
+           details: %{payloads: [PayloadConverter.failure_detail_payload(term)]}
          }}
     }
   end
@@ -1176,7 +1179,7 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
       source: "Temporalex",
       failure_info:
         {:canceled_failure_info,
-         %{details: %{payloads: [PayloadConverter.term_to_payload(reason)]}}}
+         %{details: %{payloads: [PayloadConverter.failure_detail_payload(reason)]}}}
     }
   end
 
