@@ -377,8 +377,20 @@ queue, one source.
 
 | Codec | Behaviour |
 | --- | --- |
-| `:etf` (default) | Preserves full Elixir term fidelity. |
-| `:json` | Payloads are renderable by the `temporal` CLI and by non-Elixir clients. Term encoding is lossy: atoms become strings, and tuples are unsupported. |
+| `:json` (default) | Payloads are `json/plain`, readable by the `temporal` CLI, the Web UI and other SDKs. Atoms become strings. A value JSON cannot hold, such as a tuple, fails the workflow task or activity attempt that produced it, with a message naming the value. Payloads in any other encoding, ETF included, are refused. |
+| `:etf` | Preserves full Elixir term fidelity, structs and tuples included. |
+
+Use `:etf` only on a namespace that nothing but your own Elixir services can
+write to. An ETF payload can name any struct, and Elixir runs that struct's
+protocol code when the value is printed, compared or enumerated. Anyone who
+can start or signal a workflow in the namespace, through any SDK or the
+`temporal` CLI, can then run code in your workers and clients. Temporalex
+decodes ETF with `[:safe]`, which refuses unknown atoms and functions but
+cannot refuse structs.
+
+The client and its workers use one codec, and a worker can only read history
+written in that codec. Workflows that started under `:etf` need `:etf` until
+they finish.
 
 ## Drive workflows from a client
 

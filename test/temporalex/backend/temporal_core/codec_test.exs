@@ -13,8 +13,8 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
   @activity_task :"coresdk.activity_task.ActivityTask"
 
   test "decodes workflow activation protobuf bytes into core jobs" do
-    payload = PayloadConverter.term_to_payload(:input)
-    header = PayloadConverter.term_to_payload("trace-1")
+    payload = etf_payload(:input)
+    header = etf_payload("trace-1")
 
     bytes =
       encode!(@workflow_activation, %{
@@ -127,7 +127,7 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
                 },
                 %Job.RemoveFromCache{reason: :nondeterminism, message: "history mismatch"}
               ]
-            }} = Codec.workflow_activation_from_bytes(bytes)
+            }} = Codec.workflow_activation_from_bytes(bytes, payload_codec: :etf)
   end
 
   test "decodes activity task protobuf bytes into core tasks" do
@@ -142,8 +142,8 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
              workflow_execution: %{workflow_id: "workflow-1", run_id: "run-1"},
              activity_id: "activity-1",
              activity_type: "ExampleActivity",
-             header_fields: %{"trace" => PayloadConverter.term_to_payload("trace-1")},
-             input: [PayloadConverter.term_to_payload(%{amount: 1000})],
+             header_fields: %{"trace" => etf_payload("trace-1")},
+             input: [etf_payload(%{amount: 1000})],
              attempt: 3,
              heartbeat_timeout: 2500,
              is_local: false
@@ -165,7 +165,7 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
               is_local: false,
               headers: %{"trace" => "trace-1"},
               variant: :start
-            }} = Codec.activity_task_from_bytes(bytes)
+            }} = Codec.activity_task_from_bytes(bytes, payload_codec: :etf)
 
     cancel_bytes =
       encode!(@activity_task, %{
@@ -246,7 +246,8 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
         ]
       })
 
-    assert {:error, "payload is not ETF encoded"} = Codec.workflow_activation_from_bytes(bytes)
+    assert {:error, "payload is not ETF encoded, or names an atom this node does not know"} =
+             Codec.workflow_activation_from_bytes(bytes, payload_codec: :etf)
   end
 
   defp application_failure(message, opts) do
@@ -255,7 +256,7 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
       |> Keyword.get(:details, [])
       |> Enum.map(fn
         %{metadata: _metadata, data: _data} = payload -> payload
-        term -> PayloadConverter.term_to_payload(term)
+        term -> etf_payload(term)
       end)
 
     %{
@@ -270,6 +271,9 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
          }}
     }
   end
+
+  defp etf_payload(term),
+    do: PayloadConverter.with_codec(:etf, fn -> PayloadConverter.term_to_payload(term) end)
 
   defp encode!(message, proto) do
     {:ok, binary} = Schema.encode(proto, message)

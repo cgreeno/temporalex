@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- **A worker decoded every inbound payload with unrestricted
+  `:erlang.binary_to_term/1`, whatever its `payload_codec`.** Anything that
+  could write to the namespace (another SDK, the `temporal` CLI, a worker in
+  another language) could send a payload that creates atoms until the node
+  crashes, or a struct whose protocol code runs when the value is printed,
+  compared or enumerated. That is the chain behind CVE-2026-129514 on hex.pm.
+  Under `:json` no ETF is decoded at all. Under `:etf` decoding uses `[:safe]`,
+  and the README says which namespaces `:etf` is for, because `[:safe]` cannot
+  refuse structs.
+
+### Changed
+
+- **`payload_codec` defaults to `:json`.** Set `payload_codec: :etf` on the
+  client to keep the old behaviour. A worker on the new default cannot read
+  history written as ETF, so workflows started under the old default need
+  `:etf` until they finish.
+- **`:json` is JSON in both directions.** It no longer falls back to ETF for a
+  value JSON cannot hold, and it refuses the ETF payloads it receives. A
+  workflow result or command argument JSON cannot hold fails that workflow
+  task, and an activity result fails that attempt as a non-retryable
+  `UnencodableActivityResult`; both messages name the value. On the client
+  the same value returns a `Temporalex.TransportError` with category
+  `:payload_conversion` before anything is sent.
+- **The client honours the codec.** A `:json` client sent workflow inputs,
+  signal, query and update arguments, headers and terminate details as ETF,
+  and heartbeat details were ETF under either codec. All of them now use the
+  configured codec.
+- **ETF decodes with `[:safe]`.** A payload naming an atom the node does not
+  know, or a function, is refused. Client results already decoded this way.
+- **Failure details the SDK adds itself**, such as a raised exception or an
+  exit reason, are recorded as their `inspect/2` string under `:json`, so
+  reporting a failure never fails. Under `:etf` they keep the original term.
+- **`Temporalex.Replay.replay/2` takes `payload_codec:`**, `:json` by default.
+  Pass `:etf` for a history recorded with ETF. Activity inputs are compared
+  the way the codec records them, so an atom that JSON stores as a string
+  still matches.
+
 ## 0.7.2 — 2026-11-25
 
 ### Changed

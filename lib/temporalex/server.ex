@@ -433,8 +433,20 @@ defmodule Temporalex.Server do
 
   defp submit_workflow_completion(state, %Completion{} = completion) do
     case state.backend.complete_workflow_activation(state.backend_state, completion) do
-      :ok -> state
-      {:error, reason} -> raise "backend workflow completion failed: #{inspect(reason)}"
+      :ok ->
+        state
+
+      {:error, {:payload_conversion, message}} ->
+        :ok =
+          state.backend.complete_workflow_activation(
+            state.backend_state,
+            failed_completion(completion.run_id, message)
+          )
+
+        state
+
+      {:error, reason} ->
+        raise "backend workflow completion failed: #{inspect(reason)}"
     end
   end
 
@@ -442,8 +454,26 @@ defmodule Temporalex.Server do
     completion = %{completion | result: normalize_activity_result(completion.result)}
 
     case state.backend.complete_activity_task(state.backend_state, completion) do
-      :ok -> state
-      {:error, reason} -> raise "backend activity completion failed: #{inspect(reason)}"
+      :ok ->
+        state
+
+      {:error, {:payload_conversion, message}} ->
+        failure = %Temporalex.Failure.ApplicationError{
+          message: message,
+          type: "UnencodableActivityResult",
+          retryable?: false
+        }
+
+        :ok =
+          state.backend.complete_activity_task(state.backend_state, %{
+            completion
+            | result: {:error, failure}
+          })
+
+        state
+
+      {:error, reason} ->
+        raise "backend activity completion failed: #{inspect(reason)}"
     end
   end
 

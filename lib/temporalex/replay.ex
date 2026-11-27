@@ -25,8 +25,11 @@ defmodule Temporalex.Replay do
   nothing. Notable not-yet-supported: patch markers, child workflows,
   updates, continue-as-new, local activities.
 
-  Activity inputs are compared as decoded terms (ETF payloads compare
-  exactly; a lossy codec could round-trip differently). Only the first
+  Payloads decode with the `payload_codec:` option, `:json` by default, as
+  in the worker. Pass `payload_codec: :etf` for a history its workflows wrote
+  with ETF. Activity inputs are compared the way the codec records them: the
+  code's input is encoded and decoded before the comparison, so an atom that
+  JSON records as a string still matches. Only the first
   workflow-input payload is used — Temporalex workflows take one input
   term; multi-payload starts from non-Elixir clients are truncated to it.
 
@@ -71,7 +74,8 @@ defmodule Temporalex.Replay do
   Replays `history` against the current code of one of `workflows:`.
 
   The module is resolved by the recorded workflow type (respecting `name:`
-  overrides). Returns `:ok` when every recorded decision matches what the
+  overrides). `payload_codec:` (`:json` by default, or `:etf`) must match the
+  codec the recorded workflows ran with. Returns `:ok` when every recorded decision matches what the
   current code decides, `{:error, {:nondeterminism, detail}}` on divergence,
   and `{:error, {:unsupported_event, type, event_id}}` for history the
   replayer cannot yet drive.
@@ -80,12 +84,14 @@ defmodule Temporalex.Replay do
   def replay(%History{events: events}, opts) when is_list(opts) do
     workflows = Keyword.fetch!(opts, :workflows)
 
-    with {:ok, started, rest} <- pop_started(events),
-         {:ok, module} <- resolve_module(workflows, started),
-         {:ok, input} <- decode_input(started),
-         {:ok, run} <- Runner.start_workflow(module, input, safe_mode: :fail) do
-      drive(rest, run, %{activities: %{}, timers: %{}})
-    end
+    PayloadConverter.with_codec(Keyword.get(opts, :payload_codec, :json), fn ->
+      with {:ok, started, rest} <- pop_started(events),
+           {:ok, module} <- resolve_module(workflows, started),
+           {:ok, input} <- decode_input(started),
+           {:ok, run} <- Runner.start_workflow(module, input, safe_mode: :fail) do
+        drive(rest, run, %{activities: %{}, timers: %{}})
+      end
+    end)
   end
 
   ## Event loop — each recorded event either consumes a command the current
@@ -117,17 +123,16 @@ defmodule Temporalex.Replay do
   defp step(:activity_task_scheduled, %Event{} = event, run, refs) do
     with {:ok, recorded_type} <- required(event, :activity_type),
          {:ok, recorded_input} <- decode_payloads(event.attributes[:input]) do
-      case Runner.pop_next_activity(run, type: recorded_type, input: recorded_input) do
-        {:ok, activity} ->
-          {:cont, put_in(refs.activities[event.id], activity)}
+      expected =
+        "expected the code to schedule activity #{recorded_type} " <>
+          "with input #{inspect(recorded_input, limit: 5)}"
 
-        {:error, detail} ->
-          nondeterminism(
-            event,
-            "expected the code to schedule activity #{recorded_type} " <>
-              "with input #{inspect(recorded_input, limit: 5)}",
-            detail
-          )
+      with {:ok, activity} <- Runner.pop_next_activity(run, type: recorded_type),
+           {:ok, ^recorded_input} <- as_recorded(activity.input) do
+        {:cont, put_in(refs.activities[event.id], activity)}
+      else
+        {:ok, code_input} -> nondeterminism(event, expected, code_input)
+        {:error, detail} -> nondeterminism(event, expected, detail)
       end
     end
   end
@@ -273,6 +278,12 @@ defmodule Temporalex.Replay do
 
   defp decode_payloads(%{payloads: payloads}), do: PayloadConverter.payloads_to_terms(payloads)
   defp decode_payloads(_), do: {:ok, []}
+
+  defp as_recorded(terms) do
+    terms
+    |> PayloadConverter.term_to_payloads_list()
+    |> PayloadConverter.payloads_to_terms()
+  end
 
   defp take_activity(refs, %Event{} = event, key) do
     scheduled_id = event.attributes[key]

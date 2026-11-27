@@ -38,7 +38,7 @@ defmodule Temporalex.Native do
 
   def create_runtime(_telemetry_opts), do: :erlang.nif_error(:nif_not_loaded)
 
-  def connect(_runtime, _url, _api_key, _headers, _pid),
+  def connect(_runtime, _url, _api_key, _headers, _payload_codec, _pid),
     do: :erlang.nif_error(:nif_not_loaded)
 
   def start_worker(

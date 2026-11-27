@@ -256,6 +256,7 @@ defmodule Temporalex.TemporalCoreIntegrationTest do
         Temporalex.Client.start_link(
           name: client_name,
           backend: Temporalex.Backend.TemporalCore,
+          payload_codec: :etf,
           target: temporal.target,
           namespace: "default",
           task_queue: task_queue,

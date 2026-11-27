@@ -194,14 +194,16 @@ Immediate validation failures send through the NIF caller environment. Tokio tas
 
 ## Payload Conversion
 
-The native backend uses ETF payloads:
+`Temporalex.Backend.TemporalCore.PayloadConverter` encodes every payload, for the worker and for the client; the NIF receives encoded payloads and carries their bytes. Worker payloads decode in Elixir. Client results decode in the NIF, with the same rules, from the codec the client connected with.
 
-```elixir
-:erlang.term_to_binary(term)
-:erlang.binary_to_term(binary)
-```
+| `payload_codec:` | Encodes as | Decodes |
+|---|---|---|
+| `:json` (default) | `json/plain`. A value JSON cannot hold is an error, never an ETF fallback. | `json/plain` only. ETF is refused. |
+| `:etf` | `binary/erlang-eterm`, with `:erlang.term_to_binary/1` | `json/plain`, and ETF with `:erlang.binary_to_term(binary, [:safe])` |
 
-No `[:safe]` option is used in v1. No pluggable converter layer exists in v1.
+A payload without an `encoding` is treated as ETF. Any other encoding is refused by name. `[:safe]` refuses atoms the node does not know and functions, but not structs, so `:etf` is only for a namespace that nothing but trusted Elixir services can write to.
+
+An encode failure in a completion fails that workflow task, or that activity attempt as a non-retryable `UnencodableActivityResult`. Failure details the SDK adds itself, such as a raised exception or an exit reason, fall back to their `inspect/2` string under `:json`, so reporting a failure never fails. No pluggable converter layer exists.
 
 ## Codec Placement
 

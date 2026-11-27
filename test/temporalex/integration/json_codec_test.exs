@@ -28,6 +28,12 @@ defmodule Temporalex.JsonCodecIntegrationTest do
     end
   end
 
+  defmodule AtomResultWorkflow do
+    use Temporalex.Workflow
+
+    def run(_input), do: {:ok, :done}
+  end
+
   defp temporal_available? do
     case :gen_tcp.connect(
            String.to_charlist(Server.host()),
@@ -136,6 +142,58 @@ defmodule Temporalex.JsonCodecIntegrationTest do
     # The CLI output should contain the JSON representation of the value.
     assert output =~ "echoed"
     assert output =~ "from-cli-test"
+  end
+
+  test "a value JSON cannot hold is refused before it leaves the client", %{client: client} do
+    assert {:error,
+            %Temporalex.TransportError{
+              category: :payload_conversion,
+              message: "payload_codec :json cannot encode {:tagged, 1}"
+            }} =
+             Temporalex.Client.start_workflow(client, SimpleWorkflow, {:tagged, 1},
+               workflow_id: "json-refused-#{System.unique_integer([:positive])}",
+               timeout: 10_000
+             )
+  end
+
+  test "the :json client refuses a result an :etf worker wrote", %{client: json_client} do
+    etf_client = Module.concat(__MODULE__, :"EtfClient#{System.unique_integer([:positive])}")
+    task_queue = "etf-writer-#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Temporalex.Client,
+       name: etf_client,
+       backend: Temporalex.Backend.TemporalCore,
+       target: Server.target(),
+       namespace: Temporalex.TestSupport.Namespace.name(),
+       task_queue: task_queue,
+       payload_codec: :etf},
+      id: :etf_client
+    )
+
+    start_supervised!(
+      {Temporalex.Worker,
+       name: Module.concat(etf_client, Worker),
+       client: etf_client,
+       task_queue: task_queue,
+       workflows: [AtomResultWorkflow],
+       activities: []},
+      id: :etf_worker
+    )
+
+    {:ok, handle} =
+      Temporalex.Client.start_workflow(etf_client, AtomResultWorkflow, nil,
+        workflow_id: "etf-result-#{System.unique_integer([:positive])}",
+        timeout: 10_000
+      )
+
+    assert {:ok, :done} = Temporalex.Client.get_result(handle, timeout: 15_000)
+
+    assert {:error,
+            %Temporalex.TransportError{
+              category: :payload_conversion,
+              message: "refusing an ETF payload: payload_codec is :json, which never decodes ETF"
+            }} = Temporalex.Client.get_result(%{handle | client: json_client}, timeout: 15_000)
   end
 
   defp wait_for_completion(workflow_id) do

@@ -80,6 +80,7 @@ defmodule Temporalex.FailFlagshipIntegrationTest do
       Temporalex.Client.start_link(
         name: client,
         backend: Temporalex.Backend.TemporalCore,
+        payload_codec: :etf,
         target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name()
       )

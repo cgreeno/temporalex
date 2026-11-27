@@ -102,6 +102,7 @@ defmodule Temporalex.SurfaceIntegrationTest do
       Temporalex.Client.start_link(
         name: client,
         backend: Temporalex.Backend.TemporalCore,
+        payload_codec: :etf,
         target: Server.target(),
         namespace: Temporalex.TestSupport.Namespace.name()
       )
@@ -146,6 +147,7 @@ defmodule Temporalex.SurfaceIntegrationTest do
       {:ok, client_pid} =
         Temporalex.Client.start_link(
           backend: Temporalex.Backend.TemporalCore,
+          payload_codec: :etf,
           target: Server.target(),
           namespace: Temporalex.TestSupport.Namespace.name()
         )

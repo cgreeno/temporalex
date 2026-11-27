@@ -306,22 +306,18 @@ defmodule Temporalex.BackendExtrasTest do
   # ─────────────────────────── JSON payload codec ──────────────────────────
 
   describe "payload_codec option" do
-    test "defaults to ETF when no codec option is passed" do
-      # ETF-encoded payload has the bytes `binary/erlang-eterm` in its metadata
-      # block. JSON-encoded would have `json/plain`. Both are visible in the
-      # encoded protobuf even after the protobuf framing — the strings are
-      # plainly present.
+    test "defaults to JSON when no codec option is passed" do
       assert {:ok, bytes} =
                Codec.workflow_completion_to_bytes(
                  %Completion{
-                   run_id: "etf-default",
+                   run_id: "json-default",
                    status: {:ok, [%Command.CompleteWorkflow{result: %{"value" => 42}}]}
                  },
                  task_queue: "q"
                )
 
-      assert bytes_contain?(bytes, "binary/erlang-eterm")
-      refute bytes_contain?(bytes, "json/plain")
+      assert bytes_contain?(bytes, "json/plain")
+      refute bytes_contain?(bytes, "binary/erlang-eterm")
     end
 
     test ":etf codec produces ETF-encoded payloads" do
@@ -480,7 +476,7 @@ defmodule Temporalex.BackendExtrasTest do
         # Mirror the validation that runs inside start_worker without
         # actually spinning up a worker tree.
         codec =
-          case Keyword.get([payload_codec: :bogus], :payload_codec, :etf) do
+          case Keyword.get([payload_codec: :bogus], :payload_codec, :json) do
             :etf -> :etf
             :json -> :json
             other -> raise ArgumentError, "invalid :payload_codec #{inspect(other)}"

@@ -10,6 +10,7 @@ defmodule Temporalex.Backend.TemporalCore do
   @behaviour Temporalex.Backend
 
   alias Temporalex.Backend.TemporalCore.Codec
+  alias Temporalex.Backend.TemporalCore.PayloadConverter
   alias Temporalex.Backend.TemporalCore.PollerBridge
   alias Temporalex.Core.ActivityCompletion
   alias Temporalex.Core.Completion
@@ -31,7 +32,7 @@ defmodule Temporalex.Backend.TemporalCore do
       :completion_timeout,
       :shutdown_timeout,
       :workflow_result_timeout,
-      payload_codec: :etf
+      payload_codec: :json
     ]
   end
 
@@ -48,7 +49,7 @@ defmodule Temporalex.Backend.TemporalCore do
       :task_queue,
       :start_timeout,
       :shutdown_timeout,
-      payload_codec: :etf
+      payload_codec: :json
     ]
   end
 
@@ -67,7 +68,7 @@ defmodule Temporalex.Backend.TemporalCore do
   @default_workflow_result_timeout 60_000
 
   defp payload_codec_from_opts(opts) do
-    case Keyword.get(opts, :payload_codec, :etf) do
+    case Keyword.get(opts, :payload_codec, :json) do
       :etf ->
         :etf
 
@@ -85,10 +86,18 @@ defmodule Temporalex.Backend.TemporalCore do
     namespace = Keyword.get(opts, :namespace, @default_namespace)
     task_queue = Keyword.get(opts, :task_queue, @default_task_queue)
     connect_timeout = Keyword.get(opts, :connect_timeout, @default_connect_timeout)
+    payload_codec = payload_codec_from_opts(opts)
 
     with {:ok, runtime} <- Native.create_runtime(telemetry_opts(opts)),
          :ok <-
-           Native.connect(runtime, target, Keyword.get(opts, :api_key), headers(opts), owner_pid),
+           Native.connect(
+             runtime,
+             target,
+             Keyword.get(opts, :api_key),
+             headers(opts),
+             payload_codec,
+             owner_pid
+           ),
          {:ok, client} <- await_connection(connect_timeout) do
       {:ok,
        %ClientState{
@@ -104,7 +113,7 @@ defmodule Temporalex.Backend.TemporalCore do
          shutdown_timeout: Keyword.get(opts, :shutdown_timeout, @default_shutdown_timeout),
          workflow_result_timeout:
            Keyword.get(opts, :workflow_result_timeout, @default_workflow_result_timeout),
-         payload_codec: payload_codec_from_opts(opts)
+         payload_codec: payload_codec
        }}
     else
       {:error, reason} ->
@@ -121,7 +130,7 @@ defmodule Temporalex.Backend.TemporalCore do
     task_queue = Keyword.get(opts, :task_queue, client_state.task_queue)
     start_timeout = Keyword.get(opts, :start_timeout, @default_start_timeout)
 
-    {:ok, poller_bridge} = PollerBridge.start(owner_pid)
+    {:ok, poller_bridge} = PollerBridge.start(owner_pid, client_state.payload_codec)
 
     result =
       with :ok <-
@@ -187,7 +196,10 @@ defmodule Temporalex.Backend.TemporalCore do
   @impl Temporalex.Backend
   def record_activity_heartbeat(%WorkerState{} = state, task_token, details)
       when is_binary(task_token) do
-    with {:ok, bytes} <- Codec.activity_heartbeat_to_bytes(task_token, details) do
+    with {:ok, bytes} <-
+           Codec.activity_heartbeat_to_bytes(task_token, details,
+             payload_codec: state.payload_codec
+           ) do
       Native.record_activity_heartbeat(state.worker, bytes)
     end
   end
@@ -241,7 +253,8 @@ defmodule Temporalex.Backend.TemporalCore do
     timeout = Keyword.get(opts, :timeout, state.start_timeout)
     ref = make_ref()
 
-    with :ok <-
+    with {:ok, input, native_opts} <- encode_start(state, input, opts),
+         :ok <-
            Native.start_workflow(
              state.client,
              state.namespace,
@@ -249,7 +262,7 @@ defmodule Temporalex.Backend.TemporalCore do
              workflow_type,
              task_queue,
              input,
-             native_start_opts(opts),
+             native_opts,
              self(),
              ref
            ) do
@@ -282,15 +295,16 @@ defmodule Temporalex.Backend.TemporalCore do
     timeout = Keyword.get(opts, :timeout, state.completion_timeout)
     ref = make_ref()
 
-    with :ok <-
+    with {:ok, args, native_opts} <- encode_call(state, args, opts),
+         :ok <-
            Native.signal_workflow(
              state.client,
              state.namespace,
              workflow_id,
              empty_to_nil(run_id),
              signal_name,
-             List.wrap(args),
-             native_headers_opts(opts),
+             args,
+             native_opts,
              self(),
              ref
            ) do
@@ -304,15 +318,16 @@ defmodule Temporalex.Backend.TemporalCore do
     timeout = Keyword.get(opts, :timeout, state.completion_timeout)
     ref = make_ref()
 
-    with :ok <-
+    with {:ok, args, native_opts} <- encode_call(state, args, opts),
+         :ok <-
            Native.query_workflow(
              state.client,
              state.namespace,
              workflow_id,
              empty_to_nil(run_id),
              query_name,
-             List.wrap(args),
-             native_headers_opts(opts),
+             args,
+             native_opts,
              self(),
              ref
            ) do
@@ -326,15 +341,16 @@ defmodule Temporalex.Backend.TemporalCore do
     timeout = Keyword.get(opts, :timeout, state.workflow_result_timeout)
     ref = make_ref()
 
-    with :ok <-
+    with {:ok, args, native_opts} <- encode_call(state, args, opts),
+         :ok <-
            Native.update_workflow(
              state.client,
              state.namespace,
              workflow_id,
              empty_to_nil(run_id),
              update_name,
-             List.wrap(args),
-             native_headers_opts(opts),
+             args,
+             native_opts,
              self(),
              ref
            ) do
@@ -369,14 +385,15 @@ defmodule Temporalex.Backend.TemporalCore do
     timeout = Keyword.get(opts, :timeout, state.completion_timeout)
     ref = make_ref()
 
-    with :ok <-
+    with {:ok, details} <- encode_details(state, Keyword.get(opts, :details)),
+         :ok <-
            Native.terminate_workflow(
              state.client,
              state.namespace,
              workflow_id,
              empty_to_nil(run_id),
              to_string(Keyword.get(opts, :reason, "")),
-             Keyword.get(opts, :details),
+             details,
              self(),
              ref
            ) do
@@ -497,10 +514,30 @@ defmodule Temporalex.Backend.TemporalCore do
   # can fail when the Start surface and this list drift apart.
   def __native_start_opt_keys__, do: @native_start_opt_keys
 
+  defp encode_start(state, input, opts) do
+    PayloadConverter.with_codec(state.payload_codec, fn ->
+      {:ok, PayloadConverter.term_to_payload(input), native_start_opts(opts)}
+    end)
+  end
+
+  defp encode_call(state, args, opts) do
+    PayloadConverter.with_codec(state.payload_codec, fn ->
+      {:ok, PayloadConverter.term_to_payloads_list(args), native_headers_opts(opts)}
+    end)
+  end
+
+  defp encode_details(_state, nil), do: {:ok, nil}
+
+  defp encode_details(state, details) do
+    PayloadConverter.with_codec(state.payload_codec, fn ->
+      {:ok, PayloadConverter.term_to_payload(details)}
+    end)
+  end
+
   defp native_start_opts(opts) do
     opts
     |> Keyword.take(@native_start_opt_keys)
-    |> normalize_native_opts()
+    |> encode_native_opts()
   end
 
   defp native_headers_opts(opts) do
@@ -512,22 +549,36 @@ defmodule Temporalex.Backend.TemporalCore do
       :query_reject_condition,
       :reject_condition
     ])
-    |> normalize_native_opts()
+    |> encode_native_opts()
   end
 
   defp client_monitor(opts) do
     Keyword.get(opts, :client_monitor)
   end
 
-  defp normalize_native_opts(opts) do
+  defp encode_native_opts(opts) do
     opts
-    |> Keyword.update(:headers, %{}, &normalize_header_payload_keys/1)
-    |> Keyword.update(:search_attributes, nil, &normalize_header_payload_keys/1)
+    |> Keyword.update(:headers, %{}, &encode_headers/1)
+    |> Keyword.update(:search_attributes, nil, &stringify_keys/1)
+    |> Keyword.replace_lazy(:start_signal, &encode_start_signal/1)
   end
 
-  defp normalize_header_payload_keys(nil), do: %{}
+  defp encode_headers(nil), do: %{}
 
-  defp normalize_header_payload_keys(headers) do
+  defp encode_headers(headers),
+    do:
+      Map.new(headers, fn {key, value} ->
+        {to_string(key), PayloadConverter.term_to_payload(value)}
+      end)
+
+  defp encode_start_signal(nil), do: nil
+
+  defp encode_start_signal(signal),
+    do: Keyword.replace_lazy(signal, :args, &PayloadConverter.term_to_payloads_list/1)
+
+  defp stringify_keys(nil), do: %{}
+
+  defp stringify_keys(headers) do
     Map.new(headers, fn {key, value} -> {to_string(key), value} end)
   end
 
