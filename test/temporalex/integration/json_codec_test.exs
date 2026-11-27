@@ -28,6 +28,15 @@ defmodule Temporalex.JsonCodecIntegrationTest do
     end
   end
 
+  defmodule WaitingWorkflow do
+    use Temporalex.Workflow
+
+    def run(_input) do
+      {:ok, args} = Temporalex.Workflow.API.wait_for_signal("go")
+      {:ok, %{"args" => args}}
+    end
+  end
+
   defmodule AtomResultWorkflow do
     use Temporalex.Workflow
 
@@ -75,7 +84,7 @@ defmodule Temporalex.JsonCodecIntegrationTest do
         name: worker_name,
         client: client_name,
         task_queue: task_queue,
-        workflows: [SimpleWorkflow],
+        workflows: [SimpleWorkflow, WaitingWorkflow],
         activities: []
       )
 
@@ -156,6 +165,45 @@ defmodule Temporalex.JsonCodecIntegrationTest do
              )
   end
 
+  @tag :capture_log
+  test "an ETF signal fails that workflow's task, and the :json worker keeps running", %{
+    client: json_client,
+    worker: worker
+  } do
+    server = Temporalex.Worker.server_pid(worker)
+    etf_client = Module.concat(__MODULE__, :"EtfSignaller#{System.unique_integer([:positive])}")
+
+    start_supervised!(
+      {Temporalex.Client,
+       name: etf_client,
+       backend: Temporalex.Backend.TemporalCore,
+       target: Server.target(),
+       namespace: Temporalex.TestSupport.Namespace.name(),
+       payload_codec: :etf},
+      id: :etf_signaller
+    )
+
+    {:ok, handle} =
+      Temporalex.Client.start_workflow(json_client, WaitingWorkflow, nil,
+        workflow_id: "etf-signal-#{System.unique_integer([:positive])}",
+        timeout: 10_000
+      )
+
+    :ok = Temporalex.Client.signal_workflow(%{handle | client: etf_client}, "go", [:go])
+
+    assert :ok = await_event(handle, :workflow_task_failed)
+    assert Temporalex.Worker.server_pid(worker) == server
+
+    {:ok, after_handle} =
+      Temporalex.Client.start_workflow(json_client, SimpleWorkflow, "after",
+        workflow_id: "after-etf-signal-#{System.unique_integer([:positive])}",
+        timeout: 10_000
+      )
+
+    assert {:ok, %{"echoed" => "after"}} =
+             Temporalex.Client.get_result(after_handle, timeout: 15_000)
+  end
+
   test "the :json client refuses a result an :etf worker wrote", %{client: json_client} do
     etf_client = Module.concat(__MODULE__, :"EtfClient#{System.unique_integer([:positive])}")
     task_queue = "etf-writer-#{System.unique_integer([:positive])}"
@@ -194,6 +242,27 @@ defmodule Temporalex.JsonCodecIntegrationTest do
               category: :payload_conversion,
               message: "refusing an ETF payload: payload_codec is :json, which never decodes ETF"
             }} = Temporalex.Client.get_result(%{handle | client: json_client}, timeout: 15_000)
+  end
+
+  defp await_event(handle, type) do
+    deadline = System.monotonic_time(:millisecond) + 15_000
+    do_await_event(handle, type, deadline)
+  end
+
+  defp do_await_event(handle, type, deadline) do
+    {:ok, history} = Temporalex.Client.fetch_workflow_history(handle)
+
+    cond do
+      Enum.any?(history.events, &(&1.type == type)) ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:error, {:no_event, type, Enum.map(history.events, & &1.type)}}
+
+      true ->
+        Process.sleep(200)
+        do_await_event(handle, type, deadline)
+    end
   end
 
   defp wait_for_completion(workflow_id) do

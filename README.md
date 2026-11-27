@@ -377,7 +377,7 @@ queue, one source.
 
 | Codec | Behaviour |
 | --- | --- |
-| `:json` (default) | Payloads are `json/plain`, readable by the `temporal` CLI, the Web UI and other SDKs. Atoms become strings. A value JSON cannot hold, such as a tuple, fails the workflow task or activity attempt that produced it, with a message naming the value. Payloads in any other encoding, ETF included, are refused. |
+| `:json` (default) | Payloads are `json/plain`, readable by the `temporal` CLI, the Web UI and other SDKs. Atoms become strings. A value JSON cannot hold, such as a tuple, fails the workflow task or activity attempt that produced it, with a message naming the value. Payloads in any other encoding, ETF included, are refused, and the workflow task or activity that received one fails. |
 | `:etf` | Preserves full Elixir term fidelity, structs and tuples included. |
 
 Use `:etf` only on a namespace that nothing but your own Elixir services can

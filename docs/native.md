@@ -203,7 +203,7 @@ Immediate validation failures send through the NIF caller environment. Tokio tas
 
 A payload without an `encoding` is treated as ETF. Any other encoding is refused by name. `[:safe]` refuses atoms the node does not know and functions, but not structs, so `:etf` is only for a namespace that nothing but trusted Elixir services can write to.
 
-An encode failure in a completion fails that workflow task, or that activity attempt as a non-retryable `UnencodableActivityResult`. Failure details the SDK adds itself, such as a raised exception or an exit reason, fall back to their `inspect/2` string under `:json`, so reporting a failure never fails. No pluggable converter layer exists.
+An encode failure in a completion fails that workflow task, or that activity attempt as a non-retryable `UnencodableActivityResult`. A decode failure does the same for the task that carried the payload: the workflow task fails, or the activity fails as a non-retryable `UndecodableActivityInput`. Only bytes that are not a protobuf at all stop the worker, because they name no task. Failure details the SDK adds itself, such as a raised exception or an exit reason, fall back to their `inspect/2` string under `:json`, so reporting a failure never fails. No pluggable converter layer exists.
 
 ## Codec Placement
 

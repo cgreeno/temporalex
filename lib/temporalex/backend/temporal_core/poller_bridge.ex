@@ -53,6 +53,7 @@ defmodule Temporalex.Backend.TemporalCore.PollerBridge do
   defp forward_decode(owner_pid, tag, decode) do
     case decode.() do
       {:ok, value} -> send(owner_pid, {tag, value})
+      {:error, {:undecodable, _id, _reason} = undecodable} -> send(owner_pid, {tag, undecodable})
       {:error, reason} -> send(owner_pid, {:backend_error, reason})
     end
   end

@@ -41,6 +41,16 @@
   the way the codec records them, so an atom that JSON stores as a string
   still matches.
 
+### Fixed
+
+- **A payload a worker cannot decode fails that one task, not the worker.**
+  It stopped the whole worker, and the supervisor restarted it into the same
+  task. A workflow activation that does not decode now fails that workflow
+  task, which retries until the payload or the code changes. An activity task
+  that does not decode fails that activity as a non-retryable
+  `UndecodableActivityInput`. Both log a warning. Bytes that are not a
+  protobuf at all still stop the worker, because they name no task.
+
 ## 0.7.2 — 2026-11-25
 
 ### Changed
