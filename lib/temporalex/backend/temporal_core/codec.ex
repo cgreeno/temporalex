@@ -137,7 +137,7 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
   def workflow_activation_from_bytes(bytes, opts \\ []) when is_binary(bytes) do
     PayloadConverter.with_codec(payload_codec(opts), fn ->
       with {:ok, proto} <- decode(@workflow_activation, bytes, defaults: true) do
-        workflow_activation_from_proto(proto)
+        proto |> workflow_activation_from_proto() |> undecodable(Map.get(proto, :run_id, ""))
       end
     end)
   end
@@ -145,10 +145,13 @@ defmodule Temporalex.Backend.TemporalCore.Codec do
   def activity_task_from_bytes(bytes, opts \\ []) when is_binary(bytes) do
     PayloadConverter.with_codec(payload_codec(opts), fn ->
       with {:ok, proto} <- decode(@activity_task, bytes, defaults: true) do
-        activity_task_from_proto(proto)
+        proto |> activity_task_from_proto() |> undecodable(Map.get(proto, :task_token, ""))
       end
     end)
   end
+
+  defp undecodable({:error, reason}, id), do: {:error, {:undecodable, id, reason}}
+  defp undecodable(decoded, _id), do: decoded
 
   def workflow_completion_to_bytes(%Completion{} = completion, opts) do
     task_queue = Keyword.fetch!(opts, :task_queue)

@@ -1,8 +1,11 @@
 defmodule Temporalex.PayloadCodecTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Temporalex.Backend.TemporalCore.Codec
   alias Temporalex.Backend.TemporalCore.PayloadConverter
+  alias Temporalex.Backend.TemporalCore.PollerBridge
   alias Temporalex.Backend.TemporalCore.Proto.Schema
   alias Temporalex.Backend.Test, as: TestBackend
   alias Temporalex.Core.Activation
@@ -111,11 +114,64 @@ defmodule Temporalex.PayloadCodecTest do
           :"coresdk.workflow_activation.WorkflowActivation"
         )
 
-      assert {:error, "refusing an ETF payload" <> _} =
+      assert {:error, {:undecodable, "run-1", "refusing an ETF payload" <> _}} =
                Codec.workflow_activation_from_bytes(bytes)
 
       assert {:ok, %Activation{jobs: [%Job.SignalReceived{name: "go", args: [:go]}]}} =
                Codec.workflow_activation_from_bytes(bytes, payload_codec: :etf)
+    end
+  end
+
+  describe "a task whose payload does not decode" do
+    test "an activity task reports its task token, so only that activity fails" do
+      {:ok, bytes} =
+        Schema.encode(
+          %{
+            task_token: <<1, 2, 3>>,
+            variant:
+              {:start,
+               %{
+                 workflow_namespace: "default",
+                 workflow_type: "W",
+                 activity_id: "a-1",
+                 activity_type: "A",
+                 input: [etf_payload(:go)],
+                 attempt: 1,
+                 is_local: false
+               }}
+          },
+          :"coresdk.activity_task.ActivityTask"
+        )
+
+      assert {:error, {:undecodable, <<1, 2, 3>>, "refusing an ETF payload" <> _}} =
+               Codec.activity_task_from_bytes(bytes)
+    end
+
+    test "bytes that are not a protobuf name no task, and stay a backend error" do
+      assert {:error, reason} = Codec.workflow_activation_from_bytes(<<255, 255, 255>>)
+      refute match?({:undecodable, _, _}, reason)
+    end
+
+    test "the poller bridge hands the worker the run to fail, not a backend error" do
+      {:ok, bridge} = PollerBridge.start(self(), :json)
+
+      {:ok, bytes} =
+        Schema.encode(
+          %{
+            run_id: "run-poison",
+            jobs: [
+              %{variant: {:signal_workflow, %{signal_name: "go", input: [etf_payload(:go)]}}}
+            ]
+          },
+          :"coresdk.workflow_activation.WorkflowActivation"
+        )
+
+      send(bridge, {:workflow_activation, bytes})
+
+      assert_receive {:workflow_activation,
+                      {:undecodable, "run-poison", "refusing an ETF payload" <> _}}
+
+      send(bridge, :stop)
     end
   end
 
@@ -147,7 +203,7 @@ defmodule Temporalex.PayloadCodecTest do
     end
   end
 
-  describe "a value :json cannot encode, on a worker" do
+  describe "on a worker" do
     setup do
       name = Module.concat(__MODULE__, :"Worker#{System.unique_integer([:positive])}")
       client = Module.concat(__MODULE__, :"Client#{System.unique_integer([:positive])}")
@@ -169,7 +225,8 @@ defmodule Temporalex.PayloadCodecTest do
       %{worker: name}
     end
 
-    test "fails that workflow task, and the worker keeps serving other runs", %{worker: worker} do
+    test "a result :json cannot encode fails that workflow task, and the worker serves on",
+         %{worker: worker} do
       start_run(worker, "run-tuple", TupleResultWorkflow, "x")
 
       assert %Completion{
@@ -182,7 +239,8 @@ defmodule Temporalex.PayloadCodecTest do
                TestBackend.fetch_workflow_completion(worker, "run-map")
     end
 
-    test "fails that activity as a non-retryable UnencodableActivityResult", %{worker: worker} do
+    test "an activity result :json cannot encode fails as UnencodableActivityResult",
+         %{worker: worker} do
       :ok =
         TestBackend.send_activity_task(worker, %Temporalex.Core.ActivityTask{
           task_token: "tok-tuple",
@@ -201,6 +259,48 @@ defmodule Temporalex.PayloadCodecTest do
                     message: ~s(payload_codec :json cannot encode {:tagged, "x"})
                   }}
              } = TestBackend.fetch_activity_completion(worker, "tok-tuple")
+    end
+
+    test "an activation that does not decode fails that workflow task, and the worker serves on",
+         %{worker: worker} do
+      server = Temporalex.Worker.server_pid(worker)
+
+      log =
+        capture_log(fn ->
+          send(server, {:workflow_activation, {:undecodable, "run-poison", "refusing it"}})
+
+          assert %Completion{status: {:failed, "refusing it", _opts}} =
+                   TestBackend.fetch_workflow_completion(worker, "run-poison")
+        end)
+
+      assert log =~ "its activation does not decode: refusing it"
+
+      start_run(worker, "run-after", MapResultWorkflow, "y")
+
+      assert %Completion{status: {:ok, [_complete]}} =
+               TestBackend.fetch_workflow_completion(worker, "run-after")
+
+      assert Temporalex.Worker.server_pid(worker) == server
+    end
+
+    test "an activity task that does not decode fails as UndecodableActivityInput",
+         %{worker: worker} do
+      capture_log(fn ->
+        send(
+          Temporalex.Worker.server_pid(worker),
+          {:activity_task, {:undecodable, "tok-poison", "refusing it"}}
+        )
+
+        assert %ActivityCompletion{
+                 result:
+                   {:error,
+                    %ApplicationError{
+                      type: "UndecodableActivityInput",
+                      retryable?: false,
+                      message: "refusing it"
+                    }}
+               } = TestBackend.fetch_activity_completion(worker, "tok-poison")
+      end)
     end
   end
 

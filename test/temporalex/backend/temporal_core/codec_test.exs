@@ -246,7 +246,9 @@ defmodule Temporalex.Backend.TemporalCore.CodecTest do
         ]
       })
 
-    assert {:error, "payload is not ETF encoded, or names an atom this node does not know"} =
+    assert {:error,
+            {:undecodable, "run-1",
+             "payload is not ETF encoded, or names an atom this node does not know"}} =
              Codec.workflow_activation_from_bytes(bytes, payload_codec: :etf)
   end
 

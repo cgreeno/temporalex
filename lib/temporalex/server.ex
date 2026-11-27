@@ -112,8 +112,29 @@ defmodule Temporalex.Server do
     {:noreply, handle_workflow_activation(activation, state)}
   end
 
+  def handle_info({:workflow_activation, {:undecodable, run_id, reason}}, state) do
+    Logger.warning("failing the workflow task: its activation does not decode: #{reason}",
+      run_id: run_id
+    )
+
+    {:noreply, submit_workflow_completion(state, failed_completion(run_id, reason))}
+  end
+
   def handle_info({:activity_task, %ActivityTask{} = task}, state) do
     {:noreply, handle_activity_task(task, state)}
+  end
+
+  def handle_info({:activity_task, {:undecodable, task_token, reason}}, state) do
+    Logger.warning("failing the activity: its task does not decode: #{reason}")
+
+    failure = %Temporalex.Failure.ApplicationError{
+      message: reason,
+      type: "UndecodableActivityInput",
+      retryable?: false
+    }
+
+    completion = %ActivityCompletion{task_token: task_token, result: {:error, failure}}
+    {:noreply, submit_activity_completion(state, completion)}
   end
 
   def handle_info({ref, result}, state) when is_reference(ref) do
